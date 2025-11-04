@@ -1,0 +1,37 @@
+# config/mapper_params_online_async.yaml
+slam_toolbox:
+  ros__parameters:
+    # Frames / tópico
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+    scan_topic: /hardware/robotino/scan
+
+    # Modo
+    mode: mapping
+
+    # Frecuencia / tiempos (URG ≈ 10 Hz → 0.1 s por barrido)
+    transform_publish_period: 0.05
+    map_update_interval: 0.4
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+    minimum_time_interval: 0.09      # procesa como máx. ~11 Hz
+
+    # Resolución del mapa (celdas)
+    # URG tiene ~0.36° por rayo → a 4 m ~2.5 cm entre rayos; 3 cm de celda funciona bien
+    resolution: 0.03
+
+    # Filtrado por rango (propio del URG)
+    min_laser_range: 0.06            # 6 cm: dentro de su zona de medición útil
+    max_laser_range: 4.0             # 4.0 m: zona de mejor precisión del URG
+
+    # Umbrales de movimiento para integrar escaneos (reduce ruido estático)
+    minimum_travel_distance: 0.08     # m
+    minimum_travel_heading: 0.05      # rad ~ 3°
+    use_scan_matching: true
+    do_loop_closing: true
+
+    # Opcionales (robustez del rasterizado del mapa)
+    min_pass_through: 1
+    occupancy_threshold: 0.55
+    scan_queue_size: 1
