@@ -20,8 +20,6 @@
   <arg name="point_cloud_topic" default="/$(var namespace)/depth_registered/rectified_points"/>
   <arg name="bumper_f_topic"    default="/$(var namespace)/bumper"/>
 
-
-
   <!-- ===== Feature toggles ===== -->
   <arg name="use_lidar" default="True"/>
   <arg name="use_sonars" default="False"/>
@@ -80,29 +78,59 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
-    <!-- particles/timing -->
-    <param name="min_particles" value="500"/>
-    <param name="max_particles" value="3000"/>
-    <param name="transform_tolerance" value="0.2"/>
 
-    <!-- frames (not namespaced) -->
+    <!-- === PARTICLES / TIEMPOS === -->
+    <param name="min_particles"        value="500"/>
+    <param name="max_particles"        value="3000"/>
+    <param name="pf_err"              value="0.05"/>
+    <param name="pf_z"                value="0.99"/>
+    <param name="update_min_d"        value="0.05"/>   <!-- 5 cm -->
+    <param name="update_min_a"        value="0.1"/>    <!-- ~5.7° -->
+    <param name="resample_interval"   value="1"/>
+    <param name="transform_tolerance" value="0.2"/>
+    <param name="save_pose_rate"      value="0.5"/>
+
+    <!-- === FRAMES (no namespaced) === -->
     <param name="global_frame_id" value="map"/>
     <param name="odom_frame_id"   value="odom"/>
     <param name="base_frame_id"   value="base_link"/>
     <param name="tf_broadcast"    value="true"/>
 
-    <!--param name="set_initial_pose" value="true"/-->
-    <!--param name="initial_pose" value="{x: 1.20, y: 3.40, z: 0.0, yaw: 1.57}"/-->
+    <!-- === MODELO DE LÁSER (URG-04LX-UG01) === -->
+    <param name="laser_min_range"           value="0.06"/>
+    <param name="laser_max_range"           value="3.8"/>
+    <param name="max_beams"                 value="60"/>
+    <param name="laser_model_type"          value="likelihood_field"/>
+    <param name="laser_likelihood_max_dist" value="2.0"/>
 
-    <!-- topics -->
-    <!--emap from="scan" to="$(var laser_scan_topic)"/-->
-    <!--emap from="odom" to="$(var odom_topic)"/-->
+    <param name="z_hit"       value="0.8"/>
+    <param name="z_short"     value="0.1"/>
+    <param name="z_max"       value="0.05"/>
+    <param name="z_rand"      value="0.05"/>
+    <param name="sigma_hit"   value="0.2"/>
+    <param name="lambda_short" value="0.1"/>
+
+    <param name="robot_model_type" value="nav2_amcl::OmniMotionModel"/>
+
+    <param name="alpha1" value="0.08"/>  
+    <param name="alpha2" value="0.06"/>  
+    <param name="alpha3" value="0.05"/>  
+    <param name="alpha4" value="0.05"/>  
+    <param name="alpha5" value="0.18"/>
+
+    <!-- === INITIAL POSE === -->
+    <param name="set_initial_pose" value="true"/>
+    <param name="initial_pose.x"   value="0.0"/>
+    <param name="initial_pose.y"   value="0.0"/>
+    <param name="initial_pose.z"   value="0.0"/>
+    <param name="initial_pose.yaw" value="0.0"/>
+
+    <!-- === TOPICS === -->
     <remap from="scan" to="/hardware/robotino/scan"/>
-    <remap from="odom" to="/hardware/robotino/odom"/>      
-
+    <remap from="odom" to="/hardware/robotino/odom"/>
 
     <!-- standard publications -->
-    <remap from="amcl_pose" to="$(var pose_topic)"/>
+    <remap from="amcl_pose"     to="$(var pose_topic)"/>
     <remap from="particle_cloud" to="particle_cloud"/>
   </node>
 
