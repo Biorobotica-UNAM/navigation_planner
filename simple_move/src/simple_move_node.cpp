@@ -112,7 +112,7 @@ public:
             std::bind(&SimpleMoveNode::callback_general_stop, this, std::placeholders::_1));
 
         sub_navCtrlStop_ = this->create_subscription<std_msgs::msg::Empty>(
-            make_name("/navigation/stop"), 
+            make_name("/stop_pot"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_navigation_stop, this, std::placeholders::_1));
 
@@ -144,12 +144,12 @@ public:
             std::bind(&SimpleMoveNode::callback_move_lateral, this, std::placeholders::_1));
 
         sub_collisionRisk_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/navigation/potential_fields/collision_risk"), 
+            make_name("/potential_fields/collision_risk"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_collision_risk, this, std::placeholders::_1));
 
         sub_rejectionForce_ = this->create_subscription<geometry_msgs::msg::Vector3>(
-            make_name("/navigation/potential_fields/pf_rejection_force"), 
+            make_name("/potential_fields/pf_rejection_force"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_rejection_force, this, std::placeholders::_1));
         
