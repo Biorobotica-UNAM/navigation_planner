@@ -2,8 +2,9 @@
 
   <!-- ===== Global args ===== -->
   <arg name="use_sim_time" default="false"/>
-  <arg name="namespace" default=""/>
+  <arg name="namespace_hardware" default=""/>
   <arg name="namespace_nav" default=""/>
+  <arg name="use_namespace" default="true"/>
 
   <!-- ===== Map server args ===== -->
   <arg name="static_map_file" default="$(find-pkg-share navigation_start)/maps/maps/lab2025/map.yaml"/>
@@ -12,13 +13,13 @@
   <!-- ===== Topic args (I/O) ===== -->
   <arg name="pose_topic" default="pose"/>
   <arg name="point_cloud_topic" default="camera/depth_registered/rectified_points"/>
-  <arg name="bumper_f_topic" default="/bumper"/>
+  <!--arg name="bumper_f_topic" default="/bumper"/-->
 
-  <arg name="laser_scan_topic"  default="/$(var namespace)/scan"/>
-  <arg name="odom_topic"        default="/$(var namespace)/odom"/>
-  <arg name="cmd_vel_topic"     default="/$(var namespace)/cmd_vel"/>
-  <arg name="point_cloud_topic" default="/$(var namespace)/depth_registered/rectified_points"/>
-  <arg name="bumper_f_topic"    default="/$(var namespace)/bumper"/>
+  <arg name="laser_scan_topic"  default="/$(var namespace_hardware)/base/scan"/>
+  <arg name="odom_topic"        default="/$(var namespace_hardware)/base/odom"/>
+  <arg name="cmd_vel_topic"     default="/$(var namespace_hardware)/base/cmd_vel"/>
+  <arg name="point_cloud_topic" default="/$(var namespace_hardware)/base/depth_registered/rectified_points"/>
+  <arg name="bumper_f_topic"    default="/$(var namespace_hardware)/base/bumper"/>
 
   <!-- ===== Feature toggles ===== -->
   <arg name="use_lidar" default="True"/>
@@ -126,8 +127,8 @@
     <param name="initial_pose.yaw" value="0.0"/>
 
     <!-- === TOPICS === -->
-    <remap from="scan" to="/hardware/robotino/scan"/>
-    <remap from="odom" to="/hardware/robotino/odom"/>
+    <remap from="scan" to="/hardware/base/scan"/>
+    <remap from="odom" to="/hardware/base/odom"/>
 
     <!-- standard publications -->
     <remap from="amcl_pose"     to="$(var pose_topic)"/>
@@ -154,6 +155,7 @@
         respawn="true"
         namespace="$(var namespace_nav)">
     <remap from="point_obstacle" to="clicked_point"/>
+    <param name="use_namespace" value="$(var use_namespace)"/>
     <param name="obstacle_radius" value="0.05"/>
     <param name="debug" value="True"/>
 
@@ -169,6 +171,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="use_namespace" value="$(var use_namespace)"/>
     <param name="laser_scan_topic" value="$(var laser_scan_topic)"/>
     <param name="point_cloud_topic" value="$(var point_cloud_topic)"/>
     <param name="static_map_server" value="static_map_server/map"/>
@@ -211,6 +214,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="use_namespace" value="$(var use_namespace)"/>
     <param name="odom_frame_id" value="odom"/>
     <param name="base_frame_id" value="base_link"/>
     <param name="tf_broadcast" value="true"/>
@@ -224,6 +228,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="use_namespace" value="$(var use_namespace)"/>
     <param name="max_linear_speed" value="0.8"/>
     <param name="max_angular_speed" value="1.25"/>
     <param name="control_alpha" value="0.2"/>
@@ -231,7 +236,7 @@
     <param name="move_head" value="True"/>
     <param name="use_pot_fields" value="$(var use_pot_fields)"/>
     <param name="base_link_name" value="base_link"/>
-    <remap from="cmd_vel" to="$(var cmd_vel_topic)"/>
+    <remap from="/cmd_vel" to="$(var cmd_vel_topic)"/>
   </node>
 
   <!-- ===== Potential Fields ===== -->
@@ -241,6 +246,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="use_namespace" value="$(var use_namespace)"/> 
     <param name="debug" value="False"/>
     <param name="show_image" value="True"/>
     <param name="use_pot_fields" value="$(var use_pot_fields)"/>
@@ -274,7 +280,8 @@
     <param name="point_cloud_topic" value="$(var point_cloud_topic)"/>
     <param name="laser_scan_topic" value="$(var laser_scan_topic)"/>
 
-    <remap from="cmd_vel" to="$(var cmd_vel_topic)"/>
+    <remap from="/cmd_vel" to="$(var cmd_vel_topic)"/>
+    <!--remap from="/simple_move/goal_path" to="/navigation/simple_move/goal_path"/-->
   </node>
 
   <!-- ===== Enable Publisher ===== -->
@@ -283,7 +290,9 @@
         exec="publish_enable.py"
         output="screen"
         respawn="true"
-        namespace="$(var namespace_nav)"/>
+        namespace="$(var namespace_nav)">
+      <param name="use_namespace" value="$(var use_namespace)"/>
+  </node>  
 
   <!-- ===== Motion Planner ===== -->
   <node name="mvn_pln"
@@ -293,6 +302,7 @@
         respawn="true"
         namespace="$(var namespace_nav)">
     <remap from="nav_control/goal" to="move_base_simple/goal"/>
+    <param name="use_namespace" value="$(var use_namespace)"/>
     <param name="patience" value="$(var mvn_pln_patience)"/>
     <param name="base_link_name" value="base_link"/>
   </node>
