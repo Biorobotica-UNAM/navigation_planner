@@ -3,7 +3,7 @@
 
 #include "nav_msgs/srv/get_map.hpp"
 #include "nav_msgs/srv/get_plan.hpp"
-#include "PathPlanner.h"  
+#include "path_planner/PathPlanner.h"  
 
 class PathPlannerNode : public rclcpp::Node
 {
