@@ -19,7 +19,7 @@
 #include "tf2_ros/buffer.h"
 #include "tf2/exceptions.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h> // for doTransform
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp> // for doTransform
 #include <tf2/utils.h> // for getYaw
 
 // Action messages (used less directly in ROS 2; here for compatibility)
