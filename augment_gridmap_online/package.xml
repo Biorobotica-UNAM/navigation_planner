@@ -4,20 +4,17 @@
   <name>augment_gridmap_online</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="tenshi.unam@gmail.com">roboworks</maintainer>
-  <license>Apache 2.0 License</license>
+  <maintainer email="rsandovr@gmail.com">pumas</maintainer>
+  <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+
   <depend>rclcpp</depend>
   <depend>rclpy</depend>
-
-  <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>visualization_msgs</depend>
-
   <depend>std_srvs</depend>
-  
   <depend>rcl_interfaces</depend>
 
   <test_depend>ament_lint_auto</test_depend>
@@ -26,5 +23,4 @@
   <export>
     <build_type>ament_cmake</build_type>
   </export>
-
 </package>
