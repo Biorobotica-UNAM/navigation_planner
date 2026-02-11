@@ -936,7 +936,7 @@ private:
 
         static int counter = 0;
 
-        if (++counter > 1)
+        if (++counter > 1 )
         {
             counter = 0;
 

@@ -38,7 +38,6 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
     double angle_increment = 2 * M_PI / (MAX_GOAL_UPDATE - 1);
     while (map.data[idx_goal] != 0 && loop_count < 4)
     {
-
         double angle = count * angle_increment;
         idx_goal_y  = _idx_goal_y + radius * cos(angle);
         idx_goal_x  = _idx_goal_x + radius * sin(angle);
