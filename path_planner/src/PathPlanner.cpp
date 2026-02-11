@@ -36,7 +36,7 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
     
     int MAX_GOAL_UPDATE = 16; //points on circle
     double angle_increment = 2 * M_PI / (MAX_GOAL_UPDATE - 1);
-    while (map.data[idx_goal] != 0 or loop_count < 4)
+    while (map.data[idx_goal] != 0 && loop_count < 4)
     {
 
         double angle = count * angle_increment;
@@ -45,7 +45,7 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
         idx_goal  = idx_goal_y *map.info.width + idx_goal_x;
 	
         count++;
-        if (count=MAX_GOAL_UPDATE)
+        if (count == MAX_GOAL_UPDATE)
         {
             count = 0;
             radius += 0.1;
