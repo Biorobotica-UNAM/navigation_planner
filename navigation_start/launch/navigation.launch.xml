@@ -38,8 +38,8 @@
   <!-- ===== Sensing windows (laser) ===== -->
   <arg name="laser_min_x" default="0.17"/>
   <arg name="laser_max_x" default="0.50"/>
-  <arg name="laser_min_y" default="-0.25"/>
-  <arg name="laser_max_y" default="0.25"/>
+  <arg name="laser_min_y" default="-0.35"/>
+  <arg name="laser_max_y" default="0.35"/>
   <arg name="laser_min_z" default="0.025"/>
   <arg name="laser_max_z" default="1.00"/>
 
@@ -165,7 +165,7 @@
   </node>
 
   <!-- ===== Map Augmenter (offline/services) ===== -->
-  <node name="map_augmenter"
+  <!--<node name="map_augmenter"
         pkg="map_augmenter"
         exec="map_augmenter_node"
         output="screen"
@@ -205,7 +205,108 @@
     <param name="cloud_min_y" value="$(var cloud_min_y)"/>
     <param name="cloud_max_z" value="$(var cloud_max_z)"/>
     <param name="cloud_min_z" value="$(var cloud_min_z)"/>
-  </node>
+  </node>-->
+
+<!-- ===== Obstacle Detector (fast) ===== -->
+<node name="obstacle_detector"
+      pkg="map_augmenter"
+      exec="obstacle_detector_node"
+      output="screen"
+      respawn="true"
+      namespace="$(var namespace_nav)">
+
+  <param name="use_namespace" value="$(var use_namespace)"/>
+
+  <!-- Para el detector: tópicos sensores (igual que antes) -->
+  <param name="laser_scan_topic" value="$(var laser_scan_topic)"/>
+  <param name="point_cloud_topic" value="$(var point_cloud_topic)"/>
+
+  <!-- IMPORTANTÍSIMO: relativo, para que caiga en /<ns>/static_map_server/map -->
+  <param name="static_map_server" value="static_map_server/map"/>
+
+  <param name="base_link_name" value="base_link"/>
+
+  <param name="use_lidar" value="$(var use_lidar)"/>
+  <param name="use_point_cloud" value="$(var use_point_cloud)"/>
+  <param name="use_point_cloud2" value="false"/>
+
+  <param name="cloud_downsampling" value="$(var cloud_downsampling)"/>
+  <param name="lidar_downsampling" value="1"/>
+
+  <!-- Detector rápido -->
+  <param name="decay_factor" value="2"/>
+
+  <!-- límites -->
+  <param name="laser_max_x" value="$(var laser_max_x)"/>
+  <param name="laser_min_x" value="$(var laser_min_x)"/>
+  <param name="laser_max_y" value="$(var laser_max_y)"/>
+  <param name="laser_min_y" value="$(var laser_min_y)"/>
+  <param name="laser_max_z" value="$(var laser_max_z)"/>
+  <param name="laser_min_z" value="$(var laser_min_z)"/>
+
+  <param name="cloud_max_x" value="$(var cloud_max_x)"/>
+  <param name="cloud_min_x" value="$(var cloud_min_x)"/>
+  <param name="cloud_max_y" value="$(var cloud_max_y)"/>
+  <param name="cloud_min_y" value="$(var cloud_min_y)"/>
+  <param name="cloud_max_z" value="$(var cloud_max_z)"/>
+  <param name="cloud_min_z" value="$(var cloud_min_z)"/>
+</node>
+
+
+<!-- ===== Map Augmenter + Merger (offline/services) ===== -->
+<node name="map_augmenter"
+      pkg="map_augmenter"
+      exec="map_augmenter_node"
+      output="screen"
+      respawn="true"
+      namespace="$(var namespace_nav)">
+
+  <param name="use_namespace" value="$(var use_namespace)"/>
+
+  <!-- Mantengo estos params aunque ya no los use para sensores, para compat con tu config -->
+  <param name="laser_scan_topic" value="$(var laser_scan_topic)"/>
+  <param name="point_cloud_topic" value="$(var point_cloud_topic)"/>
+
+  <!-- IMPORTANTÍSIMO: relativos, para que caigan en /<ns>/... -->
+  <param name="static_map_server" value="static_map_server/map"/>
+  <param name="prohibition_map_server" value="prohibition_map_server/map"/>
+
+  <param name="base_link_name" value="base_link"/>
+
+  <!-- Remap igual que antes -->
+  <remap from="point_obstacle" to="clicked_point"/>
+
+  <!-- Estos flags ya no afectan detección aquí, pero los dejo por compat -->
+  <param name="use_lidar" value="$(var use_lidar)"/>
+  <param name="use_point_cloud" value="$(var use_point_cloud)"/>
+  <param name="use_point_cloud2" value="false"/>
+
+  <param name="cloud_downsampling" value="$(var cloud_downsampling)"/>
+
+  <!-- Para NO doble-decay: el detector ya hace decay -->
+  <param name="decay_factor" value="0"/>
+
+  <param name="inflation_radius" value="0.22"/>
+  <param name="cost_radius" value="0.25"/>
+
+  <param name="use_online" value="False"/>
+
+  <!-- límites (se mantienen por si tu nodo los valida) -->
+  <param name="laser_max_x" value="$(var laser_max_x)"/>
+  <param name="laser_min_x" value="$(var laser_min_x)"/>
+  <param name="laser_max_y" value="$(var laser_max_y)"/>
+  <param name="laser_min_y" value="$(var laser_min_y)"/>
+  <param name="laser_max_z" value="$(var laser_max_z)"/>
+  <param name="laser_min_z" value="$(var laser_min_z)"/>
+
+  <param name="cloud_max_x" value="$(var cloud_max_x)"/>
+  <param name="cloud_min_x" value="$(var cloud_min_x)"/>
+  <param name="cloud_max_y" value="$(var cloud_max_y)"/>
+  <param name="cloud_min_y" value="$(var cloud_min_y)"/>
+  <param name="cloud_max_z" value="$(var cloud_max_z)"/>
+  <param name="cloud_min_z" value="$(var cloud_min_z)"/>
+</node>
+
 
   <!-- ===== Path Planner ===== -->
   <node name="path_planner"
@@ -231,8 +332,10 @@
     <param name="use_namespace" value="$(var use_namespace)"/>
     <param name="max_linear_speed" value="0.8"/>
     <param name="max_angular_speed" value="1.25"/>
-    <param name="control_alpha" value="0.2"/>
-    <param name="control_beta" value="0.8"/>
+    <!--param name="control_alpha" value="0.2"/-->
+    <param name="control_alpha" value="0.08"/>
+    <!--param name="control_beta" value="0.8"/-->
+    <param name="control_beta" value="0.4"/>
     <param name="move_head" value="True"/>
     <param name="use_pot_fields" value="$(var use_pot_fields)"/>
     <param name="base_link_name" value="base_link"/>

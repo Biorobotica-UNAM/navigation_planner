@@ -213,6 +213,9 @@ private:
     bool pot_fields_received_ = false;
     bool is_pot_fields_response_ = false;
 
+    rclcpp::Time obstacle_detected_time_;
+    bool waiting_for_obstacle_clear_ = true;
+
     rclcpp::Time no_cloud_pot_fields_start_time_;
     rclcpp::Duration no_cloud_pot_fields_duration_{2, 0}; // 2 seconds
     bool is_temporary_no_cloud_pot_fields_ = false;
@@ -922,6 +925,45 @@ private:
 
             case SM_WAIT_FOR_MOVE_FINISHED:
             {
+
+                // 🔴 DETECCIÓN REACTIVA RÁPIDA
+                if (collision_risk_)
+                {
+                    if (!waiting_for_obstacle_clear_)
+                    {
+                        std::cout << "MotionPlanner.-> Obstacle detected while moving." << std::endl;
+
+                        pub_simple_move_stop_->publish(std_msgs::msg::Empty());
+
+                        obstacle_detected_time_ = this->now();
+                        waiting_for_obstacle_clear_ = true;
+                    }
+
+                    // 🟡 Si patience activado → espera 1 segundo
+                    if (patience_)
+                    {
+                        if ((this->now() - obstacle_detected_time_).seconds() > 1.0)
+                        {
+                            std::cout << "MotionPlanner.-> Obstacle persists. Replanning." << std::endl;
+                            waiting_for_obstacle_clear_ = false;
+                            state = SM_CALCULATE_PATH;
+                        }
+                    }
+                    else
+                    {
+                        std::cout << "MotionPlanner.-> No patience. Replanning immediately." << std::endl;
+                        waiting_for_obstacle_clear_ = false;
+                        state = SM_CALCULATE_PATH;
+                    }
+
+                    break;
+                }
+                else
+                {
+                    // Si ya no hay obstáculo, resetea bandera
+                    waiting_for_obstacle_clear_ = false;
+                }
+
                 get_robot_position();
                 error = sqrt(pow(global_goal_.position.x - robot_x_, 2) + pow(global_goal_.position.y - robot_y_, 2));
                 
