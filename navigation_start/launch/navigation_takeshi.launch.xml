@@ -103,7 +103,7 @@
   </node>
 
   <!-- ===== Localization (nav2-amcl) ===== -->
-
+  <!--No hay y no lo busquen pendejos jijijijij-->
 
   <!-- ===== Lifecycle Manager ===== -->
   <node name="lifecycle_manager_map"
