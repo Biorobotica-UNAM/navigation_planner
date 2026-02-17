@@ -33,33 +33,57 @@
 #include <vector>
 #include <chrono>
 #include <exception>
-///
 
 #define RATE 10
 
-#define SM_INIT 0
-#define SM_WAITING_FOR_TASK 1
-#define SM_CALCULATE_PATH 2
-#define SM_CHECK_IF_INSIDE_OBSTACLES 19
-#define SM_WAITING_FOR_MOVE_BACKWARDS 18
-#define SM_CHECK_IF_OBSTACLES 21
-#define SM_WAIT_FOR_NO_OBSTACLES 22
-#define SM_ENABLE_POT_FIELDS 23
-#define SM_WAIT_FOR_POT_FIELDS 24
-#define SM_WAIT_FOR_NOT_POT_FIELDS 124
-#define SM_START_MOVE_PATH 3
-#define SM_WAIT_FOR_MOVE_FINISHED 4
-#define SM_COLLISION_DETECTED 5
-#define SM_STOP_RECEIVED 51
-#define SM_CORRECT_FINAL_ANGLE 6
-#define SM_WAIT_FOR_ANGLE_CORRECTED 7
-#define SM_FINAL    17
+enum class SM_STATE{
+    INIT,
+    WAITING_FOR_TASK,
+    CALCULATE_PATH,
+    CHECK_IF_INSIDE_OBSTACLES,
+    WAITING_FOR_MOVE_BACKWARDS,
+    CHECK_IF_OBSTACLES,
+    WAIT_FOR_NO_OBSTACLES,
+    ENABLE_POT_FIELDS,
+    WAIT_FOR_POT_FIELDS,
+    WAIT_FOR_NOT_POT_FIELDS,
+    START_MOVE_PATH,
+    WAIT_FOR_MOVE_FINISHED,
+    COLLISION_DETECTED,
+    STOP_RECEIVED,
+    CORRECT_FINAL_ANGLE,
+    WAIT_FOR_ANGLE_CORRECTED,
+    FINAL,
+    WAIT_FOR_PATH_RESPONSE,
+    WAIT_FOR_INSIDE_OBSTACLES_RESPONSE,
+    WAIT_FOR_IF_OBSTACLES_RESPONSE,
+    WAIT_FOR_NO_OBSTACLES_RESPONSE
+};
+/*
+#define SM_STATE::INIT 0
+#define SM_STATE::WAITING_FOR_TASK 1
+#define SM_STATE::CALCULATE_PATH 2
+#define SM_STATE::CHECK_IF_INSIDE_OBSTACLES 19
+#define SM_STATE::WAITING_FOR_MOVE_BACKWARDS 18
+#define SM_STATE::CHECK_IF_OBSTACLES 21
+#define SM_STATE::WAIT_FOR_NO_OBSTACLES 22
+#define SM_STATE::ENABLE_POT_FIELDS 23
+#define SM_STATE::WAIT_FOR_POT_FIELDS 24
+#define SM_STATE::WAIT_FOR_NOT_POT_FIELDS 124
+#define SM_STATE::START_MOVE_PATH 3
+#define SM_STATE::WAIT_FOR_MOVE_FINISHED 4
+#define SM_STATE::COLLISION_DETECTED 5
+#define SM_STATE::STOP_RECEIVED 51
+#define SM_STATE::CORRECT_FINAL_ANGLE 6
+#define SM_STATE::WAIT_FOR_ANGLE_CORRECTED 7
+#define SM_STATE::FINAL    17
 
 // Flags for clients WAIT casers
-#define SM_WAIT_FOR_PATH_RESPONSE 102
-#define SM_WAIT_FOR_INSIDE_OBSTACLES_RESPONSE 119
-#define SM_WAIT_FOR_IF_OBSTACLES_RESPONSE 121
-#define SM_WAIT_FOR_NO_OBSTACLES_RESPONSE 122
+#define SM_STATE::WAIT_FOR_PATH_RESPONSE 102
+#define SM_STATE::WAIT_FOR_INSIDE_OBSTACLES_RESPONSE 119
+#define SM_STATE::WAIT_FOR_IF_OBSTACLES_RESPONSE 121
+#define SM_STATE::WAIT_FOR_NO_OBSTACLES_RESPONSE 122
+*/
 
 class MotionPlannerNode : public rclcpp::Node
 {
@@ -186,7 +210,7 @@ private:
     // Motion Planner processing variables
     float error   = 0.0f;
 
-    int state = SM_INIT;
+    SM_STATE state = SM_STATE::INIT;
     int simple_move_sequencer = -1;
     int goal_id = -1;
     int current_status = 0;
@@ -212,6 +236,9 @@ private:
 
     bool pot_fields_received_ = false;
     bool is_pot_fields_response_ = false;
+
+    rclcpp::Time obstacle_detected_time_;
+    bool waiting_for_obstacle_clear_ = true;
 
     rclcpp::Time no_cloud_pot_fields_start_time_;
     rclcpp::Duration no_cloud_pot_fields_duration_{2, 0}; // 2 seconds
@@ -404,6 +431,7 @@ private:
     //Motion Planner callbacks
     void callback_general_stop(const std_msgs::msg::Empty::SharedPtr msg)
     {
+        (void)msg;
         try 
         {
             std::cout << "MotionPlanner.-> General Stop signal received" << std::endl;
@@ -417,6 +445,7 @@ private:
 
     void callback_navigation_stop(const std_msgs::msg::Empty::SharedPtr msg)
     {
+        (void)msg;
         try 
         {
             std::cout << "MotionPlanner.-> Navigation Stop signal received" << std::endl;
@@ -527,7 +556,7 @@ private:
 
             this->is_path_response_ = true;
 
-            RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Path received successfully with size: %d", path_.poses.size());
+            RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Path received successfully with size: %ld", path_.poses.size());
         }
         catch (const std::exception &e)
         {
@@ -598,7 +627,7 @@ private:
             if(stop_)
             {
                 stop_ = false;
-                state = SM_INIT;
+                state = SM_STATE::INIT;
                 if (current_status == actionlib_msgs::msg::GoalStatus::ACTIVE)
                 {
                     current_status = publish_status(
@@ -609,24 +638,24 @@ private:
                 }
             }
             if(new_global_goal_)
-                state = SM_WAITING_FOR_TASK;
+                state = SM_STATE::WAITING_FOR_TASK;
 
             switch(state)
             {
-            case SM_INIT:
+            case SM_STATE::INIT:
             {
                 std::cout << "MotionPlanner.-> MVN PLN READY. Waiting for new goal. " << std::endl;
-                state = SM_WAITING_FOR_TASK;
+                state = SM_STATE::WAITING_FOR_TASK;
                 break;
             }
             
             
-            case SM_WAITING_FOR_TASK:
+            case SM_STATE::WAITING_FOR_TASK:
             {
                 if(new_global_goal_)
                 {
                     new_global_goal_ = false;
-                    state = SM_CALCULATE_PATH;
+                    state = SM_STATE::CALCULATE_PATH;
                     if(current_status == actionlib_msgs::msg::GoalStatus::ACTIVE)
                         current_status = publish_status(
                             actionlib_msgs::msg::GoalStatus::ABORTED,
@@ -646,19 +675,19 @@ private:
             }
 
             
-            case SM_CALCULATE_PATH:
+            case SM_STATE::CALCULATE_PATH:
             {
                 get_robot_position();
                 //plan_path_from_augmented_map(robot_x_, robot_y_, global_goal_.position.x, global_goal_.position.y);
                 get_plan_path_from_augmented_map(robot_x_, robot_y_, global_goal_.position.x, global_goal_.position.y);
 
-                state = SM_WAIT_FOR_PATH_RESPONSE;
+                state = SM_STATE::WAIT_FOR_PATH_RESPONSE;
 
                 break;
             }
             
             
-            case SM_WAIT_FOR_PATH_RESPONSE:
+            case SM_STATE::WAIT_FOR_PATH_RESPONSE:
             {
                 if (!is_path_response_) {
                     // Still waiting, don't do anything yet
@@ -669,20 +698,20 @@ private:
                     std::cout << "MotionPlanner.-> Cannot calc path to " << global_goal_.position.x << " " << global_goal_.position.y << std::endl;
                     pub_simple_move_stop_->publish(std_msgs::msg::Empty());
 
-                    state = patience_ ? SM_CHECK_IF_OBSTACLES : SM_CHECK_IF_INSIDE_OBSTACLES;
+                    state = patience_ ? SM_STATE::CHECK_IF_OBSTACLES : SM_STATE::CHECK_IF_INSIDE_OBSTACLES;
                 } else {
                     if (is_temporary_no_cloud_pot_fields_){
                         no_cloud_pot_fields_start_time_ = this->now(); //reset timer
-                        state = SM_START_MOVE_PATH;
+                        state = SM_STATE::START_MOVE_PATH;
                     } else {
-                        state = SM_ENABLE_POT_FIELDS;
+                        state = SM_STATE::ENABLE_POT_FIELDS;
                     }
                 }
                 break;
             }
 
 
-            case SM_CHECK_IF_INSIDE_OBSTACLES:
+            case SM_STATE::CHECK_IF_INSIDE_OBSTACLES:
             {
                 std::cout << "MotionPlanner.-> Checking if robot is inside an obstacle..." << std::endl;
                 is_in_obstacles_ = false;
@@ -700,12 +729,12 @@ private:
                         is_in_obstacles_response_ = true;
                     });
 
-                state = SM_WAIT_FOR_INSIDE_OBSTACLES_RESPONSE;
+                state = SM_STATE::WAIT_FOR_INSIDE_OBSTACLES_RESPONSE;
                 break;
             }
 
 
-            case SM_WAIT_FOR_INSIDE_OBSTACLES_RESPONSE:
+            case SM_STATE::WAIT_FOR_INSIDE_OBSTACLES_RESPONSE:
             {
                 if (!is_in_obstacles_response_) {
                     RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Waiting for obstacle check response...");
@@ -718,20 +747,20 @@ private:
                     msg_goal_dist_angle.data[0] = -0.15;
                     msg_goal_dist_angle.data[1] = 0;
                     pub_goal_dist_angle_->publish(msg_goal_dist_angle);
-                    state = SM_WAITING_FOR_MOVE_BACKWARDS;
+                    state = SM_STATE::WAITING_FOR_MOVE_BACKWARDS;
                 } else {
                     current_status = publish_status(
                         actionlib_msgs::msg::GoalStatus::ABORTED,
                         goal_id,
                         "Cannot calc path from start to goal"
                     );
-                    state = SM_INIT;
+                    state = SM_STATE::INIT;
                 }
                 break;
             }
 
 
-            case SM_WAITING_FOR_MOVE_BACKWARDS:
+            case SM_STATE::WAITING_FOR_MOVE_BACKWARDS:
             {
                 if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::SUCCEEDED && simple_move_status_id_ == -1)
                 {
@@ -743,12 +772,12 @@ private:
                     simple_move_goal_status_.status = 0;
                     std::cout << "MotionPlanner.-> Simple move reported move aborted. " << std::endl;
                 }
-                state = SM_CALCULATE_PATH;
+                state = SM_STATE::CALCULATE_PATH;
                 break;
             }
 
 
-            case SM_CHECK_IF_OBSTACLES:
+            case SM_STATE::CHECK_IF_OBSTACLES:
             {
                 are_there_obs_ = false;
                 is_check_obs_response_ = false;
@@ -765,12 +794,12 @@ private:
                         is_check_obs_response_ = true;
                     });
 
-                state = SM_WAIT_FOR_IF_OBSTACLES_RESPONSE;
+                state = SM_STATE::WAIT_FOR_IF_OBSTACLES_RESPONSE;
                 break;
             }
 
 
-            case SM_WAIT_FOR_IF_OBSTACLES_RESPONSE:
+            case SM_STATE::WAIT_FOR_IF_OBSTACLES_RESPONSE:
             {
                 if (!is_check_obs_response_) {
                     RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Waiting for obstacle check response...");
@@ -784,7 +813,7 @@ private:
                         goal_id, 
                         "Cannot calculate path from start to goal point"
                     );
-                    state = SM_INIT;
+                    state = SM_STATE::INIT;
                 } else {
                     std::cout << "MotionPlanner.->Temporal obstacles detected. Waiting for them to move." << std::endl;
                     current_status = publish_status(
@@ -792,13 +821,13 @@ private:
                         goal_id,
                         "Waiting for temporal obstacles to move"
                     );
-                    state = SM_WAIT_FOR_NO_OBSTACLES;
+                    state = SM_STATE::WAIT_FOR_NO_OBSTACLES;
                 }
                 break;
             }
 
 
-            case SM_WAIT_FOR_NO_OBSTACLES:
+            case SM_STATE::WAIT_FOR_NO_OBSTACLES:
             {
                 is_wait_obs_response_ = false;
                 are_still_obs_ = true;
@@ -816,12 +845,12 @@ private:
                         is_wait_obs_response_ = true;
                     });
 
-                state = SM_WAIT_FOR_NO_OBSTACLES_RESPONSE;
+                state = SM_STATE::WAIT_FOR_NO_OBSTACLES_RESPONSE;
                 break;
             }
 
 
-            case SM_WAIT_FOR_NO_OBSTACLES_RESPONSE:
+            case SM_STATE::WAIT_FOR_NO_OBSTACLES_RESPONSE:
             {
                 if (!is_wait_obs_response_) {
                     RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Waiting for temporal obstacles to clear...");
@@ -836,32 +865,32 @@ private:
                         this->goal_id,
                         "Cannot calculate path from start to goal point"
                     );
-                    state = SM_INIT;
+                    state = SM_STATE::INIT;
                 }
                 else if (!are_still_obs_) {
                     std::cout << "MotionPlanner.-> Temporal obstacles removed." << std::endl;
-                    state = SM_CALCULATE_PATH;
+                    state = SM_STATE::CALCULATE_PATH;
                 }
                 else {
                     rclcpp::sleep_for(std::chrono::seconds(1));
-                    state = SM_WAIT_FOR_NO_OBSTACLES;
+                    state = SM_STATE::WAIT_FOR_NO_OBSTACLES;
                 }
 
                 break;
             }
 
                 
-            case SM_ENABLE_POT_FIELDS:
+            case SM_STATE::ENABLE_POT_FIELDS:
             {
                 msg_bool.data = true;
                 pub_pot_fields_enable_->publish(msg_bool);
                 std::cout << "MotionPlanner.-> Potential fields enable flag sent. Waiting for potential fields to be enabled..." << std::endl;
-                state = SM_WAIT_FOR_POT_FIELDS;
+                state = SM_STATE::WAIT_FOR_POT_FIELDS;
                 break;
             }
 
 
-            case SM_WAIT_FOR_POT_FIELDS:
+            case SM_STATE::WAIT_FOR_POT_FIELDS:
             {
                 if (!waiting_for_potential_fields_)
                 {
@@ -880,26 +909,26 @@ private:
                     if (pot_fields_received_)
                     {
                         RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Potential fields is now available.");
-                        state = SM_START_MOVE_PATH;
+                        state = SM_STATE::START_MOVE_PATH;
                     }
                     else
                     {
                         RCLCPP_WARN(this->get_logger(), "MotionPlanner.-> Potential fields received but invalid.");
-                        state = SM_INIT;
+                        state = SM_STATE::INIT;
                     }
                 }
                 else if ((this->now() - pot_fields_start_time_).seconds() > 10.0)
                 {
                     RCLCPP_WARN(this->get_logger(), "MotionPlanner.-> Timeout waiting for potential fields message.");
                     waiting_for_potential_fields_ = false;
-                    state = SM_INIT;
+                    state = SM_STATE::INIT;
                 }
 
                 break;
             }
 
 
-            case SM_START_MOVE_PATH:
+            case SM_STATE::START_MOVE_PATH:
             {
                 std::cout << "MotionPlanner.-> Starting path following " << std::endl;
                 collision_risk_ = false;
@@ -915,13 +944,47 @@ private:
 
                 simple_move_goal_status_.status = 0;
 
-                state = SM_WAIT_FOR_MOVE_FINISHED;
+                state = SM_STATE::WAIT_FOR_MOVE_FINISHED;
                 break;
             }
 
 
-            case SM_WAIT_FOR_MOVE_FINISHED:
+            case SM_STATE::WAIT_FOR_MOVE_FINISHED:
             {
+
+                // DETECCIÓN REACTIVA RÁPIDA
+                /*if (collision_risk_)
+                {
+                    if (!waiting_for_obstacle_clear_)
+                    {
+                        std::cout << "MotionPlanner.-> Obstacle detected while moving." << std::endl;
+
+                        pub_simple_move_stop_->publish(std_msgs::msg::Empty());
+
+                        simple_move_goal_status_.status = 0;
+
+                        obstacle_detected_time_ = this->now();
+                        waiting_for_obstacle_clear_ = true;
+                    }
+
+                    // Patience: espera 1 segundo
+                    if (!patience_ || (this->now() - obstacle_detected_time_).seconds() > 1.0)
+                    {
+                        std::cout << "MotionPlanner.-> Obstacle persists. Replanning." << std::endl;
+                        waiting_for_obstacle_clear_ = false;
+                        collision_risk_ = false;
+                        state = SM_STATE::CALCULATE_PATH;
+                    }
+                    break;
+                }
+                if (waiting_for_obstacle_clear_)
+                {
+                    std::cout << "MotionPlanner.-> Obstacle cleared. Resuming." << std::endl;
+                    waiting_for_obstacle_clear_ = false;
+                    state = SM_STATE::CALCULATE_PATH;
+                    break;
+                }*/
+
                 get_robot_position();
                 error = sqrt(pow(global_goal_.position.x - robot_x_, 2) + pow(global_goal_.position.y - robot_y_, 2));
                 
@@ -951,7 +1014,7 @@ private:
                     std::cout << "MotionPlanner.-> Path followed succesfully. " << std::endl;
                     msg_bool.data = false;
                     pub_pot_fields_enable_->publish(msg_bool);
-                    state = SM_CORRECT_FINAL_ANGLE;
+                    state = SM_STATE::CORRECT_FINAL_ANGLE;
                 }
                 else if(!is_temporary_no_cloud_pot_fields_ &&
                         simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED)
@@ -965,21 +1028,21 @@ private:
 
                     is_temporary_no_cloud_pot_fields_ = true;
 
-                    state = SM_CALCULATE_PATH;
-                    //state = SM_WAIT_FOR_NOT_POT_FIELDS;
+                    state = SM_STATE::CALCULATE_PATH;
+                    //state = SM_STATE::WAIT_FOR_NOT_POT_FIELDS;
                 }
                 else if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED)
                 {
                     simple_move_goal_status_.status = 0;
                     is_temporary_no_cloud_pot_fields_ = false;
                     std::cout << "MotionPlanner.-> Simple move reported path aborted. Trying again..." << std::endl;
-                    state = SM_CALCULATE_PATH;
+                    state = SM_STATE::CALCULATE_PATH;
                 }
                 break;
             }
 
 
-            case SM_WAIT_FOR_NOT_POT_FIELDS:
+            case SM_STATE::WAIT_FOR_NOT_POT_FIELDS:
             {
                 if (!waiting_for_potential_fields_)
                 {
@@ -999,7 +1062,7 @@ private:
                         collision_risk_ = false;
                         waiting_for_potential_fields_ = false;
 
-                        state = SM_CALCULATE_PATH;
+                        state = SM_STATE::CALCULATE_PATH;
                     }
                 }
 
@@ -1009,13 +1072,13 @@ private:
                     collision_risk_ = false;
                     waiting_for_potential_fields_ = false;
 
-                    state = SM_CALCULATE_PATH;
+                    state = SM_STATE::CALCULATE_PATH;
                 }
 
                 break;
             }
 
-            case SM_CORRECT_FINAL_ANGLE:
+            case SM_STATE::CORRECT_FINAL_ANGLE:
             {
                 std::cout << "MotionPlanner.-> Correcting final angle." << std::endl;
                 get_robot_position();
@@ -1031,31 +1094,31 @@ private:
                 msg_goal_dist_angle.data[1] = static_cast<float>(error);
                 pub_goal_dist_angle_->publish(msg_goal_dist_angle);
 
-                state = SM_WAIT_FOR_ANGLE_CORRECTED;
+                state = SM_STATE::WAIT_FOR_ANGLE_CORRECTED;
                 break;
             }
 
 
-            case SM_WAIT_FOR_ANGLE_CORRECTED:
+            case SM_STATE::WAIT_FOR_ANGLE_CORRECTED:
             {
                 if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::SUCCEEDED && 
                                                       simple_move_status_id_ == -1)
                 {
                     simple_move_goal_status_.status = 0;
                     std::cout << "MotionPlanner.-> Final angle corrected succesfully." << std::endl;
-                    state = SM_FINAL ;
+                    state = SM_STATE::FINAL ;
                 }
                 else if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED)
                 {
                     simple_move_goal_status_.status = 0;
                     std::cout << "MotionPlanner.-> Simple move reported move aborted. Trying again..." << std::endl;
-                    state = SM_CALCULATE_PATH;
+                    state = SM_STATE::CALCULATE_PATH;
                 }
                 break;
             }
 
 
-            case SM_FINAL:
+            case SM_STATE::FINAL:
             {
                 std::cout << "MotionPlanner.-> TASK FINISHED." << std::endl;
                 current_status = publish_status(
@@ -1063,7 +1126,7 @@ private:
                     goal_id, 
                     "Global goal point reached"
                 );
-                state = SM_INIT;
+                state = SM_STATE::INIT;
                 break;
             }
 

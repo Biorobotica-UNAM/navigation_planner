@@ -36,16 +36,15 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
     
     int MAX_GOAL_UPDATE = 16; //points on circle
     double angle_increment = 2 * M_PI / (MAX_GOAL_UPDATE - 1);
-    while (map.data[idx_goal] != 0 or loop_count < 4)
+    while (map.data[idx_goal] != 0 && loop_count < 4)
     {
-
         double angle = count * angle_increment;
         idx_goal_y  = _idx_goal_y + radius * cos(angle);
         idx_goal_x  = _idx_goal_x + radius * sin(angle);
         idx_goal  = idx_goal_y *map.info.width + idx_goal_x;
 	
         count++;
-        if (count=MAX_GOAL_UPDATE)
+        if (count == MAX_GOAL_UPDATE)
         {
             count = 0;
             radius += 0.1;
@@ -109,7 +108,7 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
            
                 Node* neighbor = &nodes[node_neighbors[i]];
                 float delta_g = i < 4 ? 1.0 : 1.414213562;
-                float g_value = current_node->g_value + (i < 4 ? 1.0 : 1.414213562) + cost_map.data[node_neighbors[i]];
+                float g_value = current_node->g_value + (delta_g) + cost_map.data[node_neighbors[i]];
                 float h_value;
                 int   h_value_x = node_neighbors[i]%map.info.width - idx_goal_x;
                 int   h_value_y = node_neighbors[i]/map.info.width - idx_goal_y;
@@ -164,7 +163,7 @@ nav_msgs::msg::Path PathPlanner::SmoothPath(
                         float tolerance)
 {
     nav_msgs::msg::Path newPath;
-    for(int i=0; i< path.poses.size(); i++)
+    for(size_t i=0; i< path.poses.size(); i++)
         newPath.poses.push_back(path.poses[i]);
     newPath.header.frame_id = "map";   
     if(path.poses.size() < 3)  return newPath;
@@ -175,7 +174,7 @@ nav_msgs::msg::Path PathPlanner::SmoothPath(
     while(change >= tolerance && ++attempts < 1000)
     {
         change = 0;
-        for(int i=1; i< path.poses.size() - 1; i++)
+        for(size_t i=1; i< path.poses.size() - 1; i++)
         {
             geometry_msgs::msg::Point old_p = path.poses[i].pose.position;
             geometry_msgs::msg::Point new_p = newPath.poses[i].pose.position;

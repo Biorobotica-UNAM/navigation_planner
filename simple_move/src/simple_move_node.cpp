@@ -30,20 +30,23 @@
 
 #define RATE 30
 
-#define SM_INIT 0
-#define SM_WAITING_FOR_TASK 11
-#define SM_GOAL_POSE_ACCEL 1
-#define SM_GOAL_POSE_CRUISE 2
-#define SM_GOAL_POSE_DECCEL 3
-#define SM_GOAL_POSE_CORRECT_ANGLE 4
-#define SM_GOAL_POSE_FINISH 10
-#define SM_GOAL_POSE_FAILED 12
-#define SM_GOAL_PATH_ACCEL 5
-#define SM_GOAL_PATH_CRUISE 6
-#define SM_GOAL_PATH_DECCEL 7
-#define SM_GOAL_PATH_FINISH 8
-#define SM_GOAL_PATH_FAILED 81
-#define SM_COLLISION_RISK 9
+enum class SM_STATE{
+    INIT,
+    WAITING_FOR_TASK,
+    GOAL_POSE_ACCEL,
+    GOAL_POSE_CRUISE,
+    GOAL_POSE_DECCEL,
+    GOAL_POSE_CORRECT_ANGLE,
+    GOAL_POSE_FINISH,
+    GOAL_POSE_FAILED,
+    GOAL_PATH_ACCEL,
+    GOAL_PATH_CRUISE,
+    GOAL_PATH_DECCEL,
+    GOAL_PATH_FINISH,
+    GOAL_PATH_FAILED,
+    COLLISION_RISK,
+};
+
 
 class SimpleMoveNode : public rclcpp::Node
 {
@@ -212,10 +215,10 @@ private:
     // Simple Move processing variables
     actionlib_msgs::msg::GoalStatus msg_goal_reached;
 
-    int state = SM_INIT;
+    SM_STATE state = SM_STATE::INIT;
     float current_linear_speed = 0;
-    int prev_pose_idx = 0;
-    int next_pose_idx = 0;
+    size_t prev_pose_idx = 0;
+    size_t next_pose_idx = 0;
     float temp_k = 0;
     int attempts = 0;
     float global_error = 0;
@@ -226,7 +229,6 @@ private:
     rclcpp::Publisher<actionlib_msgs::msg::GoalStatus>::SharedPtr   pub_goal_reached_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr         pub_cmd_vel_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr  pub_head_goal_pose_;
-
 
     //############
     // Subscribers
@@ -245,14 +247,12 @@ private:
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_collisionRisk_;
     rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr sub_rejectionForce_;
 
-
     //############
     // Parameter callback handle
     OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
     // Main processing loop
     rclcpp::TimerBase::SharedPtr processing_timer_;
-
 
     //############
     // Runtime parameter update callback
@@ -361,6 +361,7 @@ private:
     //Simple Move callbacks
     void callback_general_stop(const std_msgs::msg::Empty::SharedPtr msg) 
     {
+        (void) msg;
         try 
         {
             std::cout << "SimpleMove.-> General Stop signal received" << std::endl;
@@ -377,6 +378,7 @@ private:
 
     void callback_navigation_stop(const std_msgs::msg::Empty::SharedPtr msg) 
     {
+        (void) msg;
         try 
         {
             std::cout << "SimpleMove.-> Navigation Stop signal received" << std::endl;
@@ -393,6 +395,7 @@ private:
 
     void callback_simple_move_stop(const std_msgs::msg::Empty::SharedPtr msg) 
     {
+        (void) msg;
         try 
         {
             std::cout << "SimpleMove.-> Simple move stop signal received" << std::endl;
@@ -655,7 +658,7 @@ private:
         return dist;
     }
 
-    void get_next_goal_from_path(int& last_pose_idx, int& next_pose_idx)
+    void get_next_goal_from_path(size_t& last_pose_idx, size_t& next_pose_idx)
     {
         if(next_pose_idx >= goal_path_.poses.size()) next_pose_idx = goal_path_.poses.size() - 1;
         float prev_goal_x = goal_path_.poses[last_pose_idx].pose.position.x;
@@ -680,10 +683,10 @@ private:
         }while(error < 0.25 && ++next_pose_idx < goal_path_.poses.size());
     }
 
-    std_msgs::msg::Float32MultiArray get_next_goal_head_angles(int next_pose_idx)
+    std_msgs::msg::Float32MultiArray get_next_goal_head_angles(size_t next_pose_idx)
     {
         std_msgs::msg::Float32MultiArray msg;
-        int idx = next_pose_idx + 5 >=  goal_path_.poses.size() - 1 ? goal_path_.poses.size() - 1 : next_pose_idx + 5;
+        size_t idx = next_pose_idx + 5 >=  goal_path_.poses.size() - 1 ? goal_path_.poses.size() - 1 : next_pose_idx + 5;
         float goal_x = goal_path_.poses[idx].pose.position.x;
         float goal_y = goal_path_.poses[idx].pose.position.y;
         float angle = atan2(goal_y - robot_y_, goal_x - robot_x_) - robot_t_;
@@ -704,30 +707,30 @@ private:
             if(stop_)
             {
                 stop_ = false;
-                state = SM_INIT;
+                state = SM_STATE::INIT;
                 collision_risk_ = false;
                 msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::ABORTED;
                 pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                 pub_goal_reached_->publish(msg_goal_reached);
             }
             if(new_pose_ || new_path_)
-                state = SM_WAITING_FOR_TASK;
+                state = SM_STATE::WAITING_FOR_TASK;
 
             switch(state)
             {
-            case SM_INIT:
+            case SM_STATE::INIT:
                 std::cout << "SimpleMove.-> Low level control ready. Waiting for new goal. " << std::endl;
                 collision_risk_ = false;
-                state = SM_WAITING_FOR_TASK;
+                state = SM_STATE::WAITING_FOR_TASK;
                 break;
             
             
-            case SM_WAITING_FOR_TASK:
+            case SM_STATE::WAITING_FOR_TASK:
                 if(new_pose_)
                 {
                     collision_risk_ = false;
                     get_goal_position_wrt_odom();
-                    state = SM_GOAL_POSE_ACCEL;
+                    state = SM_STATE::GOAL_POSE_ACCEL;
                     new_pose_ = false;
                     msg_goal_reached.goal_id.id = "-1";
                     attempts = (int)((fabs(goal_distance_)*5)/max_linear_speed_*RATE + fabs(goal_angle_*5)/max_angular_speed_*RATE + RATE*5);
@@ -735,7 +738,7 @@ private:
                 if(new_path_)
                 {
                     collision_risk_ = false;
-                    state = SM_GOAL_PATH_ACCEL;
+                    state = SM_STATE::GOAL_PATH_ACCEL;
                     new_path_ = false;
                     prev_pose_idx = 0;
                     next_pose_idx = 0;
@@ -749,25 +752,25 @@ private:
                 break;
 
             
-            case SM_GOAL_POSE_ACCEL:
+            case SM_STATE::GOAL_POSE_ACCEL:
                 get_robot_position_wrt_odom();
                 global_error = sqrt((goal_x_ - robot_x_)*(goal_x_ - robot_x_) + (goal_y_ - robot_y_)*(goal_y_ - robot_y_));
 
                 if(global_error < fine_dist_tolerance_)
-                    state = SM_GOAL_POSE_CORRECT_ANGLE;
+                    state = SM_STATE::GOAL_POSE_CORRECT_ANGLE;
                 else if(global_error < current_linear_speed*current_linear_speed/(linear_acceleration_*5))
                 {
-                    state = SM_GOAL_POSE_DECCEL;
+                    state = SM_STATE::GOAL_POSE_DECCEL;
                     temp_k = current_linear_speed/sqrt(global_error);
                 }
                 else if(current_linear_speed >= max_linear_speed_)
                 {
-                    state = SM_GOAL_POSE_CRUISE;
+                    state = SM_STATE::GOAL_POSE_CRUISE;
                     current_linear_speed = max_linear_speed_;
                 }
                 if(--attempts <= 0)
                 {
-                    state = SM_GOAL_POSE_FAILED;
+                    state = SM_STATE::GOAL_POSE_FAILED;
                     std::cout << "SimpleMove.-> Timeout exceeded while trying to reach goal position. Current state: GOAL_POSE_ACCEL." << std::endl;
                 }
                 pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
@@ -776,19 +779,19 @@ private:
                 current_linear_speed += (linear_acceleration_*5)/RATE;
                 break;
                 
-            case SM_GOAL_POSE_CRUISE:
+            case SM_STATE::GOAL_POSE_CRUISE:
                 get_robot_position_wrt_odom();
                 global_error = sqrt((goal_x_ - robot_x_)*(goal_x_ - robot_x_) + (goal_y_ - robot_y_)*(goal_y_ - robot_y_));
                 if(global_error < fine_dist_tolerance_)
-                    state = SM_GOAL_POSE_CORRECT_ANGLE;
+                    state = SM_STATE::GOAL_POSE_CORRECT_ANGLE;
                 else if(global_error < current_linear_speed*current_linear_speed/(linear_acceleration_*5))
                 {
-                    state = SM_GOAL_POSE_DECCEL;
+                    state = SM_STATE::GOAL_POSE_DECCEL;
                     temp_k = current_linear_speed/sqrt(global_error);
                 }
                 if(--attempts <= 0)
                 {
-                    state = SM_GOAL_POSE_FAILED;
+                    state = SM_STATE::GOAL_POSE_FAILED;
                     std::cout << "SimpleMove.-> Timeout exceeded while trying to reach goal position. Current state: GOAL_POSE_CRUISE." << std::endl;
                 }
                 pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
@@ -796,15 +799,15 @@ private:
                                                       alpha_*2, beta_/4, goal_distance_ < 0, move_lat_));
                 break;
 
-            case SM_GOAL_POSE_DECCEL:
+            case SM_STATE::GOAL_POSE_DECCEL:
                 get_robot_position_wrt_odom();
                 global_error = sqrt((goal_x_ - robot_x_)*(goal_x_ - robot_x_) + (goal_y_ - robot_y_)*(goal_y_ - robot_y_));
 
                 if(global_error < fine_dist_tolerance_)
-                        state = SM_GOAL_POSE_CORRECT_ANGLE;
+                        state = SM_STATE::GOAL_POSE_CORRECT_ANGLE;
                 if(--attempts <= 0)
                 {
-                    state = SM_GOAL_POSE_FAILED;
+                    state = SM_STATE::GOAL_POSE_FAILED;
                     std::cout << "SimpleMove.-> Timeout exceeded while trying to reach goal position. Current state: GOAL_POSE_DECCEL." << std::endl;
                 }
                 current_linear_speed = temp_k * sqrt(global_error);
@@ -815,44 +818,44 @@ private:
                                                        use_pot_fields_, rejection_force_.y));
                 break;
 
-            case SM_GOAL_POSE_CORRECT_ANGLE:
+            case SM_STATE::GOAL_POSE_CORRECT_ANGLE:
                 get_robot_position_wrt_odom();
                 global_error = (goal_t_ - robot_t_);
                 if (global_error > M_PI) global_error-=2*M_PI;
                 if (global_error <= -M_PI) global_error+=2*M_PI;
                 global_error = fabs(global_error);
                 if(global_error < angle_tolerance_)
-                    state = SM_GOAL_POSE_FINISH;
+                    state = SM_STATE::GOAL_POSE_FINISH;
                 pub_cmd_vel_->publish(calculate_speeds(robot_t_, goal_t_, max_angular_speed_, beta_/4));
                 if(--attempts <= 0)
                 {
-                    state = SM_GOAL_POSE_FAILED;
+                    state = SM_STATE::GOAL_POSE_FAILED;
                     std::cout << "SimpleMove.-> Timeout exceeded while trying to reach goal position. Current state: GOAL_POSE_CORRECT_ANGLE." << std::endl;
                 }   
                 break;
 
-            case SM_GOAL_POSE_FINISH:
+            case SM_STATE::GOAL_POSE_FINISH:
                 std::cout << "SimpleMove.-> Successful move with dist=" << goal_distance_ << " angle=" << goal_angle_ << std::endl;
-                state = SM_INIT;
+                state = SM_STATE::INIT;
                 msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::SUCCEEDED;
                 pub_goal_reached_->publish(msg_goal_reached);
                 pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                 current_linear_speed = 0;
                 break;
 
-            case SM_GOAL_POSE_FAILED:
+            case SM_STATE::GOAL_POSE_FAILED:
                 std::cout << "SimpleMove.-> FAILED move with dist=" << goal_distance_ << " angle=" << goal_angle_ << std::endl;
-                state = SM_INIT;
+                state = SM_STATE::INIT;
                 msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::ABORTED;
                 pub_goal_reached_->publish(msg_goal_reached);
                 pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                 current_linear_speed = 0;
                 break;
 
-            case SM_GOAL_PATH_ACCEL:
+            case SM_STATE::GOAL_PATH_ACCEL:
                 if(collision_risk_)
                 {
-                    state = SM_GOAL_PATH_FAILED;
+                    state = SM_STATE::GOAL_PATH_FAILED;
                     pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                     std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
                 }
@@ -863,21 +866,21 @@ private:
 
                     if(global_error < coarse_dist_tolerance_)
                     {
-                        state = SM_GOAL_PATH_FINISH;
+                        state = SM_STATE::GOAL_PATH_FINISH;
                     }
                     else if(global_error < current_linear_speed*current_linear_speed/linear_acceleration_)
                     {
-                        state = SM_GOAL_PATH_DECCEL;
+                        state = SM_STATE::GOAL_PATH_DECCEL;
                         temp_k = current_linear_speed/sqrt(global_error);
                     }
                     else if(current_linear_speed >= max_linear_speed_)
                     {
-                        state = SM_GOAL_PATH_CRUISE;
+                        state = SM_STATE::GOAL_PATH_CRUISE;
                         current_linear_speed = max_linear_speed_;
                     }
                     if(--attempts <= 0)
                     {
-                        state = SM_GOAL_PATH_FAILED;
+                        state = SM_STATE::GOAL_PATH_FAILED;
                         std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state: GOAL_PATH_ACCEL."<<std::endl;
                     }
                     pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
@@ -889,10 +892,10 @@ private:
                 }
                 break;
 
-            case SM_GOAL_PATH_CRUISE:
+            case SM_STATE::GOAL_PATH_CRUISE:
                 if(collision_risk_)
                 {
-                    state = SM_GOAL_PATH_FAILED;
+                    state = SM_STATE::GOAL_PATH_FAILED;
                     pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                     std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
                 }
@@ -902,15 +905,15 @@ private:
                     get_next_goal_from_path(prev_pose_idx, next_pose_idx);
                     global_error = sqrt((global_goal_x_ - robot_x_)*(global_goal_x_ - robot_x_) + (global_goal_y_ - robot_y_)*(global_goal_y_ - robot_y_));
                     if(global_error < coarse_dist_tolerance_)
-                        state = SM_GOAL_PATH_FINISH;
+                        state = SM_STATE::GOAL_PATH_FINISH;
                     else if(global_error < current_linear_speed*current_linear_speed/linear_acceleration_)
                     {
-                        state = SM_GOAL_PATH_DECCEL;
+                        state = SM_STATE::GOAL_PATH_DECCEL;
                         temp_k = current_linear_speed/sqrt(global_error);
                     }
                     if(--attempts <= 0)
                     {
-                        state = SM_GOAL_PATH_FAILED;
+                        state = SM_STATE::GOAL_PATH_FAILED;
                         std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state: GOAL_PATH_CRUISE."<<std::endl;
                     }
                     pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
@@ -921,10 +924,10 @@ private:
                 }
                 break;
 
-            case SM_GOAL_PATH_DECCEL:
+            case SM_STATE::GOAL_PATH_DECCEL:
                 if(collision_risk_)
                 {
-                    state = SM_GOAL_PATH_FAILED;
+                    state = SM_STATE::GOAL_PATH_FAILED;
                     pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                     std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
                 }
@@ -934,10 +937,10 @@ private:
                     get_next_goal_from_path(prev_pose_idx, next_pose_idx);
                     global_error = sqrt((global_goal_x_ - robot_x_)*(global_goal_x_ - robot_x_) + (global_goal_y_ - robot_y_)*(global_goal_y_ - robot_y_));
                     if(global_error < coarse_dist_tolerance_)
-                        state = SM_GOAL_PATH_FINISH;
+                        state = SM_STATE::GOAL_PATH_FINISH;
                     if(--attempts <= 0)
                     {
-                        state = SM_GOAL_PATH_FAILED;
+                        state = SM_STATE::GOAL_PATH_FAILED;
                         std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state:GOAL_PATH_DECCEL."<<std::endl;
                     }
                     current_linear_speed = temp_k * sqrt(global_error);
@@ -950,18 +953,18 @@ private:
                 }
                 break;
 
-            case SM_GOAL_PATH_FINISH:
+            case SM_STATE::GOAL_PATH_FINISH:
                 std::cout << "SimpleMove.-> Path succesfully followed." << std::endl;
-                state = SM_INIT;
+                state = SM_STATE::INIT;
                 msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::SUCCEEDED;
                 pub_goal_reached_->publish(msg_goal_reached);
                 pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                 current_linear_speed = 0;
                 break;
 
-            case SM_GOAL_PATH_FAILED:
+            case SM_STATE::GOAL_PATH_FAILED:
                 std::cout << "SimpleMove.-> FAILED path traking." << std::endl;
-                state = SM_INIT;
+                state = SM_STATE::INIT;
                 msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::ABORTED;
                 pub_goal_reached_->publish(msg_goal_reached);
                 pub_cmd_vel_->publish(geometry_msgs::msg::Twist());

@@ -266,7 +266,7 @@ private:
 
             if (!smoothed.poses.empty()){
                 response->plan = smoothed;
-                RCLCPP_INFO(this->get_logger(), "PathPlanner.-> Path planned successfully with size: %d", response->plan.poses.size()); 
+                RCLCPP_INFO(this->get_logger(), "PathPlanner.-> Path planned successfully with size: %ld", response->plan.poses.size()); 
             } else {
                 RCLCPP_WARN(this->get_logger(), "PathPlanner.-> Failed to plan path.");
                 response->plan.poses.clear();
@@ -308,7 +308,7 @@ private:
 
             if (!smoothed.poses.empty()){
                 response->plan = smoothed;
-                RCLCPP_INFO(this->get_logger(), "PathPlanner.-> Path planned successfully with size: %d", response->plan.poses.size()); 
+                RCLCPP_INFO(this->get_logger(), "PathPlanner.-> Path planned successfully with size: %ld", response->plan.poses.size()); 
             } else {
                 RCLCPP_WARN(this->get_logger(), "PathPlanner.-> Failed to plan path.");
                 response->plan.poses.clear();
