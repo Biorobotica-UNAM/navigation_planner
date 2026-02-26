@@ -125,7 +125,7 @@ public:
             make_name("/simple_move/goal_dist_angle"), 
             rclcpp::QoS(10).transient_local());
         pub_status_ = this->create_publisher<actionlib_msgs::msg::GoalStatus>(
-            make_name("/navigation/status"), 
+            make_name("/status"), 
             rclcpp::QoS(10).transient_local());
         pub_simple_move_stop_ = this->create_publisher<std_msgs::msg::Empty>(
             make_name("/simple_move/stop"), 

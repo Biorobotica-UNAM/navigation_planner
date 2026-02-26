@@ -286,7 +286,7 @@
   <!-- Para NO doble-decay: el detector ya hace decay -->
   <param name="decay_factor" value="0"/>
 
-  <param name="inflation_radius" value="0.22"/>
+  <param name="inflation_radius" value="0.10"/>
   <param name="cost_radius" value="0.25"/>
 
   <param name="use_online" value="False"/>
