@@ -81,6 +81,13 @@
     <!-- Misc -->
     <param name="use_sim_time" value="false"/>
 
+     <!-- Initial Pose -->
+    <param name="set_initial_pose" value="true"/>
+    <param name="initial_pose.x" value="1.0"/>
+    <param name="initial_pose.y" value="2.0"/>
+    <param name="initial_pose.z" value="0.0"/>
+    <param name="initial_pose.yaw" value="1.57"/>
+
   </node>
 
 </launch>

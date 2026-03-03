@@ -78,7 +78,7 @@
       exec="relay" 
       name="relay_amcl_pose" 
       output="screen"
-      args="/navigation/amcl_pose /laser_2d_correct_pose">
+      args="/navigation/amcl_pose /laser_2d_pose">
 </node>
 
 
