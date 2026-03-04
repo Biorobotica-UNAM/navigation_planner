@@ -52,12 +52,6 @@
   <arg name="cloud_max_z" default="1.20"/>
 
     <!-- relays -->
-<node pkg="topic_tools"
-      exec="relay"
-      name="relay_initialpose"
-      output="screen"
-      args="/$(var namespace_nav)/initialpose /initialpose">
-</node>
 
 <node pkg="topic_tools"
       exec="relay"
@@ -78,6 +72,13 @@
       name="relay_cmd_vel"
       output="screen"
       args="/hardware/base/cmd_vel /omni_base_controller/cmd_vel">
+</node>
+
+<node pkg="topic_tools" 
+      exec="relay" 
+      name="relay_amcl_pose" 
+      output="screen"
+      args="/navigation/amcl_pose /laser_2d_pose">
 </node>
 
 
@@ -103,7 +104,7 @@
   </node>
 
   <!-- ===== Localization (nav2-amcl) ===== -->
-  <!--No hay y no lo busquen pendejos jijijijij-->
+  <include file="$(find-pkg-share navigation_start)/launch/amcl_hsr.launch.xml"/>
 
   <!-- ===== Lifecycle Manager ===== -->
   <node name="lifecycle_manager_map"
@@ -114,7 +115,7 @@
         namespace="$(var namespace_nav)">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="autostart" value="true"/>
-    <param name="node_names" value="['static_map_server', 'prohibition_map_server']"/>
+    <param name="node_names" value="['static_map_server', 'prohibition_map_server', 'amcl']"/>
   </node>
 
   <!-- ===== Map Enhancer (online) ===== -->
@@ -166,7 +167,7 @@
   <!-- Para NO doble-decay: el detector ya hace decay -->
   <param name="decay_factor" value="0"/>
 
-  <param name="inflation_radius" value="0.15"/>
+  <param name="inflation_radius" value="0.10"/>
   <param name="cost_radius" value="0.25"/>
 
   <param name="use_online" value="False"/>
