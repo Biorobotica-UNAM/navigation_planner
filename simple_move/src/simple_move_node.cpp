@@ -103,7 +103,7 @@ public:
             make_name("/simple_move/goal_reached"), 
             rclcpp::QoS(10).transient_local());
         pub_head_goal_pose_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
-            make_name("/hardware/head/goal_pose"), 
+            "/hardware/head/goal_pose", 
             rclcpp::QoS(10).transient_local());
 
         //############
