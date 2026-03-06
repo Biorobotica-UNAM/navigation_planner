@@ -61,6 +61,11 @@ public:
     this->declare_parameter("prohibition_map_server", "/prohibition_map_server/map"); // no se usa aquí
     this->declare_parameter("base_link_name",         "base_footprint");
 
+    this->declare_parameter("use_ground_filter", false);
+    this->declare_parameter("use_ransac", true);
+    this->declare_parameter("ground_height_threshold", 0.05);
+    this->declare_parameter("ransac_distance_threshold", 0.03);
+
     // === load params ===
     this->get_parameter("use_namespace", use_namespace_);
     this->get_parameter("use_lidar", use_lidar_);
@@ -92,6 +97,11 @@ public:
     this->get_parameter("static_map_server", static_map_server_);
     this->get_parameter("base_link_name", base_link_name_);
 
+    this->get_parameter("use_ground_filter", use_ground_filter_);
+    this->get_parameter("use_ransac", use_ransac_);
+    this->get_parameter("ground_height_threshold", ground_height_threshold_);
+    this->get_parameter("ransac_distance_threshold", ransac_distance_threshold_);
+
     // param callback (opcional pero útil si afinas rápido)
     param_callback_handle_ = this->add_on_set_parameters_callback(
       std::bind(&ObstacleDetectorNode::on_parameter_change, this, std::placeholders::_1));
@@ -108,7 +118,7 @@ public:
 
     sub_point_cloud2_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       point_cloud_topic2_, rclcpp::SensorDataQoS(),
-      std::bind(&ObstacleDetectorNode::cb_cloud2, this, std::placeholders::_1));
+      std::bind(&ObstacleDetectorNode::cb_cloud2, this, std::placeholders::_1));;
 
     sub_laser_scan_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
       laser_scan_topic_, rclcpp::SensorDataQoS(),
@@ -158,6 +168,12 @@ private:
   float cloud_min_x_, cloud_max_x_, cloud_min_y_, cloud_max_y_, cloud_min_z_, cloud_max_z_;
   int decay_factor_{10};
   int cloud_downsampling_{1}, cloud_downsampling2_{1}, lidar_downsampling_{1};
+
+  bool use_ground_filter_{false};
+  bool use_ransac_{false};
+
+  float ground_height_threshold_{0.12};
+  float ransac_distance_threshold_{0.03};
 
   std::string point_cloud_topic_, point_cloud_topic2_, laser_scan_topic_;
   std::string static_map_server_;
@@ -334,12 +350,14 @@ private:
   void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cloud, int downsample)
   {
     if (!cloud) return;
+    if (cloud->data.empty() || cloud->width == 0 || cloud->height == 0) return;
 
     const unsigned char *p = cloud->data.data();
     Eigen::Affine3d cam_to_robot = get_relative_position(base_link_name_, cloud->header.frame_id);
     Eigen::Affine3d robot_to_map = get_relative_position("map", base_link_name_);
 
     const size_t total = static_cast<size_t>(cloud->width) * static_cast<size_t>(cloud->height);
+    
     for (size_t i = 0; i < total; i += static_cast<size_t>(downsample))
     {
       Eigen::Vector3d v(
@@ -399,6 +417,8 @@ private:
   {
     if (!have_grid_) return;
 
+    try{
+
     // decay rápido (esto te quita “ghost obstacles” sin depender del merger)
     decay_map(obstacles_map_, decay_factor_);
 
@@ -410,7 +430,18 @@ private:
     obstacles_map_.header.stamp = this->now();
     obstacles_map_.header.frame_id = "map";
     pub_obstacles_map_->publish(obstacles_map_);
+    }
+    catch(const std::exception &e)
+    {
+        RCLCPP_ERROR(this->get_logger(), "ObstacleDetector.-> Error in processing loop: %s", e.what());
+
+    }
+    catch(...)
+    {
+        RCLCPP_ERROR(this->get_logger(), "ObstacleDetector.-> Unknown error in processing loop.");
+    }
   }
+
 };
 
 int main(int argc, char **argv)
