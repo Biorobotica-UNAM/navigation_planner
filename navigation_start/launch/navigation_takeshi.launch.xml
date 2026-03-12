@@ -12,7 +12,7 @@
 
   <!-- ===== Topic args (I/O) ===== -->
   <arg name="pose_topic" default="pose"/>
-  <arg name="point_cloud_topic" default="/$(var namespace_hardware)/camera/pointcloud2"/>
+  <arg name="point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
   <!--arg name="bumper_f_topic" default="/bumper"/-->
 
   <arg name="laser_scan_topic"  default="/$(var namespace_hardware)/base/scan"/>
