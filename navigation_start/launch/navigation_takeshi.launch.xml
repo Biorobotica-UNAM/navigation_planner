@@ -210,10 +210,10 @@
   <param name="use_point_cloud2" value="false"/>
 
   <param name="cloud_downsampling" value="$(var cloud_downsampling)"/>
-  <param name="lidar_downsampling" value="1"/>
+  <param name="lidar_downsampling" value="$(var lidar_downsampling)"/>
 
   <!-- Detector rápido -->
-  <param name="decay_factor" value="2"/>
+  <param name="decay_factor" value="4"/>
 
   <!-- límites -->
   <param name="laser_max_x" value="$(var laser_max_x)"/>
@@ -254,10 +254,11 @@
         respawn="true"
         namespace="$(var namespace_nav)">
     <param name="use_namespace" value="$(var use_namespace)"/>
-    <param name="max_linear_speed" value="0.8"/>
-    <param name="max_angular_speed" value="1.25"/>
+    <!-- Previously: max linear = 0.8, max_angular = 1.25, alpha =0.2, beta = 0.8-->
+    <param name="max_linear_speed" value="0.9"/> 
+    <param name="max_angular_speed" value="1.30"/>
     <param name="control_alpha" value="0.2"/>
-    <param name="control_beta" value="0.8"/>
+    <param name="control_beta" value="0.6"/>
     <param name="move_head" value="True"/>
     <param name="use_pot_fields" value="$(var use_pot_fields)"/>
     <param name="base_link_name" value="base_link"/>
