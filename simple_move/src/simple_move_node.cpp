@@ -8,7 +8,7 @@
 #include "nav_msgs/msg/path.hpp"
 #include "std_msgs/msg/float32.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
-//#include "std_msgs/msg/float64_multi_array.hpp"
+#include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/empty.hpp"
 #include "actionlib_msgs/msg/goal_status.hpp"
@@ -102,8 +102,8 @@ public:
         pub_goal_reached_   = this->create_publisher<actionlib_msgs::msg::GoalStatus>(
             make_name("/simple_move/goal_reached"), 
             rclcpp::QoS(10).transient_local());
-        pub_head_goal_pose_ = this->create_publisher<std_msgs::msg::Float32MultiArray>(
-            make_name("/hardware/head/goal_pose"), 
+        pub_head_goal_pose_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
+            "/hardware/head/goal_pose", 
             rclcpp::QoS(10).transient_local());
 
         //############
@@ -228,7 +228,7 @@ private:
     // Publishers
     rclcpp::Publisher<actionlib_msgs::msg::GoalStatus>::SharedPtr   pub_goal_reached_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr         pub_cmd_vel_;
-    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr  pub_head_goal_pose_;
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr  pub_head_goal_pose_;
 
     //############
     // Subscribers
@@ -683,9 +683,9 @@ private:
         }while(error < 0.25 && ++next_pose_idx < goal_path_.poses.size());
     }
 
-    std_msgs::msg::Float32MultiArray get_next_goal_head_angles(size_t next_pose_idx)
+    std_msgs::msg::Float64MultiArray get_next_goal_head_angles(size_t next_pose_idx)
     {
-        std_msgs::msg::Float32MultiArray msg;
+        std_msgs::msg::Float64MultiArray msg;
         size_t idx = next_pose_idx + 5 >=  goal_path_.poses.size() - 1 ? goal_path_.poses.size() - 1 : next_pose_idx + 5;
         float goal_x = goal_path_.poses[idx].pose.position.x;
         float goal_y = goal_path_.poses[idx].pose.position.y;
