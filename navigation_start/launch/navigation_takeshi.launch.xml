@@ -50,36 +50,15 @@
   <arg name="cloud_min_z" default="0.04"/>
   <arg name="cloud_max_z" default="1.0"/>
 
-    <!-- relays -->
 
-<node pkg="topic_tools"
-      exec="relay"
-      name="relay_scan"
-      output="screen"
-      args="/scan /hardware/base/scan ">
-</node>
-
-<node pkg="topic_tools"
-      exec="relay"
-      name="relay_odom"
-      output="screen"
-      args="/switched_odom /hardware/base/odom ">
-</node>
-
-<node pkg="topic_tools"
-      exec="relay"
-      name="relay_cmd_vel"
-      output="screen"
-      args="/hardware/base/cmd_vel /omni_base_controller/cmd_vel">
-</node>
-
+<!--
 <node pkg="topic_tools" 
       exec="relay" 
       name="relay_amcl_pose" 
       output="screen"
       args="/navigation/amcl_pose /laser_2d_pose">
 </node>
-
+-->
 
   <!-- ===== Map servers ===== -->
   <node name="static_map_server"
