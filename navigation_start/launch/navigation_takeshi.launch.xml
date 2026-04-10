@@ -51,21 +51,6 @@
   <arg name="cloud_max_z" default="1.0"/>
 
 
-<<<<<<< Updated upstream
-<!--
-=======
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-<node pkg="topic_tools" 
-      exec="relay" 
-      name="relay_amcl_pose" 
-      output="screen"
-      args="/navigation/amcl_pose /laser_2d_pose">
-</node>
--->
-
-=======
->>>>>>> Stashed changes
   <!-- ===== Map servers ===== -->
   <node name="static_map_server"
         pkg="nav2_map_server"
