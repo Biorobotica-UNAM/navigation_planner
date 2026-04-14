@@ -2,8 +2,8 @@
 
   <!-- ===== Global args ===== -->
   <arg name="use_sim_time" default="false"/>
-  <arg name="namespace_hardware" default=""/>
-  <arg name="namespace_nav" default=""/>
+  <arg name="namespace_hardware" default="hardware"/>
+  <arg name="namespace_nav" default="navigation"/>
   <arg name="use_namespace" default="true"/>
 
   <!-- ===== Map server args ===== -->
@@ -12,19 +12,18 @@
 
   <!-- ===== Topic args (I/O) ===== -->
   <arg name="pose_topic" default="pose"/>
-  <arg name="point_cloud_topic" default="camera/depth_registered/rectified_points"/>
+  <arg name="point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
   <!--arg name="bumper_f_topic" default="/bumper"/-->
 
   <arg name="laser_scan_topic"  default="/$(var namespace_hardware)/base/scan"/>
   <arg name="odom_topic"        default="/$(var namespace_hardware)/base/odom"/>
   <arg name="cmd_vel_topic"     default="/$(var namespace_hardware)/base/cmd_vel"/>
-  <arg name="point_cloud_topic" default="/$(var namespace_hardware)/base/depth_registered/rectified_points"/>
   <arg name="bumper_f_topic"    default="/$(var namespace_hardware)/base/bumper"/>
 
   <!-- ===== Feature toggles ===== -->
   <arg name="use_lidar" default="True"/>
   <arg name="use_sonars" default="False"/>
-  <arg name="use_point_cloud" default="False"/>
+  <arg name="use_point_cloud" default="True"/>
   <arg name="use_bumper" default="False"/>
   <arg name="use_pot_fields" default="False"/>
 
@@ -351,7 +350,7 @@
         namespace="$(var namespace_nav)">
     <param name="use_namespace" value="$(var use_namespace)"/> 
     <param name="debug" value="False"/>
-    <param name="show_image" value="True"/>
+    <param name="show_image" value="False"/>
     <param name="use_pot_fields" value="$(var use_pot_fields)"/>
 
     <param name="use_lidar" value="$(var use_lidar)"/>
