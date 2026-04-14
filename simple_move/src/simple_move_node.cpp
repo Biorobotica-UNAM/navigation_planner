@@ -104,7 +104,7 @@ public:
             rclcpp::QoS(10).transient_local());
         pub_head_goal_pose_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
             "/hardware/head/goal_pose", 
-            rclcpp::QoS(10).transient_local());
+            rclcpp::QoS(10).durability_volatile());
 
         //############
         // Subscribers
