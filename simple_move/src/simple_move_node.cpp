@@ -360,39 +360,39 @@ private:
     //############
     //Simple Move callbacks
     void callback_general_stop(const std_msgs::msg::Empty::SharedPtr msg) 
-    {
-        try 
-        {
-			if (msg->data){
-			    std::cout << "SimpleMove.-> General Stop signal received" << std::endl;
-			    stop_     = true;
-			    new_pose_ = false;
-			    new_path_ = false;
-			    move_lat_ = false;
-			}
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_general_stop: %s", e.what());
-        }
-    }
+	{
+		(void) msg;
+		try 
+		{
+		    std::cout << "SimpleMove.-> General Stop signal received" << std::endl;
+		    stop_     = true;
+		    new_pose_ = false;
+		    new_path_ = false;
+		    move_lat_ = false;
+		} 
+		catch (const std::exception &e) 
+		{
+		    RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_general_stop: %s", e.what());
+		}
+	}
 
-    void callback_navigation_stop(const std_msgs::msg::bool::SharedPtr msg) 
-    {
-        (void) msg;
-        try 
-        {
-            std::cout << "SimpleMove.-> Navigation Stop signal received" << std::endl;
-            stop_     = true;
-            new_pose_ = false;
-            new_path_ = false;
-            move_lat_ = false;
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_navigation_stop: %s", e.what());
-        }
-    }
+    void callback_navigation_stop(const std_msgs::msg::Bool::SharedPtr msg) 
+	{
+		try 
+		{
+		    if (msg->data) {
+		        std::cout << "SimpleMove.-> Navigation Stop signal received" << std::endl;
+		        stop_     = true;
+		        new_pose_ = false;
+		        new_path_ = false;
+		        move_lat_ = false;
+		    }
+		} 
+		catch (const std::exception &e) 
+		{
+		    RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_navigation_stop: %s", e.what());
+		}
+	}
 
     void callback_simple_move_stop(const std_msgs::msg::Empty::SharedPtr msg) 
     {
