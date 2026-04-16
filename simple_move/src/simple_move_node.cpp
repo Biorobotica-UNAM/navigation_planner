@@ -114,7 +114,7 @@ public:
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_general_stop, this, std::placeholders::_1));
 
-        sub_navCtrlStop_ = this->create_subscription<std_msgs::msg::Empty>(
+        sub_navCtrlStop_ = this->create_subscription<std_msgs::msg::Bool>(
             make_name("/navigation/stop"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_navigation_stop, this, std::placeholders::_1));
@@ -361,14 +361,15 @@ private:
     //Simple Move callbacks
     void callback_general_stop(const std_msgs::msg::Bool::SharedPtr msg) 
     {
-        (bool) msg;
         try 
         {
-            std::cout << "SimpleMove.-> General Stop signal received" << std::endl;
-            stop_     = true;
-            new_pose_ = false;
-            new_path_ = false;
-            move_lat_ = false;
+			if (msg->data){
+			    std::cout << "SimpleMove.-> General Stop signal received" << std::endl;
+			    stop_     = true;
+			    new_pose_ = false;
+			    new_path_ = false;
+			    move_lat_ = false;
+			}
         } 
         catch (const std::exception &e) 
         {
