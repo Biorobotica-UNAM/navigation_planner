@@ -109,7 +109,7 @@ public:
         //############
         // Subscribers
         //// stop
-        sub_generalStop_ = this->create_subscription<std_msgs::msg::Empty>(
+        sub_generalStop_ = this->create_subscription<std_msgs::msg::Bool>(
             make_name("/stop"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_general_stop, this, std::placeholders::_1));
@@ -359,9 +359,9 @@ private:
 
     //############
     //Simple Move callbacks
-    void callback_general_stop(const std_msgs::msg::Empty::SharedPtr msg) 
+    void callback_general_stop(const std_msgs::msg::Bool::SharedPtr msg) 
     {
-        (void) msg;
+        (bool) msg;
         try 
         {
             std::cout << "SimpleMove.-> General Stop signal received" << std::endl;
