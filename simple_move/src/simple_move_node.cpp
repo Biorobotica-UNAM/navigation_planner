@@ -359,7 +359,7 @@ private:
 
     //############
     //Simple Move callbacks
-    void callback_general_stop(const std_msgs::msg::Bool::SharedPtr msg) 
+    void callback_general_stop(const std_msgs::msg::Empty::SharedPtr msg) 
     {
         try 
         {
@@ -377,7 +377,7 @@ private:
         }
     }
 
-    void callback_navigation_stop(const std_msgs::msg::Empty::SharedPtr msg) 
+    void callback_navigation_stop(const std_msgs::msg::bool::SharedPtr msg) 
     {
         (void) msg;
         try 
