@@ -330,7 +330,7 @@
         namespace="$(var namespace_nav)">
     <param name="use_namespace" value="$(var use_namespace)"/>
     <param name="max_linear_speed" value="0.8"/>
-    <param name="max_angular_speed" value="1.25"/>
+    <param name="max_angular_speed" value="0.6"/>
     <!--param name="control_alpha" value="0.2"/-->
     <param name="control_alpha" value="0.08"/>
     <!--param name="control_beta" value="0.8"/-->
