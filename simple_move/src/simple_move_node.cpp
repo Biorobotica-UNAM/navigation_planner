@@ -109,7 +109,7 @@ public:
         //############
         // Subscribers
         //// stop
-        sub_generalStop_ = this->create_subscription<std_msgs::msg::Bool>(
+        sub_generalStop_ = this->create_subscription<std_msgs::msg::Empty>(
             make_name("/stop"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_general_stop, this, std::placeholders::_1));
