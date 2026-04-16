@@ -234,7 +234,7 @@ private:
     // Subscribers
     //// stop
     rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_generalStop_;
-    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_navCtrlStop_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_navCtrlStop_;
     rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_navSimpleMvStop_;
 
     //// goal
