@@ -115,7 +115,7 @@ public:
             std::bind(&SimpleMoveNode::callback_general_stop, this, std::placeholders::_1));
 
         sub_navCtrlStop_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/navigation/stop"), 
+            make_name("/navigation_ctrl/stop"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_navigation_stop, this, std::placeholders::_1));
 
