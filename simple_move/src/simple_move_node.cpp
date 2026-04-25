@@ -104,7 +104,7 @@ public:
             rclcpp::QoS(10).transient_local());
         pub_head_goal_pose_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
             "/hardware/head/goal_pose", 
-            rclcpp::QoS(10).transient_local());
+            rclcpp::QoS(10).durability_volatile());
 
         //############
         // Subscribers
@@ -114,8 +114,8 @@ public:
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_general_stop, this, std::placeholders::_1));
 
-        sub_navCtrlStop_ = this->create_subscription<std_msgs::msg::Empty>(
-            make_name("/navigation/stop"), 
+        sub_navCtrlStop_ = this->create_subscription<std_msgs::msg::Bool>(
+            make_name("/navigation_ctrl/stop"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_navigation_stop, this, std::placeholders::_1));
 
@@ -234,7 +234,7 @@ private:
     // Subscribers
     //// stop
     rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_generalStop_;
-    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_navCtrlStop_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_navCtrlStop_;
     rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_navSimpleMvStop_;
 
     //// goal
@@ -360,38 +360,39 @@ private:
     //############
     //Simple Move callbacks
     void callback_general_stop(const std_msgs::msg::Empty::SharedPtr msg) 
-    {
-        (void) msg;
-        try 
-        {
-            std::cout << "SimpleMove.-> General Stop signal received" << std::endl;
-            stop_     = true;
-            new_pose_ = false;
-            new_path_ = false;
-            move_lat_ = false;
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_general_stop: %s", e.what());
-        }
-    }
+	{
+		(void) msg;
+		try 
+		{
+		    std::cout << "SimpleMove.-> General Stop signal received" << std::endl;
+		    stop_     = true;
+		    new_pose_ = false;
+		    new_path_ = false;
+		    move_lat_ = false;
+		} 
+		catch (const std::exception &e) 
+		{
+		    RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_general_stop: %s", e.what());
+		}
+	}
 
-    void callback_navigation_stop(const std_msgs::msg::Empty::SharedPtr msg) 
-    {
-        (void) msg;
-        try 
-        {
-            std::cout << "SimpleMove.-> Navigation Stop signal received" << std::endl;
-            stop_     = true;
-            new_pose_ = false;
-            new_path_ = false;
-            move_lat_ = false;
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_navigation_stop: %s", e.what());
-        }
-    }
+    void callback_navigation_stop(const std_msgs::msg::Bool::SharedPtr msg) 
+	{
+		try 
+		{
+		    if (msg->data) {
+		        std::cout << "SimpleMove.-> Navigation Stop signal received" << std::endl;
+		        stop_     = true;
+		        new_pose_ = false;
+		        new_path_ = false;
+		        move_lat_ = false;
+		    }
+		} 
+		catch (const std::exception &e) 
+		{
+		    RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_navigation_stop: %s", e.what());
+		}
+	}
 
     void callback_simple_move_stop(const std_msgs::msg::Empty::SharedPtr msg) 
     {
