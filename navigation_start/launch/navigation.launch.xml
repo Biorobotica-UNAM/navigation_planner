@@ -48,7 +48,7 @@
   <arg name="cloud_min_y" default="-0.30"/>
   <arg name="cloud_max_y" default="0.30"/>
   <arg name="cloud_min_z" default="0.01"/>
-  <arg name="cloud_max_z" default="1.20"/>
+  <arg name="cloud_max_z" default="1.0"/>
 
   <!-- ===== Map servers ===== -->
   <node name="static_map_server"
