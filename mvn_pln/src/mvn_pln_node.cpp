@@ -72,7 +72,7 @@ public:
         this->declare_parameter<float>("proximity_criterion",  2.0f);
         this->declare_parameter<bool>("accept_near_goal_on_collision", true);
         this->declare_parameter<float>("near_goal_arrival_distance", 0.30f);
-        this->declare_parameter<std::string>("base_link_name", "base_footprint");
+        this->declare_parameter<std::string>("base_link_name", "base_link");
 
         // Initialize internal variables from declared parameters
         this->get_parameter("use_namespace",                  use_namespace_);
