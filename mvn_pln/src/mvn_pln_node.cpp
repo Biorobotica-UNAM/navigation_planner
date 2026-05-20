@@ -197,6 +197,7 @@ private:
     int current_status = 0;
 
     bool near_goal_sent = false;
+    bool finishing_near_goal_after_collision_ = false;
 
     // ROS 2 message types
     std_msgs::msg::Bool msg_bool;
@@ -657,6 +658,7 @@ private:
                         "Starting new movement task"
                     );
                     near_goal_sent = false;
+                    finishing_near_goal_after_collision_ = false;
                 }
                 break;
             }
@@ -1012,11 +1014,16 @@ private:
                     // or people. The local obstacle layers can then see the
                     // target itself as an obstacle and simple_move aborts even
                     // though the robot is already close enough for the task.
-                    // In that specific case, accept the goal as reached.
+                    // In that case, stop translational navigation and only
+                    // try the final yaw correction. If final yaw cannot be
+                    // corrected, the task fails instead of replanning around
+                    // the target object/person forever.
                     if (accept_near_goal_on_collision_ &&
                         error <= near_goal_arrival_distance_)
                     {
                         collision_risk_ = false;
+                        is_temporary_no_cloud_pot_fields_ = false;
+                        finishing_near_goal_after_collision_ = true;
                         msg_bool.data = false;
                         pub_pot_fields_enable_->publish(msg_bool);
                         pub_pot_fields_enable_cloud_->publish(msg_bool);
@@ -1028,13 +1035,14 @@ private:
                                     << " threshold=" << near_goal_arrival_distance_;
 
                         current_status = publish_status(
-                            actionlib_msgs::msg::GoalStatus::SUCCEEDED,
+                            actionlib_msgs::msg::GoalStatus::ACTIVE,
                             goal_id,
-                            status_text.str()
+                            status_text.str() + ". Correcting final angle"
                         );
 
-                        std::cout << "MotionPlanner.-> " << status_text.str() << std::endl;
-                        state = SM_STATE::INIT;
+                        std::cout << "MotionPlanner.-> " << status_text.str()
+                                  << ". Correcting final angle." << std::endl;
+                        state = SM_STATE::CORRECT_FINAL_ANGLE;
                         break;
                     }
 
@@ -1130,8 +1138,22 @@ private:
                 else if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED)
                 {
                     simple_move_goal_status_.status = 0;
-                    std::cout << "MotionPlanner.-> Simple move reported move aborted. Trying again..." << std::endl;
-                    state = SM_STATE::CALCULATE_PATH;
+                    if (finishing_near_goal_after_collision_)
+                    {
+                        finishing_near_goal_after_collision_ = false;
+                        current_status = publish_status(
+                            actionlib_msgs::msg::GoalStatus::ABORTED,
+                            goal_id,
+                            "Near goal position reached, but final angle correction failed"
+                        );
+                        std::cout << "MotionPlanner.-> Near goal reached, but final angle correction failed." << std::endl;
+                        state = SM_STATE::INIT;
+                    }
+                    else
+                    {
+                        std::cout << "MotionPlanner.-> Simple move reported move aborted. Trying again..." << std::endl;
+                        state = SM_STATE::CALCULATE_PATH;
+                    }
                 }
                 break;
             }
@@ -1139,11 +1161,15 @@ private:
 
             case SM_STATE::FINAL:
             {
+                const bool near_goal_collision_finish = finishing_near_goal_after_collision_;
+                finishing_near_goal_after_collision_ = false;
                 std::cout << "MotionPlanner.-> TASK FINISHED." << std::endl;
                 current_status = publish_status(
                     actionlib_msgs::msg::GoalStatus::SUCCEEDED, 
                     goal_id, 
-                    "Global goal point reached"
+                    near_goal_collision_finish
+                        ? "Near goal accepted after obstacle at target and final angle corrected"
+                        : "Global goal point reached"
                 );
                 state = SM_STATE::INIT;
                 break;
