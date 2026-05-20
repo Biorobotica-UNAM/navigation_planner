@@ -70,13 +70,17 @@ public:
         this->declare_parameter("use_namespace",               false);
         this->declare_parameter<bool>("patience",              true);
         this->declare_parameter<float>("proximity_criterion",  2.0f);
+        this->declare_parameter<bool>("accept_near_goal_on_collision", true);
+        this->declare_parameter<float>("near_goal_arrival_distance", 0.30f);
         this->declare_parameter<std::string>("base_link_name", "base_footprint");
 
         // Initialize internal variables from declared parameters
-        this->get_parameter("use_namespace",        use_namespace_);
-        this->get_parameter("patience",             patience_);
-        this->get_parameter("proximity_criterion",  proximity_criterion_);
-        this->get_parameter("base_link_name",       base_link_name_);
+        this->get_parameter("use_namespace",                  use_namespace_);
+        this->get_parameter("patience",                       patience_);
+        this->get_parameter("proximity_criterion",            proximity_criterion_);
+        this->get_parameter("accept_near_goal_on_collision",  accept_near_goal_on_collision_);
+        this->get_parameter("near_goal_arrival_distance",     near_goal_arrival_distance_);
+        this->get_parameter("base_link_name",                 base_link_name_);
 
         // Setup parameter change callback
         param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -180,6 +184,8 @@ private:
     // Internal parameter values
     bool  patience_;
     float proximity_criterion_;
+    bool  accept_near_goal_on_collision_;
+    float near_goal_arrival_distance_;
     std::string base_link_name_;
 
     // Motion Planner processing variables
@@ -285,6 +291,12 @@ private:
             if (param.get_name()      == "use_namespace")       use_namespace_          = param.as_bool();
             else if (param.get_name() == "patience")            patience_               = param.as_bool();
             else if (param.get_name() == "proximity_criterion") proximity_criterion_    = param.as_double();
+            else if (param.get_name() == "accept_near_goal_on_collision") {
+                accept_near_goal_on_collision_ = param.as_bool();
+            }
+            else if (param.get_name() == "near_goal_arrival_distance") {
+                near_goal_arrival_distance_ = param.as_double();
+            }
             else if (param.get_name() == "base_link_name")      base_link_name_         = param.as_string();
 
             else {
@@ -994,6 +1006,38 @@ private:
                 else if(!is_temporary_no_cloud_pot_fields_ &&
                         simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED)
                 {
+                    simple_move_goal_status_.status = 0;
+
+                    // Some semantic goals are intentionally placed on objects
+                    // or people. The local obstacle layers can then see the
+                    // target itself as an obstacle and simple_move aborts even
+                    // though the robot is already close enough for the task.
+                    // In that specific case, accept the goal as reached.
+                    if (accept_near_goal_on_collision_ &&
+                        error <= near_goal_arrival_distance_)
+                    {
+                        collision_risk_ = false;
+                        msg_bool.data = false;
+                        pub_pot_fields_enable_->publish(msg_bool);
+                        pub_pot_fields_enable_cloud_->publish(msg_bool);
+                        pub_simple_move_stop_->publish(std_msgs::msg::Empty());
+
+                        std::ostringstream status_text;
+                        status_text << "Near goal accepted as reached after obstacle at target. distance="
+                                    << std::fixed << std::setprecision(2) << error
+                                    << " threshold=" << near_goal_arrival_distance_;
+
+                        current_status = publish_status(
+                            actionlib_msgs::msg::GoalStatus::SUCCEEDED,
+                            goal_id,
+                            status_text.str()
+                        );
+
+                        std::cout << "MotionPlanner.-> " << status_text.str() << std::endl;
+                        state = SM_STATE::INIT;
+                        break;
+                    }
+
                     collision_risk_ = false;
                     std::cout << "MotionPlanner.-> COLLISION RISK DETECTED before goal is reached." << std::endl;
 
