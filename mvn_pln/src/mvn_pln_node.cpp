@@ -599,6 +599,14 @@ private:
         return status;
     }
 
+    bool simple_move_abort_was_collision() const
+    {
+        // simple_move uses GoalStatus.text to explain ABORTED. Without this
+        // guard, normal path-tracking timeouts were treated as collision risk
+        // and mvn_pln kept toggling point-cloud avoidance before replanning.
+        return collision_risk_ || simple_move_goal_status_.text == "collision_risk";
+    }
+
 
     //############
     //Simple Move main processing
@@ -1006,8 +1014,10 @@ private:
                     state = SM_STATE::CORRECT_FINAL_ANGLE;
                 }
                 else if(!is_temporary_no_cloud_pot_fields_ &&
-                        simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED)
+                        simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED &&
+                        simple_move_abort_was_collision())
                 {
+                    const std::string abort_reason = simple_move_goal_status_.text;
                     simple_move_goal_status_.status = 0;
 
                     // Some semantic goals are intentionally placed on objects
@@ -1047,7 +1057,8 @@ private:
                     }
 
                     collision_risk_ = false;
-                    std::cout << "MotionPlanner.-> COLLISION RISK DETECTED before goal is reached." << std::endl;
+                    std::cout << "MotionPlanner.-> COLLISION RISK DETECTED before goal is reached. simple_move_reason="
+                              << abort_reason << std::endl;
 
                     msg_bool.data = false;
                     pub_pot_fields_enable_cloud_->publish(msg_bool);
@@ -1060,9 +1071,11 @@ private:
                 }
                 else if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED)
                 {
+                    const std::string abort_reason = simple_move_goal_status_.text;
                     simple_move_goal_status_.status = 0;
                     is_temporary_no_cloud_pot_fields_ = false;
-                    std::cout << "MotionPlanner.-> Simple move reported path aborted. Trying again..." << std::endl;
+                    std::cout << "MotionPlanner.-> Simple move reported path aborted. reason="
+                              << abort_reason << ". Replanning without toggling potential-field cloud." << std::endl;
                     state = SM_STATE::CALCULATE_PATH;
                 }
                 break;
