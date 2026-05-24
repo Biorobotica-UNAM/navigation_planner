@@ -26,6 +26,7 @@
 #include <iostream>
 #include <vector>
 #include <exception>
+#include <algorithm>
 #include <sstream>
 #include <string>
 ///
@@ -70,6 +71,11 @@ public:
 
         this->declare_parameter<bool>("move_head", true);
         this->declare_parameter<bool>("use_pot_fields", false);
+        // Disabled by default: immediate abort/replan is smoother than
+        // rotating in place when collision_risk flickers near obstacles.
+        this->declare_parameter<bool>("allow_rotation_on_collision", false);
+        this->declare_parameter<float>("rotation_collision_angle_threshold", 0.35f);
+        this->declare_parameter<float>("rotation_collision_angular_speed", 0.45f);
         this->declare_parameter<std::string>("base_link_name", "base_footprint");
         this->declare_parameter<std::string>("odom_name", "odom");
 
@@ -87,6 +93,9 @@ public:
 
         this->get_parameter("move_head",             move_head_);
         this->get_parameter("use_pot_fields",        use_pot_fields_);
+        this->get_parameter("allow_rotation_on_collision", allow_rotation_on_collision_);
+        this->get_parameter("rotation_collision_angle_threshold", rotation_collision_angle_threshold_);
+        this->get_parameter("rotation_collision_angular_speed", rotation_collision_angular_speed_);
         this->get_parameter("base_link_name",        base_link_name_);
         this->get_parameter("odom_name",             odom_name_);
 
@@ -209,6 +218,9 @@ private:
 
     bool move_head_;
     bool use_pot_fields_;
+    bool allow_rotation_on_collision_;
+    float rotation_collision_angle_threshold_;
+    float rotation_collision_angular_speed_;
     std::string base_link_name_;
     std::string odom_name_;
 
@@ -277,6 +289,9 @@ private:
 
             else if (param.get_name() == "move_head")             move_head_               = param.as_bool();
             else if (param.get_name() == "use_pot_fields")        use_pot_fields_          = param.as_bool();
+            else if (param.get_name() == "allow_rotation_on_collision") allow_rotation_on_collision_ = param.as_bool();
+            else if (param.get_name() == "rotation_collision_angle_threshold") rotation_collision_angle_threshold_ = param.as_double();
+            else if (param.get_name() == "rotation_collision_angular_speed") rotation_collision_angular_speed_ = param.as_double();
             else if (param.get_name() == "base_link_name")        base_link_name_          = param.as_string();
             else if (param.get_name() == "odom_name")             odom_name_               = param.as_string();
 
@@ -553,6 +568,44 @@ private:
         result.angular.z = angular_speed * (2 / (1 + exp(-angle_error / beta)) - 1);
         
         return result;
+    }
+
+    float get_heading_error_to_current_path_goal() const
+    {
+        float angle_error = atan2(goal_y_ - robot_y_, goal_x_ - robot_x_) - robot_t_;
+        if(angle_error >   M_PI) angle_error -= 2*M_PI;
+        if(angle_error <= -M_PI) angle_error += 2*M_PI;
+        return angle_error;
+    }
+
+    bool try_rotate_in_place_on_collision(const char * state_label)
+    {
+        if (!allow_rotation_on_collision_)
+            return false;
+
+        get_robot_position_wrt_map();
+        get_next_goal_from_path(prev_pose_idx, next_pose_idx);
+
+        const float angle_error = get_heading_error_to_current_path_goal();
+        if (fabs(angle_error) < rotation_collision_angle_threshold_)
+            return false;
+
+        // Optional recovery for narrow passages: rotate in place only when an
+        // operator explicitly enables it, because flickering obstacle reports
+        // can otherwise make the base oscillate.
+        const float angular_speed = std::min(max_angular_speed_, rotation_collision_angular_speed_);
+        pub_cmd_vel_->publish(calculate_speeds(robot_t_, robot_t_ + angle_error, angular_speed, beta_));
+        if(move_head_) pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+        current_linear_speed = 0;
+
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            2000,
+            "SimpleMove.-> Collision risk in %s, rotating in place to recover. heading_error=%.2f",
+            state_label,
+            angle_error);
+        return true;
     }
 
     bool get_robot_position_wrt_map()
@@ -880,10 +933,13 @@ private:
             case SM_STATE::GOAL_PATH_ACCEL:
                 if(collision_risk_)
                 {
-                    state = SM_STATE::GOAL_PATH_FAILED;
-                    msg_goal_reached.text = "collision_risk";
-                    pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                    std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    if (!try_rotate_in_place_on_collision("GOAL_PATH_ACCEL"))
+                    {
+                        state = SM_STATE::GOAL_PATH_FAILED;
+                        msg_goal_reached.text = "collision_risk";
+                        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
+                        std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    }
                 }
                 else{
                     get_robot_position_wrt_map();
@@ -922,10 +978,13 @@ private:
             case SM_STATE::GOAL_PATH_CRUISE:
                 if(collision_risk_)
                 {
-                    state = SM_STATE::GOAL_PATH_FAILED;
-                    msg_goal_reached.text = "collision_risk";
-                    pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                    std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    if (!try_rotate_in_place_on_collision("GOAL_PATH_CRUISE"))
+                    {
+                        state = SM_STATE::GOAL_PATH_FAILED;
+                        msg_goal_reached.text = "collision_risk";
+                        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
+                        std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    }
                 }
                 else
                 {
@@ -956,10 +1015,13 @@ private:
             case SM_STATE::GOAL_PATH_DECCEL:
                 if(collision_risk_)
                 {
-                    state = SM_STATE::GOAL_PATH_FAILED;
-                    msg_goal_reached.text = "collision_risk";
-                    pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                    std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    if (!try_rotate_in_place_on_collision("GOAL_PATH_DECCEL"))
+                    {
+                        state = SM_STATE::GOAL_PATH_FAILED;
+                        msg_goal_reached.text = "collision_risk";
+                        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
+                        std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    }
                 }
                 else
                 {

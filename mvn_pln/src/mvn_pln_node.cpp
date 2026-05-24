@@ -70,16 +70,12 @@ public:
         this->declare_parameter("use_namespace",               false);
         this->declare_parameter<bool>("patience",              true);
         this->declare_parameter<float>("proximity_criterion",  2.0f);
-        this->declare_parameter<bool>("accept_near_goal_on_collision", true);
-        this->declare_parameter<float>("near_goal_arrival_distance", 0.30f);
         this->declare_parameter<std::string>("base_link_name", "base_link");
 
         // Initialize internal variables from declared parameters
         this->get_parameter("use_namespace",                  use_namespace_);
         this->get_parameter("patience",                       patience_);
         this->get_parameter("proximity_criterion",            proximity_criterion_);
-        this->get_parameter("accept_near_goal_on_collision",  accept_near_goal_on_collision_);
-        this->get_parameter("near_goal_arrival_distance",     near_goal_arrival_distance_);
         this->get_parameter("base_link_name",                 base_link_name_);
 
         // Setup parameter change callback
@@ -184,8 +180,6 @@ private:
     // Internal parameter values
     bool  patience_;
     float proximity_criterion_;
-    bool  accept_near_goal_on_collision_;
-    float near_goal_arrival_distance_;
     std::string base_link_name_;
 
     // Motion Planner processing variables
@@ -197,8 +191,6 @@ private:
     int current_status = 0;
 
     bool near_goal_sent = false;
-    bool finishing_near_goal_after_collision_ = false;
-
     // ROS 2 message types
     std_msgs::msg::Bool msg_bool;
     std_msgs::msg::Float32MultiArray msg_goal_dist_angle;
@@ -292,12 +284,6 @@ private:
             if (param.get_name()      == "use_namespace")       use_namespace_          = param.as_bool();
             else if (param.get_name() == "patience")            patience_               = param.as_bool();
             else if (param.get_name() == "proximity_criterion") proximity_criterion_    = param.as_double();
-            else if (param.get_name() == "accept_near_goal_on_collision") {
-                accept_near_goal_on_collision_ = param.as_bool();
-            }
-            else if (param.get_name() == "near_goal_arrival_distance") {
-                near_goal_arrival_distance_ = param.as_double();
-            }
             else if (param.get_name() == "base_link_name")      base_link_name_         = param.as_string();
 
             else {
@@ -666,7 +652,6 @@ private:
                         "Starting new movement task"
                     );
                     near_goal_sent = false;
-                    finishing_near_goal_after_collision_ = false;
                 }
                 break;
             }
@@ -1020,42 +1005,9 @@ private:
                     const std::string abort_reason = simple_move_goal_status_.text;
                     simple_move_goal_status_.status = 0;
 
-                    // Some semantic goals are intentionally placed on objects
-                    // or people. The local obstacle layers can then see the
-                    // target itself as an obstacle and simple_move aborts even
-                    // though the robot is already close enough for the task.
-                    // In that case, stop translational navigation and only
-                    // try the final yaw correction. If final yaw cannot be
-                    // corrected, the task fails instead of replanning around
-                    // the target object/person forever.
-                    if (accept_near_goal_on_collision_ &&
-                        error <= near_goal_arrival_distance_)
-                    {
-                        collision_risk_ = false;
-                        is_temporary_no_cloud_pot_fields_ = false;
-                        finishing_near_goal_after_collision_ = true;
-                        msg_bool.data = false;
-                        pub_pot_fields_enable_->publish(msg_bool);
-                        pub_pot_fields_enable_cloud_->publish(msg_bool);
-                        pub_simple_move_stop_->publish(std_msgs::msg::Empty());
-
-                        std::ostringstream status_text;
-                        status_text << "Near goal accepted as reached after obstacle at target. distance="
-                                    << std::fixed << std::setprecision(2) << error
-                                    << " threshold=" << near_goal_arrival_distance_;
-
-                        current_status = publish_status(
-                            actionlib_msgs::msg::GoalStatus::ACTIVE,
-                            goal_id,
-                            status_text.str() + ". Correcting final angle"
-                        );
-
-                        std::cout << "MotionPlanner.-> " << status_text.str()
-                                  << ". Correcting final angle." << std::endl;
-                        state = SM_STATE::CORRECT_FINAL_ANGLE;
-                        break;
-                    }
-
+                    // Do not accept "near goal" as success after a collision:
+                    // continue with the normal obstacle-recovery path so the
+                    // robot does not skip translational navigation near targets.
                     collision_risk_ = false;
                     std::cout << "MotionPlanner.-> COLLISION RISK DETECTED before goal is reached. simple_move_reason="
                               << abort_reason << std::endl;
@@ -1151,22 +1103,8 @@ private:
                 else if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED)
                 {
                     simple_move_goal_status_.status = 0;
-                    if (finishing_near_goal_after_collision_)
-                    {
-                        finishing_near_goal_after_collision_ = false;
-                        current_status = publish_status(
-                            actionlib_msgs::msg::GoalStatus::ABORTED,
-                            goal_id,
-                            "Near goal position reached, but final angle correction failed"
-                        );
-                        std::cout << "MotionPlanner.-> Near goal reached, but final angle correction failed." << std::endl;
-                        state = SM_STATE::INIT;
-                    }
-                    else
-                    {
-                        std::cout << "MotionPlanner.-> Simple move reported move aborted. Trying again..." << std::endl;
-                        state = SM_STATE::CALCULATE_PATH;
-                    }
+                    std::cout << "MotionPlanner.-> Simple move reported move aborted. Trying again..." << std::endl;
+                    state = SM_STATE::CALCULATE_PATH;
                 }
                 break;
             }
@@ -1174,15 +1112,11 @@ private:
 
             case SM_STATE::FINAL:
             {
-                const bool near_goal_collision_finish = finishing_near_goal_after_collision_;
-                finishing_near_goal_after_collision_ = false;
                 std::cout << "MotionPlanner.-> TASK FINISHED." << std::endl;
                 current_status = publish_status(
                     actionlib_msgs::msg::GoalStatus::SUCCEEDED, 
                     goal_id, 
-                    near_goal_collision_finish
-                        ? "Near goal accepted after obstacle at target and final angle corrected"
-                        : "Global goal point reached"
+                    "Global goal point reached"
                 );
                 state = SM_STATE::INIT;
                 break;
