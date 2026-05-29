@@ -7,8 +7,10 @@
   <arg name="use_namespace" default="true"/>
 
   <!-- ===== Map server args ===== -->
-  <arg name="static_map_file" default="$(find-pkg-share navigation_start)/maps/maps/tmr_2026/map.yaml"/>
-  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/maps/tmr_2026/map.yaml"/>
+  <!--arg name="static_map_file" default="$(find-pkg-share navigation_start)/maps/maps/wrs2020/map.yaml"/-->
+  <!--arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/maps/wrs2020/map.yaml"/-->
+  <arg name="static_map_file"       default="$(find-pkg-share navigation_start)/maps/maps/tidbots/map.yaml"/>
+  <arg name="prohibition_map_file"  default="$(find-pkg-share navigation_start)/maps/prohibition_maps/tidbots/map.yaml"/>
 
   <!-- ===== Topic args (I/O) ===== -->
   <arg name="pose_topic" default="pose"/>
@@ -44,11 +46,11 @@
 
   <!-- ===== Sensing windows (cloud) ===== -->
   <arg name="cloud_min_x" default="0.30"/>
-  <arg name="cloud_max_x" default="0.65"/>
+  <arg name="cloud_max_x" default="0.80"/>
   <arg name="cloud_min_y" default="-0.30"/>
   <arg name="cloud_max_y" default="0.30"/>
-  <arg name="cloud_min_z" default="0.04"/>
-  <arg name="cloud_max_z" default="1.0"/>
+  <arg name="cloud_min_z" default="0.15"/>
+  <arg name="cloud_max_z" default="1.20"/>
 
 
   <!-- ===== Map servers ===== -->
