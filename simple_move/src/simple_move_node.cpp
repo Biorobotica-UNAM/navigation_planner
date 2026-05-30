@@ -26,6 +26,9 @@
 #include <iostream>
 #include <vector>
 #include <exception>
+#include <algorithm>
+#include <sstream>
+#include <string>
 ///
 
 #define RATE 30
@@ -68,7 +71,11 @@ public:
 
         this->declare_parameter<bool>("move_head", true);
         this->declare_parameter<bool>("use_pot_fields", false);
-
+        // Disabled by default: immediate abort/replan is smoother than
+        // rotating in place when collision_risk flickers near obstacles.
+        this->declare_parameter<bool>("allow_rotation_on_collision", false);
+        this->declare_parameter<float>("rotation_collision_angle_threshold", 0.35f);
+        this->declare_parameter<float>("rotation_collision_angular_speed", 0.45f);
         this->declare_parameter<std::string>("base_link_name", "base_footprint");
         this->declare_parameter<std::string>("odom_name", "odom");
 
@@ -86,7 +93,9 @@ public:
 
         this->get_parameter("move_head",             move_head_);
         this->get_parameter("use_pot_fields",        use_pot_fields_);
-
+        this->get_parameter("allow_rotation_on_collision", allow_rotation_on_collision_);
+        this->get_parameter("rotation_collision_angle_threshold", rotation_collision_angle_threshold_);
+        this->get_parameter("rotation_collision_angular_speed", rotation_collision_angular_speed_);
         this->get_parameter("base_link_name",        base_link_name_);
         this->get_parameter("odom_name",             odom_name_);
 
@@ -209,6 +218,9 @@ private:
 
     bool move_head_;
     bool use_pot_fields_;
+    bool allow_rotation_on_collision_;
+    float rotation_collision_angle_threshold_;
+    float rotation_collision_angular_speed_;
     std::string base_link_name_;
     std::string odom_name_;
 
@@ -277,7 +289,9 @@ private:
 
             else if (param.get_name() == "move_head")             move_head_               = param.as_bool();
             else if (param.get_name() == "use_pot_fields")        use_pot_fields_          = param.as_bool();
-
+            else if (param.get_name() == "allow_rotation_on_collision") allow_rotation_on_collision_ = param.as_bool();
+            else if (param.get_name() == "rotation_collision_angle_threshold") rotation_collision_angle_threshold_ = param.as_double();
+            else if (param.get_name() == "rotation_collision_angular_speed") rotation_collision_angular_speed_ = param.as_double();
             else if (param.get_name() == "base_link_name")        base_link_name_          = param.as_string();
             else if (param.get_name() == "odom_name")             odom_name_               = param.as_string();
 
@@ -556,6 +570,44 @@ private:
         return result;
     }
 
+    float get_heading_error_to_current_path_goal() const
+    {
+        float angle_error = atan2(goal_y_ - robot_y_, goal_x_ - robot_x_) - robot_t_;
+        if(angle_error >   M_PI) angle_error -= 2*M_PI;
+        if(angle_error <= -M_PI) angle_error += 2*M_PI;
+        return angle_error;
+    }
+
+    bool try_rotate_in_place_on_collision(const char * state_label)
+    {
+        if (!allow_rotation_on_collision_)
+            return false;
+
+        get_robot_position_wrt_map();
+        get_next_goal_from_path(prev_pose_idx, next_pose_idx);
+
+        const float angle_error = get_heading_error_to_current_path_goal();
+        if (fabs(angle_error) < rotation_collision_angle_threshold_)
+            return false;
+
+        // Optional recovery for narrow passages: rotate in place only when an
+        // operator explicitly enables it, because flickering obstacle reports
+        // can otherwise make the base oscillate.
+        const float angular_speed = std::min(max_angular_speed_, rotation_collision_angular_speed_);
+        pub_cmd_vel_->publish(calculate_speeds(robot_t_, robot_t_ + angle_error, angular_speed, beta_));
+        if(move_head_) pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+        current_linear_speed = 0;
+
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            2000,
+            "SimpleMove.-> Collision risk in %s, rotating in place to recover. heading_error=%.2f",
+            state_label,
+            angle_error);
+        return true;
+    }
+
     bool get_robot_position_wrt_map()
     {
         try
@@ -659,6 +711,19 @@ private:
         return dist;
     }
 
+    void fail_path(const std::string & reason)
+    {
+        // Keep the failure reason in GoalStatus.text so mvn_pln can distinguish
+        // a real obstacle from a path-tracking timeout.
+        msg_goal_reached.text = reason;
+        std::cout << "SimpleMove.-> FAILED path traking. Reason: " << reason << std::endl;
+        state = SM_STATE::INIT;
+        msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::ABORTED;
+        pub_goal_reached_->publish(msg_goal_reached);
+        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
+        current_linear_speed = 0;
+    }
+
     void get_next_goal_from_path(size_t& last_pose_idx, size_t& next_pose_idx)
     {
         if(next_pose_idx >= goal_path_.poses.size()) next_pose_idx = goal_path_.poses.size() - 1;
@@ -711,6 +776,7 @@ private:
                 state = SM_STATE::INIT;
                 collision_risk_ = false;
                 msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::ABORTED;
+                msg_goal_reached.text = "stop_received";
                 pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                 pub_goal_reached_->publish(msg_goal_reached);
             }
@@ -734,6 +800,7 @@ private:
                     state = SM_STATE::GOAL_POSE_ACCEL;
                     new_pose_ = false;
                     msg_goal_reached.goal_id.id = "-1";
+                    msg_goal_reached.text.clear();
                     attempts = (int)((fabs(goal_distance_)*5)/max_linear_speed_*RATE + fabs(goal_angle_*5)/max_angular_speed_*RATE + RATE*5);
                 }
                 if(new_path_)
@@ -748,7 +815,16 @@ private:
                     std::stringstream ss;
                     ss << goal_path_.header.stamp.sec;
                     ss >> msg_goal_reached.goal_id.id;
-                    attempts = (int)(get_path_total_distance(goal_path_)/max_linear_speed_*4*RATE + 5*RATE);
+                    const float path_total_distance = get_path_total_distance(goal_path_);
+                    attempts = (int)(path_total_distance/max_linear_speed_*4*RATE + 5*RATE);
+                    msg_goal_reached.text.clear();
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "SimpleMove.-> Path tracking budget: distance=%.2f m max_speed=%.2f m/s attempts=%d timeout=%.1f s",
+                        path_total_distance,
+                        max_linear_speed_,
+                        attempts,
+                        static_cast<double>(attempts) / RATE);
                 }
                 break;
 
@@ -848,6 +924,7 @@ private:
                 std::cout << "SimpleMove.-> FAILED move with dist=" << goal_distance_ << " angle=" << goal_angle_ << std::endl;
                 state = SM_STATE::INIT;
                 msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::ABORTED;
+                msg_goal_reached.text = "pose_failed";
                 pub_goal_reached_->publish(msg_goal_reached);
                 pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                 current_linear_speed = 0;
@@ -856,9 +933,13 @@ private:
             case SM_STATE::GOAL_PATH_ACCEL:
                 if(collision_risk_)
                 {
-                    state = SM_STATE::GOAL_PATH_FAILED;
-                    pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                    std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    if (!try_rotate_in_place_on_collision("GOAL_PATH_ACCEL"))
+                    {
+                        state = SM_STATE::GOAL_PATH_FAILED;
+                        msg_goal_reached.text = "collision_risk";
+                        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
+                        std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    }
                 }
                 else{
                     get_robot_position_wrt_map();
@@ -882,6 +963,7 @@ private:
                     if(--attempts <= 0)
                     {
                         state = SM_STATE::GOAL_PATH_FAILED;
+                        msg_goal_reached.text = "timeout_path_accel";
                         std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state: GOAL_PATH_ACCEL."<<std::endl;
                     }
                     pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
@@ -896,9 +978,13 @@ private:
             case SM_STATE::GOAL_PATH_CRUISE:
                 if(collision_risk_)
                 {
-                    state = SM_STATE::GOAL_PATH_FAILED;
-                    pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                    std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    if (!try_rotate_in_place_on_collision("GOAL_PATH_CRUISE"))
+                    {
+                        state = SM_STATE::GOAL_PATH_FAILED;
+                        msg_goal_reached.text = "collision_risk";
+                        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
+                        std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    }
                 }
                 else
                 {
@@ -915,6 +1001,7 @@ private:
                     if(--attempts <= 0)
                     {
                         state = SM_STATE::GOAL_PATH_FAILED;
+                        msg_goal_reached.text = "timeout_path_cruise";
                         std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state: GOAL_PATH_CRUISE."<<std::endl;
                     }
                     pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
@@ -928,9 +1015,13 @@ private:
             case SM_STATE::GOAL_PATH_DECCEL:
                 if(collision_risk_)
                 {
-                    state = SM_STATE::GOAL_PATH_FAILED;
-                    pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                    std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    if (!try_rotate_in_place_on_collision("GOAL_PATH_DECCEL"))
+                    {
+                        state = SM_STATE::GOAL_PATH_FAILED;
+                        msg_goal_reached.text = "collision_risk";
+                        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
+                        std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
+                    }
                 }
                 else
                 {
@@ -942,6 +1033,7 @@ private:
                     if(--attempts <= 0)
                     {
                         state = SM_STATE::GOAL_PATH_FAILED;
+                        msg_goal_reached.text = "timeout_path_deccel";
                         std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state:GOAL_PATH_DECCEL."<<std::endl;
                     }
                     current_linear_speed = temp_k * sqrt(global_error);
@@ -958,18 +1050,16 @@ private:
                 std::cout << "SimpleMove.-> Path succesfully followed." << std::endl;
                 state = SM_STATE::INIT;
                 msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::SUCCEEDED;
+                msg_goal_reached.text = "path_reached";
                 pub_goal_reached_->publish(msg_goal_reached);
                 pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                 current_linear_speed = 0;
                 break;
 
             case SM_STATE::GOAL_PATH_FAILED:
-                std::cout << "SimpleMove.-> FAILED path traking." << std::endl;
-                state = SM_STATE::INIT;
-                msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::ABORTED;
-                pub_goal_reached_->publish(msg_goal_reached);
-                pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                current_linear_speed = 0;
+                if (msg_goal_reached.text.empty())
+                    msg_goal_reached.text = "path_failed_unknown";
+                fail_path(msg_goal_reached.text);
                 break;
 
             default:

@@ -70,13 +70,13 @@ public:
         this->declare_parameter("use_namespace",               false);
         this->declare_parameter<bool>("patience",              true);
         this->declare_parameter<float>("proximity_criterion",  2.0f);
-        this->declare_parameter<std::string>("base_link_name", "base_footprint");
+        this->declare_parameter<std::string>("base_link_name", "base_link");
 
         // Initialize internal variables from declared parameters
-        this->get_parameter("use_namespace",        use_namespace_);
-        this->get_parameter("patience",             patience_);
-        this->get_parameter("proximity_criterion",  proximity_criterion_);
-        this->get_parameter("base_link_name",       base_link_name_);
+        this->get_parameter("use_namespace",                  use_namespace_);
+        this->get_parameter("patience",                       patience_);
+        this->get_parameter("proximity_criterion",            proximity_criterion_);
+        this->get_parameter("base_link_name",                 base_link_name_);
 
         // Setup parameter change callback
         param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -191,7 +191,6 @@ private:
     int current_status = 0;
 
     bool near_goal_sent = false;
-
     // ROS 2 message types
     std_msgs::msg::Bool msg_bool;
     std_msgs::msg::Float32MultiArray msg_goal_dist_angle;
@@ -584,6 +583,14 @@ private:
         pub_status_->publish(msg);
 
         return status;
+    }
+
+    bool simple_move_abort_was_collision() const
+    {
+        // simple_move uses GoalStatus.text to explain ABORTED. Without this
+        // guard, normal path-tracking timeouts were treated as collision risk
+        // and mvn_pln kept toggling point-cloud avoidance before replanning.
+        return collision_risk_ || simple_move_goal_status_.text == "collision_risk";
     }
 
 
@@ -992,10 +999,18 @@ private:
                     state = SM_STATE::CORRECT_FINAL_ANGLE;
                 }
                 else if(!is_temporary_no_cloud_pot_fields_ &&
-                        simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED)
+                        simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED &&
+                        simple_move_abort_was_collision())
                 {
+                    const std::string abort_reason = simple_move_goal_status_.text;
+                    simple_move_goal_status_.status = 0;
+
+                    // Do not accept "near goal" as success after a collision:
+                    // continue with the normal obstacle-recovery path so the
+                    // robot does not skip translational navigation near targets.
                     collision_risk_ = false;
-                    std::cout << "MotionPlanner.-> COLLISION RISK DETECTED before goal is reached." << std::endl;
+                    std::cout << "MotionPlanner.-> COLLISION RISK DETECTED before goal is reached. simple_move_reason="
+                              << abort_reason << std::endl;
 
                     msg_bool.data = false;
                     pub_pot_fields_enable_cloud_->publish(msg_bool);
@@ -1008,9 +1023,11 @@ private:
                 }
                 else if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::ABORTED)
                 {
+                    const std::string abort_reason = simple_move_goal_status_.text;
                     simple_move_goal_status_.status = 0;
                     is_temporary_no_cloud_pot_fields_ = false;
-                    std::cout << "MotionPlanner.-> Simple move reported path aborted. Trying again..." << std::endl;
+                    std::cout << "MotionPlanner.-> Simple move reported path aborted. reason="
+                              << abort_reason << ". Replanning without toggling potential-field cloud." << std::endl;
                     state = SM_STATE::CALCULATE_PATH;
                 }
                 break;
