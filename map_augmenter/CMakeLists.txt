@@ -16,6 +16,7 @@ find_package(rcl_interfaces REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 
@@ -61,9 +62,26 @@ ament_target_dependencies(obstacle_detector_node
 )
 target_link_libraries(obstacle_detector_node Eigen3::Eigen)
 
+
+# 3) Point cloud filter
+add_executable(cloud_filter_node
+  src/cloud_filter_node.cpp
+)
+ament_target_dependencies(cloud_filter_node
+  rclcpp
+  rcl_interfaces
+  sensor_msgs
+  visualization_msgs
+  tf2
+  tf2_ros
+  tf2_eigen
+)
+target_link_libraries(cloud_filter_node Eigen3::Eigen)
+
 # ===== Install =====
 install(TARGETS
   map_augmenter_node
+  cloud_filter_node
   obstacle_detector_node
   DESTINATION lib/${PROJECT_NAME}
 )
