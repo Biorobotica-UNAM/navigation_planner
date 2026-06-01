@@ -12,7 +12,10 @@
 
   <!-- ===== Topic args (I/O) ===== -->
   <arg name="pose_topic" default="pose"/>
-  <arg name="point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
+  <!-- La nube cruda se conserva separada para debug; navegacion usa la nube
+       filtrada para evitar ruido y reducir carga en los nodos de obstaculos. -->
+  <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
+  <arg name="point_cloud_topic" default="/$(var namespace_nav)/camera/points_filtered"/>
   <!--arg name="bumper_f_topic" default="/bumper"/-->
 
   <arg name="laser_scan_topic"  default="/$(var namespace_hardware)/base/scan"/>
@@ -210,6 +213,34 @@
     <param name="cloud_min_z" value="$(var cloud_min_z)"/>
   </node>-->
 
+  <!-- ===== Kinect Cloud Filter ===== -->
+  <node name="cloud_filter"
+        pkg="map_augmenter"
+        exec="cloud_filter_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="input_topic" value="$(var raw_point_cloud_topic)"/>
+    <param name="output_topic" value="$(var point_cloud_topic)"/>
+    <param name="base_link_name" value="base_link"/>
+
+    <param name="min_x" value="$(var cloud_min_x)"/>
+    <param name="max_x" value="$(var cloud_max_x)"/>
+    <param name="min_y" value="$(var cloud_min_y)"/>
+    <param name="max_y" value="$(var cloud_max_y)"/>
+    <param name="min_z" value="$(var cloud_min_z)"/>
+    <param name="max_z" value="$(var cloud_max_z)"/>
+
+    <param name="voxel_leaf_size" value="0.03"/>
+    <param name="input_downsampling" value="4"/>
+    <param name="processing_rate_hz" value="20.0"/>
+    <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
+    <param name="min_points_per_voxel" value="2"/>
+    <param name="min_neighbor_voxels" value="1"/>
+    <param name="debug" value="False"/>
+  </node>
+
 <!-- ===== Obstacle Detector (fast) ===== -->
 <node name="obstacle_detector"
       pkg="map_augmenter"
@@ -239,6 +270,11 @@
 
   <!-- Detector rápido -->
   <param name="decay_factor" value="2"/>
+  <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
+  <!-- La nube del Kinect ya viene filtrada, pero aqui pedimos evidencia
+       por celda para que un punto suelto no se convierta en obstaculo. -->
+  <param name="cloud_min_points_per_cell" value="2"/>
+  <param name="cloud_min_neighbor_cells" value="1"/>
 
   <!-- límites -->
   <param name="laser_max_x" value="$(var laser_max_x)"/>
