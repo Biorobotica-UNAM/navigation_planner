@@ -48,7 +48,7 @@
 
   <!-- ===== Sensing windows (cloud) ===== -->
   <arg name="cloud_min_x" default="0.30"/>
-  <arg name="cloud_max_x" default="0.80"/>
+  <arg name="cloud_max_x" default="1.00"/>
   <arg name="cloud_min_y" default="-0.30"/>
   <arg name="cloud_max_y" default="0.30"/>
   <arg name="cloud_min_z" default="0.05"/>
@@ -329,7 +329,7 @@
   <!-- Para NO doble-decay: el detector ya hace decay -->
   <param name="decay_factor" value="0"/>
 
-  <param name="inflation_radius" value="0.10"/>
+  <param name="inflation_radius" value="0.12"/>
   <param name="cost_radius" value="0.25"/>
 
   <param name="use_online" value="False"/>
@@ -375,7 +375,7 @@
         namespace="$(var namespace_nav)">
     <param name="use_namespace" value="$(var use_namespace)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
-    <param name="max_linear_speed" value="0.8"/>
+    <param name="max_linear_speed" value="0.6"/>
     <param name="max_angular_speed" value="0.6"/>
     <!--param name="control_alpha" value="0.2"/-->
     <param name="control_alpha" value="0.08"/>
