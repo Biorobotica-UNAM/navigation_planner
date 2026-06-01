@@ -16,6 +16,7 @@
        filtrada para evitar ruido y reducir carga en los nodos de obstaculos. -->
   <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
   <arg name="point_cloud_topic" default="/$(var namespace_nav)/camera/points_filtered"/>
+  <arg name="cloud_filter_input_qos_mode" default="dual"/>
   <!--arg name="bumper_f_topic" default="/bumper"/-->
 
   <arg name="laser_scan_topic"  default="/$(var namespace_hardware)/base/scan"/>
@@ -50,7 +51,7 @@
   <arg name="cloud_max_x" default="0.80"/>
   <arg name="cloud_min_y" default="-0.30"/>
   <arg name="cloud_max_y" default="0.30"/>
-  <arg name="cloud_min_z" default="0.01"/>
+  <arg name="cloud_min_z" default="0.05"/>
   <arg name="cloud_max_z" default="1.0"/>
 
   <!-- ===== Map servers ===== -->
@@ -223,6 +224,7 @@
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="input_topic" value="$(var raw_point_cloud_topic)"/>
     <param name="output_topic" value="$(var point_cloud_topic)"/>
+    <param name="input_qos_mode" value="$(var cloud_filter_input_qos_mode)"/>
     <param name="base_link_name" value="base_link"/>
 
     <param name="min_x" value="$(var cloud_min_x)"/>

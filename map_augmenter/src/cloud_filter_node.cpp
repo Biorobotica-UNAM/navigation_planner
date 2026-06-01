@@ -11,6 +11,7 @@
 
 #include "Eigen/Geometry"
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -31,6 +32,7 @@ public:
     declare_parameter<std::string>("input_topic", "/hardware/camera/points");
     declare_parameter<std::string>("output_topic", "/navigation/camera/points_filtered");
     declare_parameter<std::string>("base_link_name", "base_link");
+    declare_parameter<std::string>("input_qos_mode", "dual");
 
     declare_parameter<double>("min_x", 0.30);
     declare_parameter<double>("max_x", 0.80);
@@ -54,6 +56,7 @@ public:
     declare_parameter<double>("tf_fallback_warn_threshold_sec", 0.20);
     declare_parameter<bool>("publish_debug_markers", true);
     declare_parameter<std::string>("debug_marker_topic", "cloud_filter/debug_markers");
+    declare_parameter<double>("status_period_sec", 2.0);
     declare_parameter<bool>("debug", false);
 
     load_parameters();
@@ -61,14 +64,29 @@ public:
     param_callback_handle_ = add_on_set_parameters_callback(
       std::bind(&CloudFilterNode::on_parameter_change, this, std::placeholders::_1));
 
+    // La nube filtrada ya es compacta y se usa para debug/navegacion local.
+    // Publicarla como reliable evita incompatibilidades con RViz y comandos
+    // como `ros2 topic hz`, que suelen suscribirse con QoS reliable.
     pub_cloud_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-      output_topic_, rclcpp::SensorDataQoS());
+      output_topic_, rclcpp::QoS(5).reliable());
     pub_markers_ = create_publisher<visualization_msgs::msg::MarkerArray>(
       debug_marker_topic_, rclcpp::QoS(1).transient_local());
 
-    sub_cloud_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-      input_topic_, rclcpp::SensorDataQoS(),
-      std::bind(&CloudFilterNode::callback_cloud, this, std::placeholders::_1));
+    // En el robot real la nube puede venir con QoS reliable o best_effort
+    // segun el driver. El modo dual mantiene el filtro compatible con ambos.
+    const auto cb = std::bind(&CloudFilterNode::callback_cloud, this, std::placeholders::_1);
+    if (input_qos_mode_ == "reliable") {
+      sub_cloud_reliable_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        input_topic_, rclcpp::QoS(5).reliable(), cb);
+    } else if (input_qos_mode_ == "best_effort") {
+      sub_cloud_best_effort_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        input_topic_, rclcpp::SensorDataQoS(), cb);
+    } else {
+      sub_cloud_best_effort_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        input_topic_, rclcpp::SensorDataQoS(), cb);
+      sub_cloud_reliable_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        input_topic_, rclcpp::QoS(5).reliable(), cb);
+    }
 
     const auto processing_period = std::chrono::duration<double>(1.0 / processing_rate_hz_);
     processing_timer_ = create_wall_timer(
@@ -78,6 +96,11 @@ public:
     marker_timer_ = create_wall_timer(
       std::chrono::milliseconds(500),
       std::bind(&CloudFilterNode::publish_debug_markers, this));
+
+    const auto status_period = std::chrono::duration<double>(status_period_sec_);
+    status_timer_ = create_wall_timer(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(status_period),
+      std::bind(&CloudFilterNode::publish_status_if_needed, this));
 
     RCLCPP_INFO(
       get_logger(),
@@ -127,21 +150,37 @@ private:
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_best_effort_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_reliable_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_markers_;
   OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
   rclcpp::TimerBase::SharedPtr processing_timer_;
   rclcpp::TimerBase::SharedPtr marker_timer_;
+  rclcpp::TimerBase::SharedPtr status_timer_;
   sensor_msgs::msg::PointCloud2::SharedPtr latest_cloud_;
   std::mutex latest_cloud_mutex_;
   uint64_t latest_cloud_sequence_{0};
   uint64_t processed_cloud_sequence_{0};
+  std::atomic<uint64_t> received_clouds_{0};
+  std::atomic<uint64_t> processed_clouds_{0};
+  std::atomic<uint64_t> published_clouds_{0};
+  std::atomic<uint64_t> empty_input_clouds_{0};
+  std::atomic<uint64_t> invalid_field_clouds_{0};
+  std::atomic<uint64_t> tf_failed_clouds_{0};
+  std::atomic<std::size_t> last_total_points_{0};
+  std::atomic<std::size_t> last_finite_points_{0};
+  std::atomic<std::size_t> last_in_box_points_{0};
+  std::atomic<std::size_t> last_voxels_{0};
+  std::atomic<std::size_t> last_published_points_{0};
+  uint64_t last_status_received_{0};
+  uint64_t last_status_published_{0};
 
   std::string input_topic_;
   std::string output_topic_;
   std::string base_link_name_;
   std::string debug_marker_topic_;
+  std::string input_qos_mode_;
 
   // Prisma de obstáculos recibido desde el launch. Este debe coincidir con el
   // usado por obstacle_detector/potential_fields.
@@ -175,6 +214,7 @@ private:
   int min_neighbor_voxels_;
   double processing_rate_hz_;
   double tf_fallback_warn_threshold_sec_;
+  double status_period_sec_;
   bool publish_debug_markers_;
   bool debug_;
 
@@ -184,6 +224,7 @@ private:
     get_parameter("output_topic", output_topic_);
     get_parameter("base_link_name", base_link_name_);
     get_parameter("debug_marker_topic", debug_marker_topic_);
+    get_parameter("input_qos_mode", input_qos_mode_);
 
     get_parameter("min_x", obstacle_min_x_);
     get_parameter("max_x", obstacle_max_x_);
@@ -206,6 +247,7 @@ private:
     get_parameter("processing_rate_hz", processing_rate_hz_);
     get_parameter("tf_fallback_warn_threshold_sec", tf_fallback_warn_threshold_sec_);
     get_parameter("publish_debug_markers", publish_debug_markers_);
+    get_parameter("status_period_sec", status_period_sec_);
     get_parameter("debug", debug_);
 
     voxel_leaf_size_ = std::max(0.005, voxel_leaf_size_);
@@ -214,6 +256,7 @@ private:
     min_neighbor_voxels_ = std::max(0, min_neighbor_voxels_);
     processing_rate_hz_ = std::max(1.0, processing_rate_hz_);
     tf_fallback_warn_threshold_sec_ = std::max(0.0, tf_fallback_warn_threshold_sec_);
+    status_period_sec_ = std::max(0.5, status_period_sec_);
     update_filter_bounds();
   }
 
@@ -275,6 +318,9 @@ private:
       }
       else if (name == "tf_fallback_warn_threshold_sec") {
         tf_fallback_warn_threshold_sec_ = std::max(0.0, param.as_double());
+      }
+      else if (name == "status_period_sec") {
+        status_period_sec_ = std::max(0.5, param.as_double());
       }
       else if (name == "publish_debug_markers") publish_debug_markers_ = param.as_bool();
       else if (name == "debug") debug_ = param.as_bool();
@@ -355,6 +401,48 @@ private:
       1.0f, 0.25f, 0.05f, 0.28f));
 
     pub_markers_->publish(markers);
+  }
+
+  void publish_status_if_needed()
+  {
+    const auto received = received_clouds_.load();
+    const auto published = published_clouds_.load();
+    const auto input_publishers = count_publishers(input_topic_);
+    const auto output_subscribers = count_subscribers(output_topic_);
+
+    if (received == 0) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "CloudFilter.-> No input clouds received on '%s' (publishers=%zu, qos_mode=%s, output_subscribers=%zu). Check topic name and QoS.",
+        input_topic_.c_str(),
+        input_publishers,
+        input_qos_mode_.c_str(),
+        output_subscribers);
+      return;
+    }
+
+    const bool received_new = received != last_status_received_;
+    const bool published_new = published != last_status_published_;
+
+    if (received_new && !published_new) {
+      RCLCPP_WARN(
+        get_logger(),
+        "CloudFilter.-> Receiving input but not publishing. rx=%lu processed=%lu pub=%lu empty=%lu bad_fields=%lu tf_fail=%lu last(raw=%zu finite=%zu in_box=%zu voxels=%zu accepted=%zu)",
+        received,
+        processed_clouds_.load(),
+        published,
+        empty_input_clouds_.load(),
+        invalid_field_clouds_.load(),
+        tf_failed_clouds_.load(),
+        last_total_points_.load(),
+        last_finite_points_.load(),
+        last_in_box_points_.load(),
+        last_voxels_.load(),
+        last_published_points_.load());
+    }
+
+    last_status_received_ = received;
+    last_status_published_ = published;
   }
 
   static bool get_float32_field_offset(
@@ -476,6 +564,8 @@ private:
     }
 
     pub_cloud_->publish(output);
+    published_clouds_++;
+    last_published_points_ = accepted_voxels.size();
   }
 
   // Flujo principal:
@@ -501,6 +591,7 @@ private:
     std::lock_guard<std::mutex> lock(latest_cloud_mutex_);
     latest_cloud_ = msg;
     ++latest_cloud_sequence_;
+    received_clouds_++;
   }
 
   void process_latest_cloud()
@@ -517,12 +608,14 @@ private:
     }
 
     process_cloud(msg);
+    processed_clouds_++;
     processed_cloud_sequence_ = sequence;
   }
 
   void process_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {
     if (!msg || msg->data.empty() || msg->point_step == 0) {
+      empty_input_clouds_++;
       return;
     }
 
@@ -535,6 +628,7 @@ private:
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000,
         "CloudFilter.-> Input cloud does not expose float32 x/y/z fields.");
+      invalid_field_clouds_++;
       return;
     }
 
@@ -543,11 +637,13 @@ private:
     // nube venga originalmente en camera_link u otro frame de cámara.
     Eigen::Affine3d cloud_to_base;
     if (!lookup_cloud_transform(msg->header, cloud_to_base)) {
+      tf_failed_clouds_++;
       return;
     }
 
     std::unordered_map<VoxelKey, VoxelAccumulator, VoxelKeyHash> voxels;
     const auto total_points = static_cast<std::size_t>(msg->width) * static_cast<std::size_t>(msg->height);
+    last_total_points_ = total_points;
     voxels.reserve(total_points / 8 + 1);
 
     const auto *base_ptr = msg->data.data();
@@ -611,6 +707,10 @@ private:
       }
       accepted_voxels.push_back(voxel);
     }
+
+    last_finite_points_ = finite_points;
+    last_in_box_points_ = pass_through_points;
+    last_voxels_ = voxels.size();
 
     publish_filtered_cloud(*msg, accepted_voxels);
 
