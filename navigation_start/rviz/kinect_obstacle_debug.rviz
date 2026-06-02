@@ -5,9 +5,9 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /TF1
-        - /Camera1/Visibility1
+        - /Image1
       Splitter Ratio: 0.5
-    Tree Height: 517
+    Tree Height: 542
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -41,33 +41,9 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: true
-        arm_chair:
-          Value: true
-        armchair:
-          Value: true
         base_link:
           Value: true
-        basket:
-          Value: true
-        bathroom:
-          Value: true
-        bed:
-          Value: true
-        bedroom:
-          Value: true
-        bedside_table:
-          Value: true
-        beverage_area:
-          Value: true
         body_link:
-          Value: true
-        book_case:
-          Value: true
-        bookshelf:
-          Value: true
-        breakfast_bar:
-          Value: true
-        cabinet:
           Value: true
         camera_color_frame:
           Value: true
@@ -79,41 +55,9 @@ Visualization Manager:
           Value: true
         camera_link:
           Value: true
-        chairs:
-          Value: true
-        coatrack:
-          Value: true
-        corridor:
-          Value: true
-        desk:
-          Value: true
-        desk_lamp:
-          Value: true
-        dinning_room:
-          Value: true
-        dinning_table:
-          Value: true
-        dishwasher:
-          Value: true
-        door:
-          Value: true
-        entrance:
-          Value: true
-        exit:
-          Value: true
-        fridge:
-          Value: true
         head_frame_link:
           Value: true
         head_link:
-          Value: true
-        instruction_point:
-          Value: true
-        kitchen:
-          Value: true
-        kitchen_bar:
-          Value: true
-        kitchen_table:
           Value: true
         l_arm_link:
           Value: true
@@ -125,8 +69,6 @@ Visualization Manager:
           Value: true
         l_wrist_link:
           Value: true
-        lamp:
-          Value: true
         laser_link:
           Value: true
         left_grab_object_link:
@@ -135,25 +77,17 @@ Visualization Manager:
           Value: true
         left_gripper_R_link:
           Value: true
+        left_pinch_object_link:
+          Value: true
         left_shoulder_link:
           Value: true
         lf_frame_link:
-          Value: true
-        living_room:
-          Value: true
-        living_room_table:
           Value: true
         map:
           Value: true
         neck_link:
           Value: true
         odom:
-          Value: true
-        office:
-          Value: true
-        pantry:
-          Value: true
-        potted_plant:
           Value: true
         r_arm_link:
           Value: true
@@ -165,8 +99,6 @@ Visualization Manager:
           Value: true
         r_wrist_link:
           Value: true
-        refrigerator:
-          Value: true
         rf_frame_link:
           Value: true
         right_grab_object_link:
@@ -175,31 +107,13 @@ Visualization Manager:
           Value: true
         right_gripper_R_link:
           Value: true
+        right_pinch_object_link:
+          Value: true
         right_shoulder_link:
-          Value: true
-        shelf:
-          Value: true
-        side_table:
-          Value: true
-        side_tables:
-          Value: true
-        sink:
-          Value: true
-        sofa:
           Value: true
         spine_link:
           Value: true
-        storage_rack:
-          Value: true
-        test:
-          Value: true
         torso_link:
-          Value: true
-        trashbin:
-          Value: true
-        tv_stand:
-          Value: true
-        waste_basket:
           Value: true
         wheel0_link:
           Value: true
@@ -214,68 +128,6 @@ Visualization Manager:
       Show Names: false
       Tree:
         map:
-          arm_chair:
-            {}
-          armchair:
-            {}
-          basket:
-            {}
-          bathroom:
-            {}
-          bed:
-            {}
-          bedroom:
-            {}
-          bedside_table:
-            {}
-          beverage_area:
-            {}
-          book_case:
-            {}
-          bookshelf:
-            {}
-          breakfast_bar:
-            {}
-          cabinet:
-            {}
-          chairs:
-            {}
-          coatrack:
-            {}
-          corridor:
-            {}
-          desk:
-            {}
-          desk_lamp:
-            {}
-          dinning_room:
-            {}
-          dinning_table:
-            {}
-          dishwasher:
-            {}
-          door:
-            {}
-          entrance:
-            {}
-          exit:
-            {}
-          fridge:
-            {}
-          instruction_point:
-            {}
-          kitchen:
-            {}
-          kitchen_bar:
-            {}
-          kitchen_table:
-            {}
-          lamp:
-            {}
-          living_room:
-            {}
-          living_room_table:
-            {}
           odom:
             base_link:
               body_link:
@@ -293,6 +145,8 @@ Visualization Manager:
                                   left_gripper_L_link:
                                     {}
                                   left_gripper_R_link:
+                                    {}
+                                  left_pinch_object_link:
                                     {}
                     neck_link:
                       head_link:
@@ -317,6 +171,8 @@ Visualization Manager:
                                     {}
                                   right_gripper_R_link:
                                     {}
+                                  right_pinch_object_link:
+                                    {}
               laser_link:
                 {}
               wheel0_link:
@@ -325,34 +181,6 @@ Visualization Manager:
                 {}
               wheel2_link:
                 {}
-          office:
-            {}
-          pantry:
-            {}
-          potted_plant:
-            {}
-          refrigerator:
-            {}
-          shelf:
-            {}
-          side_table:
-            {}
-          side_tables:
-            {}
-          sink:
-            {}
-          sofa:
-            {}
-          storage_rack:
-            {}
-          test:
-            {}
-          trashbin:
-            {}
-          tv_stand:
-            {}
-          waste_basket:
-            {}
       Update Interval: 0
       Value: true
     - Alpha: 1
@@ -458,6 +286,10 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        left_pinch_object_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
         left_shoulder_link:
           Alpha: 1
           Show Axes: false
@@ -517,6 +349,10 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        right_pinch_object_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
         right_shoulder_link:
           Alpha: 1
           Show Axes: false
@@ -702,12 +538,13 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /navigation/cloud_filter/debug_markers
       Value: true
-    - Class: rviz_default_plugins/Camera
+    - Class: rviz_default_plugins/Image
       Enabled: true
-      Far Plane Distance: 100
-      Image Rendering: background and overlay
-      Name: Camera
-      Overlay Alpha: 0.5
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Image
+      Normalize Range: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -715,18 +552,6 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /hardware/camera/image_raw
       Value: true
-      Visibility:
-        Augmented Map: false
-        Filter Boxes: false
-        Filtered Cloud: true
-        Grid: false
-        Obstacles Map: false
-        Raw Kinect Cloud: true
-        Robot Model: false
-        Static Map: false
-        TF: false
-        Value: true
-      Zoom Factor: 1
   Enabled: true
   Global Options:
     Background Color: 28; 28; 30
@@ -788,22 +613,22 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.4297964572906494
+      Pitch: 0.5297973155975342
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 4.463181972503662
+      Yaw: 4.833189964294434
     Saved: ~
 Window Geometry:
-  Camera:
-    collapsed: false
   Displays:
     collapsed: false
-  Height: 945
+  Height: 977
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001c900000353fc0200000004fb000000160044006500700074006800200049006d006100670065000000003f000000d10000000000000000fb000000100044006900730070006c006100790073010000003f0000028b000000cc00fffffffb0000000a0056006900650077007300000002560000015c000000a900fffffffb0000000c00430061006d00650072006101000002d0000000c20000001700ffffff000005b10000035300000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Image:
+    collapsed: false
+  QMainWindow State: 000000ff00000000fd0000000100000000000001c900000373fc0200000005fb000000160044006500700074006800200049006d006100670065000000003f000000d10000000000000000fb000000100044006900730070006c006100790073010000003f000002a4000000cc00fffffffb0000000a0056006900650077007300000002560000015c000000a900fffffffb0000000c00430061006d00650072006101000002d0000000c20000000000000000fb0000000a0049006d00610067006501000002e9000000c90000001700ffffff000005b10000037300000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
   Width: 1920
   X: 0
-  Y: 32
+  Y: 0
