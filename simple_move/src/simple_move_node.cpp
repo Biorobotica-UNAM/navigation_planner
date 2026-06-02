@@ -164,6 +164,10 @@ public:
             make_name("/navigation/potential_fields/pf_rejection_force"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_rejection_force, this, std::placeholders::_1));
+
+        sub_bypass_ = this->create_subscription<std_msgs::msg::Bool>(
+        "/navigation/camera_obstacles/bypass", rclcpp::QoS(10),
+        [this](const std_msgs::msg::Bool::SharedPtr msg) { this->camera_bypass_ = msg->data; });
         
         //############
         // Wait for transforms
@@ -234,6 +238,9 @@ private:
     float temp_k = 0;
     int attempts = 0;
     float global_error = 0;
+
+    bool camera_bypass_ = false;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_bypass_;
 
 
     //############
@@ -595,7 +602,10 @@ private:
         // can otherwise make the base oscillate.
         const float angular_speed = std::min(max_angular_speed_, rotation_collision_angular_speed_);
         pub_cmd_vel_->publish(calculate_speeds(robot_t_, robot_t_ + angle_error, angular_speed, beta_));
-        if(move_head_) pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+        if(move_head_ && !camera_bypass_) {
+            pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+        }
+
         current_linear_speed = 0;
 
         RCLCPP_WARN_THROTTLE(
@@ -752,6 +762,14 @@ private:
     std_msgs::msg::Float64MultiArray get_next_goal_head_angles(size_t next_pose_idx)
     {
         std_msgs::msg::Float64MultiArray msg;
+
+        if (camera_bypass_) {
+            // If camera bypass is active, keep the head fixed at a neutral position
+            msg.data.push_back(0.0); // pan
+            msg.data.push_back(0.0); // tilt
+            return msg;
+        }
+        
         size_t idx = next_pose_idx + 5 >=  goal_path_.poses.size() - 1 ? goal_path_.poses.size() - 1 : next_pose_idx + 5;
         float goal_x = goal_path_.poses[idx].pose.position.x;
         float goal_y = goal_path_.poses[idx].pose.position.y;
@@ -970,7 +988,10 @@ private:
                                                            min_linear_speed_, current_linear_speed, max_angular_speed_,
                                                            alpha_, beta_, false, move_lat_,
                                                            use_pot_fields_, rejection_force_.y));
-                    if(move_head_) pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+                    if(move_head_ && !camera_bypass_) {
+                        pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+                    }
+
                     current_linear_speed += linear_acceleration_/RATE;
                 }
                 break;
@@ -1008,7 +1029,9 @@ private:
                                                            min_linear_speed_, current_linear_speed, max_angular_speed_, 
                                                            alpha_, beta_, false, move_lat_,
                                                            use_pot_fields_, rejection_force_.y));
-                    if(move_head_) pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+                    if(move_head_ && !camera_bypass_) {
+                        pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+                    }
                 }
                 break;
 
@@ -1042,7 +1065,9 @@ private:
                                                            min_linear_speed_, current_linear_speed, max_angular_speed_,
                                                            alpha_, beta_, false, move_lat_,
                                                            use_pot_fields_, rejection_force_.y));
-                    if(move_head_) pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+                    if(move_head_ && !camera_bypass_) {
+                        pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+                    }
                 }
                 break;
 
