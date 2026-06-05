@@ -25,24 +25,47 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
     idx_goal_x  = (int)((goal_pose.position.x  - map.info.origin.position.x)/map.info.resolution);
     int idx_goal  = idx_goal_y *map.info.width + idx_goal_x;
 
-    //double distance = 0.1;
-    //double angle = 1.414213562;
+    int map_size = (int)map.data.size();
+
+    if(idx_start < 0 || idx_start >= map_size)
+    {
+        std::cout << "PathPlanner.->Start point is outside map bounds!" << std::endl;
+        return false;
+    }
+    if(idx_goal < 0 || idx_goal >= map_size)
+    {
+        std::cout << "PathPlanner.->Goal point is outside map bounds!" << std::endl;
+        return false;
+    }
+
     int _idx_goal_y = idx_goal_y;
     int _idx_goal_x = idx_goal_x;
 
     int count = 0;
     int loop_count = 0;
     double radius = 0.1;
-    
+
     int MAX_GOAL_UPDATE = 16; //points on circle
     double angle_increment = 2 * M_PI / (MAX_GOAL_UPDATE - 1);
-    while (map.data[idx_goal] > 0 && loop_count < 4)
+    while (map.data[idx_goal] > 0 or loop_count < 4)
     {
         double angle = count * angle_increment;
-        idx_goal_y  = _idx_goal_y + radius * cos(angle);
-        idx_goal_x  = _idx_goal_x + radius * sin(angle);
-        idx_goal  = idx_goal_y *map.info.width + idx_goal_x;
-	
+        idx_goal_y  = _idx_goal_y + (int)(radius * cos(angle));
+        idx_goal_x  = _idx_goal_x + (int)(radius * sin(angle));
+        idx_goal  = idx_goal_y * map.info.width + idx_goal_x;
+
+        if(idx_goal < 0 || idx_goal >= map_size)
+        {
+            count++;
+            if (count == MAX_GOAL_UPDATE)
+            {
+                count = 0;
+                radius += 0.1;
+                loop_count++;
+            }
+            continue;
+        }
+
         count++;
         if (count == MAX_GOAL_UPDATE)
         {
@@ -51,7 +74,6 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
             loop_count++;
         }
     }
-
 
     if(map.data[idx_goal] > 0)
     {
@@ -85,8 +107,9 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
     while(!open_list.empty() && current_node->index != idx_goal)
     {
         
-            current_node = open_list.top();  
-            open_list.pop();                   
+            current_node = open_list.top();
+            open_list.pop();
+            if(current_node->in_closed_list) continue; // stale duplicate from re-push
             current_node->in_closed_list = true;
 
             node_neighbors[0] = current_node->index + map.info.width;
@@ -103,15 +126,19 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
            
             for(size_t i=0; i < node_neighbors.size(); i++)
             {
-                if(map.data[node_neighbors[i]] > 0 || nodes[node_neighbors[i]].in_closed_list)
+                int nb = node_neighbors[i];
+                if(nb < 0 || nb >= map_size)
+                    continue;
+                if(map.data[nb] > 0 || nodes[nb].in_closed_list)
                     continue;
            
-                Node* neighbor = &nodes[node_neighbors[i]];
-                float delta_g = i < 4 ? 1.0 : 1.414213562;
-                float g_value = current_node->g_value + (delta_g) + cost_map.data[node_neighbors[i]];
+                Node* neighbor = &nodes[nb];
+                float delta_g = i < 4 ? 1.0f : 1.414213562f;
+                float cost_contribution = std::max((float)cost_map.data[nb], 0.0f);
+                float g_value = current_node->g_value + delta_g + cost_contribution;
                 float h_value;
-                int   h_value_x = node_neighbors[i]%map.info.width - idx_goal_x;
-                int   h_value_y = node_neighbors[i]/map.info.width - idx_goal_y;
+                int   h_value_x = nb % map.info.width - idx_goal_x;
+                int   h_value_y = nb / map.info.width - idx_goal_y;
                 if(diagonal_paths)
                     h_value = sqrt(h_value_x*h_value_x + h_value_y*h_value_y);
                 else
@@ -122,9 +149,10 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
                     neighbor->g_value = g_value;
                     neighbor->f_value = g_value + h_value;
                     neighbor->parent  = current_node;
+                    open_list.push(neighbor); // re-push so heap reflects updated priority
+                    neighbor->in_open_list = true;
                 }
-
-                if(!neighbor->in_open_list)
+                else if(!neighbor->in_open_list)
                 {
                     neighbor->in_open_list = true;
                     open_list.push(neighbor);
@@ -163,7 +191,7 @@ nav_msgs::msg::Path PathPlanner::SmoothPath(
                         float tolerance)
 {
     nav_msgs::msg::Path newPath;
-    for(size_t i=0; i< path.poses.size(); i++)
+    for(int i=0; i< path.poses.size(); i++)
         newPath.poses.push_back(path.poses[i]);
     newPath.header.frame_id = "map";   
     if(path.poses.size() < 3)  return newPath;
@@ -174,7 +202,7 @@ nav_msgs::msg::Path PathPlanner::SmoothPath(
     while(change >= tolerance && ++attempts < 1000)
     {
         change = 0;
-        for(size_t i=1; i< path.poses.size() - 1; i++)
+        for(int i=1; i< path.poses.size() - 1; i++)
         {
             geometry_msgs::msg::Point old_p = path.poses[i].pose.position;
             geometry_msgs::msg::Point new_p = newPath.poses[i].pose.position;
