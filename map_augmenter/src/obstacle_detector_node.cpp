@@ -149,6 +149,7 @@ private:
   tf2_ros::TransformListener tf_listener_;
 
   nav_msgs::msg::OccupancyGrid obstacles_map_;
+  nav_msgs::msg::OccupancyGrid static_reference_map_;
   std::atomic<bool> have_grid_{false};
 
   // latest sensors
@@ -367,6 +368,7 @@ private:
           return;
         }
 
+        static_reference_map_ = map;
         obstacles_map_ = map;
         for (auto &c : obstacles_map_.data) c = 0;
         have_grid_ = true;
@@ -396,8 +398,14 @@ private:
     int cell_x = static_cast<int>((mx - obstacles_map_.info.origin.position.x) / obstacles_map_.info.resolution);
     int cell_y = static_cast<int>((my - obstacles_map_.info.origin.position.y) / obstacles_map_.info.resolution);
     int idx = cell_y * static_cast<int>(obstacles_map_.info.width) + cell_x;
-    if (idx >= 0 && idx < static_cast<int>(obstacles_map_.data.size()))
+    if (idx >= 0 && idx < static_cast<int>(obstacles_map_.data.size())) {
+      if (!static_reference_map_.data.empty() &&
+          idx < static_cast<int>(static_reference_map_.data.size()) &&
+          static_reference_map_.data[idx] > 0) {
+        return;
+      }
       obstacles_map_.data[idx] = 100;
+    }
   }
 
   // Usamos argumentos por valor para que el compilador los ponga en registros (CPU registers)
@@ -415,6 +423,11 @@ private:
 
     // Verificación de límites rápida
     if (idx >= 0 && idx < map_size) {
+      if (!static_reference_map_.data.empty() &&
+          idx < static_cast<int>(static_reference_map_.data.size()) &&
+          static_reference_map_.data[idx] > 0) {
+        return;
+      }
       obstacles_map_.data[idx] = 100;
     }
   }
@@ -593,6 +606,11 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
       }
 
       if (idx >= 0 && idx < map_size) {
+        if (!static_reference_map_.data.empty() &&
+            idx < static_cast<int>(static_reference_map_.data.size()) &&
+            static_reference_map_.data[idx] > 0) {
+          continue;
+        }
         obstacles_map_.data[idx] = 100;
       }
     }

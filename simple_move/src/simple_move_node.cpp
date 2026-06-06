@@ -87,6 +87,7 @@ public:
         this->get_parameter("control_alpha",         alpha_);
         this->get_parameter("control_beta",          beta_);
         this->get_parameter("linear_acceleration",   linear_acceleration_);
+        linear_acceleration_ = std::max(0.01f, linear_acceleration_);
         this->get_parameter("fine_dist_tolerance",   fine_dist_tolerance_);
         this->get_parameter("coarse_dist_tolerance", coarse_dist_tolerance_);
         this->get_parameter("angle_tolerance",       angle_tolerance_);
@@ -289,7 +290,7 @@ private:
             else if (param.get_name() == "max_angular_speed")     max_angular_speed_       = param.as_double();
             else if (param.get_name() == "control_alpha")         alpha_                   = param.as_double();
             else if (param.get_name() == "control_beta")          beta_                    = param.as_double();
-            else if (param.get_name() == "linear_acceleration")   linear_acceleration_     = param.as_double();
+            else if (param.get_name() == "linear_acceleration")   linear_acceleration_     = std::max(0.01, param.as_double());
             else if (param.get_name() == "fine_dist_tolerance")   fine_dist_tolerance_     = param.as_double();
             else if (param.get_name() == "coarse_dist_tolerance") coarse_dist_tolerance_   = param.as_double();
             else if (param.get_name() == "angle_tolerance")       angle_tolerance_         = param.as_double();
@@ -853,7 +854,7 @@ private:
 
                 if(global_error < fine_dist_tolerance_)
                     state = SM_STATE::GOAL_POSE_CORRECT_ANGLE;
-                else if(global_error < current_linear_speed*current_linear_speed/(linear_acceleration_*5))
+                else if(global_error < current_linear_speed*current_linear_speed/linear_acceleration_)
                 {
                     state = SM_STATE::GOAL_POSE_DECCEL;
                     temp_k = current_linear_speed/sqrt(global_error);
@@ -871,7 +872,7 @@ private:
                 pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
                                                       min_linear_speed_, current_linear_speed, max_angular_speed_, 
                                                       alpha_*2, beta_/4, goal_distance_ < 0, move_lat_));
-                current_linear_speed += (linear_acceleration_*5)/RATE;
+                current_linear_speed += linear_acceleration_/RATE;
                 break;
                 
             case SM_STATE::GOAL_POSE_CRUISE:
@@ -879,7 +880,7 @@ private:
                 global_error = sqrt((goal_x_ - robot_x_)*(goal_x_ - robot_x_) + (goal_y_ - robot_y_)*(goal_y_ - robot_y_));
                 if(global_error < fine_dist_tolerance_)
                     state = SM_STATE::GOAL_POSE_CORRECT_ANGLE;
-                else if(global_error < current_linear_speed*current_linear_speed/(linear_acceleration_*5))
+                else if(global_error < current_linear_speed*current_linear_speed/linear_acceleration_)
                 {
                     state = SM_STATE::GOAL_POSE_DECCEL;
                     temp_k = current_linear_speed/sqrt(global_error);
