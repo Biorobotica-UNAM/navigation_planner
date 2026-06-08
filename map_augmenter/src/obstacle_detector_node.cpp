@@ -13,6 +13,7 @@
 #include "tf2/utils.h"
 #include "Eigen/Geometry"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <unordered_map>
@@ -56,6 +57,7 @@ public:
     this->declare_parameter("cloud_min_points_per_cell", 2);
     this->declare_parameter("cloud_min_neighbor_cells",  1);
     this->declare_parameter("tf_fallback_warn_threshold_sec", 0.20);
+    this->declare_parameter("static_obstacle_ignore_radius", 0.10);
 
     this->declare_parameter("point_cloud_topic",      "/point_cloud");
     this->declare_parameter("point_cloud_topic2",     "/point_cloud2");
@@ -97,6 +99,7 @@ public:
     this->get_parameter("cloud_min_points_per_cell", cloud_min_points_per_cell_);
     this->get_parameter("cloud_min_neighbor_cells", cloud_min_neighbor_cells_);
     this->get_parameter("tf_fallback_warn_threshold_sec", tf_fallback_warn_threshold_sec_);
+    this->get_parameter("static_obstacle_ignore_radius", static_obstacle_ignore_radius_);
 
     this->get_parameter("point_cloud_topic", point_cloud_topic_);
     this->get_parameter("point_cloud_topic2", point_cloud_topic2_);
@@ -174,6 +177,7 @@ private:
   int cloud_min_points_per_cell_{2};
   int cloud_min_neighbor_cells_{1};
   double tf_fallback_warn_threshold_sec_{0.20};
+  double static_obstacle_ignore_radius_{0.10};
 
   std::string point_cloud_topic_, point_cloud_topic2_, laser_scan_topic_;
   std::string static_map_server_;
@@ -242,6 +246,9 @@ private:
       else if (n == "cloud_min_neighbor_cells")  cloud_min_neighbor_cells_  = p.as_int();
       else if (n == "tf_fallback_warn_threshold_sec") {
         tf_fallback_warn_threshold_sec_ = std::max(0.0, p.as_double());
+      }
+      else if (n == "static_obstacle_ignore_radius") {
+        static_obstacle_ignore_radius_ = std::max(0.0, p.as_double());
       }
 
       else if (n == "point_cloud_topic")  point_cloud_topic_  = p.as_string();
@@ -393,15 +400,47 @@ private:
   void cb_scan  (const sensor_msgs::msg::LaserScan::SharedPtr msg)   { latest_scan_   = msg; scan_received_   = true; }
 
   // ===== core =====
+  bool is_near_static_obstacle(int cell_x, int cell_y) const
+  {
+    if (static_reference_map_.data.empty()) return false;
+
+    const int width = static_cast<int>(static_reference_map_.info.width);
+    const int height = static_cast<int>(static_reference_map_.info.height);
+    if (cell_x < 0 || cell_x >= width || cell_y < 0 || cell_y >= height) return false;
+
+    const double resolution = static_reference_map_.info.resolution;
+    if (resolution <= 0.0) return false;
+
+    const int radius_cells = static_cast<int>(
+      std::ceil(std::max(0.0, static_obstacle_ignore_radius_) / resolution));
+
+    for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
+      for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
+        if (dx * dx + dy * dy > radius_cells * radius_cells) continue;
+
+        const int nx = cell_x + dx;
+        const int ny = cell_y + dy;
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+
+        const int nidx = ny * width + nx;
+        if (nidx >= 0 &&
+            nidx < static_cast<int>(static_reference_map_.data.size()) &&
+            static_reference_map_.data[nidx] > 0) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   inline void mark_cell(double mx, double my)
   {
     int cell_x = static_cast<int>((mx - obstacles_map_.info.origin.position.x) / obstacles_map_.info.resolution);
     int cell_y = static_cast<int>((my - obstacles_map_.info.origin.position.y) / obstacles_map_.info.resolution);
     int idx = cell_y * static_cast<int>(obstacles_map_.info.width) + cell_x;
     if (idx >= 0 && idx < static_cast<int>(obstacles_map_.data.size())) {
-      if (!static_reference_map_.data.empty() &&
-          idx < static_cast<int>(static_reference_map_.data.size()) &&
-          static_reference_map_.data[idx] > 0) {
+      if (is_near_static_obstacle(cell_x, cell_y)) {
         return;
       }
       obstacles_map_.data[idx] = 100;
@@ -423,9 +462,7 @@ private:
 
     // Verificación de límites rápida
     if (idx >= 0 && idx < map_size) {
-      if (!static_reference_map_.data.empty() &&
-          idx < static_cast<int>(static_reference_map_.data.size()) &&
-          static_reference_map_.data[idx] > 0) {
+      if (is_near_static_obstacle(cell_x, cell_y)) {
         return;
       }
       obstacles_map_.data[idx] = 100;
@@ -606,9 +643,7 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
       }
 
       if (idx >= 0 && idx < map_size) {
-        if (!static_reference_map_.data.empty() &&
-            idx < static_cast<int>(static_reference_map_.data.size()) &&
-            static_reference_map_.data[idx] > 0) {
+        if (is_near_static_obstacle(hit.cell_x, hit.cell_y)) {
           continue;
         }
         obstacles_map_.data[idx] = 100;
