@@ -206,9 +206,9 @@ private:
         augmented_cost_map_ = std::move(cost);
         lk.unlock();
 
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                             "PathPlanner.-> Augmented map received (%u x %u).",
-                             msg->info.width, msg->info.height);
+        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 30000,
+                              "PathPlanner.-> Augmented map received (%u x %u).",
+                              msg->info.width, msg->info.height);
     }
 
     // Refresh static maps via async service calls (no blocking future.get(), no threads).
