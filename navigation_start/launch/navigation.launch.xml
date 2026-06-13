@@ -7,8 +7,8 @@
   <arg name="use_namespace" default="true"/>
 
   <!-- ===== Map server args ===== -->
-  <arg name="static_map_file" default="$(find-pkg-share navigation_start)/maps/maps/lab2025/map.yaml"/>
-  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/maps/lab2025/map.yaml"/>
+  <arg name="static_map_file" default="$(find-pkg-share navigation_start)/maps/maps/blank/map.yaml"/>
+  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/maps/blank/map.yaml"/>
 
   <!-- ===== Topic args (I/O) ===== -->
   <arg name="pose_topic" default="pose"/>
@@ -34,11 +34,15 @@
   <!-- ===== Thresholds / tuning ===== -->
   <arg name="cloud_downsampling" default="4"/>
   <arg name="cloud_filter_debug" default="false"/>
+  <arg name="cloud_filter_min_points_per_voxel" default="2"/>
+  <arg name="cloud_filter_min_neighbor_voxels" default="2"/>
   <arg name="lidar_downsampling" default="1"/>
   <arg name="static_obstacle_ignore_radius" default="0.10"/>
   <arg name="cloud_points_threshold" default="20"/>
   <arg name="lidar_points_threshold" default="20"/>
-  <arg name="obstacle_decay_factor" default="5"/>
+  <arg name="obstacle_cloud_min_points_per_cell" default="2"/>
+  <arg name="obstacle_cloud_min_neighbor_cells" default="2"/>
+  <arg name="obstacle_decay_factor" default="2"/>
   <arg name="robot_radius" default="0.35"/>
   <arg name="static_obstacle_inflation_radius" default="0.05"/>
   <arg name="dynamic_obstacle_inflation_radius" default="0.15"/>
@@ -49,6 +53,7 @@
   <arg name="simple_move_max_angular_speed" default="0.6"/>
   <arg name="simple_move_linear_acceleration" default="0.10"/>
   <arg name="mvn_pln_patience" default="True"/>
+  <arg name="mvn_pln_proximity_criterion" default="0.25"/>
 
   <!-- ===== Sensing windows (laser) ===== -->
   <arg name="laser_min_x" default="0.17"/>
@@ -258,8 +263,8 @@
     <param name="input_downsampling" value="4"/>
     <param name="processing_rate_hz" value="20.0"/>
     <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
-    <param name="min_points_per_voxel" value="2"/>
-    <param name="min_neighbor_voxels" value="1"/>
+    <param name="min_points_per_voxel" value="$(var cloud_filter_min_points_per_voxel)"/>
+    <param name="min_neighbor_voxels" value="$(var cloud_filter_min_neighbor_voxels)"/>
     <param name="debug" value="$(var cloud_filter_debug)"/>
   </node>
 
@@ -296,8 +301,8 @@
   <param name="static_obstacle_ignore_radius" value="$(var static_obstacle_ignore_radius)"/>
   <!-- La nube del Kinect ya viene filtrada, pero aqui pedimos evidencia
        por celda para que un punto suelto no se convierta en obstaculo. -->
-  <param name="cloud_min_points_per_cell" value="2"/>
-  <param name="cloud_min_neighbor_cells" value="1"/>
+  <param name="cloud_min_points_per_cell" value="$(var obstacle_cloud_min_points_per_cell)"/>
+  <param name="cloud_min_neighbor_cells" value="$(var obstacle_cloud_min_neighbor_cells)"/>
 
   <!-- límites -->
   <param name="laser_max_x" value="$(var laser_max_x)"/>
@@ -491,6 +496,7 @@
     <param name="use_namespace" value="$(var use_namespace)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="patience" value="$(var mvn_pln_patience)"/>
+    <param name="proximity_criterion" value="$(var mvn_pln_proximity_criterion)"/>
     <param name="base_link_name" value="base_link"/>
   </node>
 

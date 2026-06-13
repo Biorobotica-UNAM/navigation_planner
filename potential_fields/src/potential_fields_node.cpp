@@ -21,15 +21,14 @@
 // Action messages (used less directly in ROS 2; here for compatibility)
 #include "action_msgs/msg/goal_status.hpp"
 
-//DEBUG
 #include "opencv2/core.hpp"
 #include "opencv2/highgui.hpp"
 
 // Standard
-#include <iostream>
+#include <cmath>
+#include <sstream>
 #include <vector>
 #include <exception>
-///
 
 class PotentialFieldsNode : public rclcpp::Node
 {
@@ -565,13 +564,6 @@ private:
             rejection_force_y = 0.0;
         }
 
-        if (debug_) {
-            if (obstacle_count > lidar_threshold_ && rejection_force_y != 0.0) {
-                RCLCPP_INFO(this->get_logger(), "PotentialFields.-> Laser->Rejection force: x=%.3f y=%.3f",
-                            rejection_force_x, rejection_force_y);
-            }
-        }
-
         return obstacle_count > lidar_threshold_;
     }
 
@@ -649,16 +641,6 @@ private:
         if(show_img_){
             cv::imshow("POTENTIAL FIELDS OBSTACLE", mask);
             cv::waitKey(30);
-        }
-
-        if (debug_)
-        {
-            if (rejection_force_y != 0)
-            {
-                std::cout << "PotentialFields.cloud->rejection_force_x: "
-                        << rejection_force_x << "  rejection_force_y: "
-                        << rejection_force_y << std::endl;
-            }
         }
 
         return obstacle_count > cloud_threshold_;

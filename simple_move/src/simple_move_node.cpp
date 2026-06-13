@@ -27,6 +27,7 @@
 #include <vector>
 #include <exception>
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 #include <string>
 ///
@@ -398,14 +399,14 @@ private:
 		}
 	}
 
-    void callback_navigation_stop(const std_msgs::msg::Bool::SharedPtr msg) 
-	{
-		try 
+	    void callback_navigation_stop(const std_msgs::msg::Bool::SharedPtr msg) 
 		{
-		    if (msg->data) {
-		        std::cout << "SimpleMove.-> Navigation Stop signal received" << std::endl;
-		        stop_     = true;
-		        new_pose_ = false;
+			try 
+			{
+			    if (msg->data) {
+			        std::cout << "SimpleMove.-> Navigation Stop signal received" << std::endl;
+			        stop_     = true;
+			        new_pose_ = false;
 		        new_path_ = false;
 		        move_lat_ = false;
 		    }
@@ -470,10 +471,10 @@ private:
     {
         try 
         {
-            std::cout << "SimpleMove.-> New path received with " << msg->poses.size()
-                    << " points. Stamp= " << msg->header.stamp.sec << "s, Frame="  << msg->header.frame_id
-                    << std::endl;
-            move_lat_ = false;
+	            std::cout << "SimpleMove.-> New path received with " << msg->poses.size()
+	                    << " points. Stamp= " << msg->header.stamp.sec << "s, Frame="  << msg->header.frame_id
+	                    << std::endl;
+	            move_lat_ = false;
             if (msg->poses.size() <= 0)
             {
                 new_pose_ = false;
@@ -506,12 +507,12 @@ private:
         }
     }
 
-    void callback_collision_risk(const std_msgs::msg::Bool::SharedPtr msg) 
-    {
-        try 
-        {
-            collision_risk_ = msg->data;
-        } 
+	    void callback_collision_risk(const std_msgs::msg::Bool::SharedPtr msg) 
+	    {
+	        try 
+	        {
+	            collision_risk_ = msg->data;
+	        } 
         catch (const std::exception &e) 
         {
             RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_collision_risk: %s", e.what());
@@ -521,9 +522,9 @@ private:
     void callback_rejection_force(const geometry_msgs::msg::Vector3::SharedPtr msg) 
     {
         try 
-        {
-            rejection_force_ = *msg;
-        } 
+	        {
+	            rejection_force_ = *msg;
+	        } 
         catch (const std::exception &e) 
         {
             RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_rejection_force: %s", e.what());
@@ -533,7 +534,7 @@ private:
 
     //############
     //Simple Move additional functions
-    geometry_msgs::msg::Twist calculate_speeds( float robot_x, float robot_y, float robot_t,
+	    geometry_msgs::msg::Twist calculate_speeds( float robot_x, float robot_y, float robot_t,
                                                 float goal_x, float goal_y,
                                                 float min_linear_speed, float max_linear_speed, float angular_speed, 
                                                 float alpha, float beta,
@@ -562,7 +563,12 @@ private:
         
         if(use_pot_fields && !move_lat) result.linear.y = rejection_force_y;
         
-        return result;
+	        return result;
+	    }
+
+    bool should_apply_potential_fields() const
+    {
+        return use_pot_fields_ && collision_risk_;
     }
 
     geometry_msgs::msg::Twist calculate_speeds( float robot_angle, float goal_angle, float angular_speed, float beta)
@@ -619,7 +625,7 @@ private:
         return true;
     }
 
-    bool get_robot_position_wrt_map()
+	    bool get_robot_position_wrt_map()
     {
         try
         {
@@ -641,11 +647,13 @@ private:
 
             return true;
         }
-        catch (const tf2::TransformException &ex)
-        {
-            //RCLCPP_WARN(this->get_logger(), "SimpleMove.-> TF Exception: %s", ex.what());
-            return false;
-        }
+	        catch (const tf2::TransformException &ex)
+	        {
+	            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                    "SimpleMove.-> map TF lookup failed (%s -> map): %s",
+                                    base_link_name_.c_str(), ex.what());
+	            return false;
+	        }
     }
 
     bool get_robot_position_wrt_odom()
@@ -670,11 +678,13 @@ private:
 
             return true;
         }
-        catch (const tf2::TransformException &ex)
-        {
-            //RCLCPP_WARN(this->get_logger(), "SimpleMove.-> TF Exception: %s", ex.what());
-            return false;
-        }
+	        catch (const tf2::TransformException &ex)
+	        {
+	            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                    "SimpleMove.-> odom TF lookup failed (%s -> %s): %s",
+                                    base_link_name_.c_str(), odom_name_.c_str(), ex.what());
+	            return false;
+	        }
     }
 
     bool get_goal_position_wrt_odom()
@@ -869,11 +879,14 @@ private:
                     state = SM_STATE::GOAL_POSE_FAILED;
                     std::cout << "SimpleMove.-> Timeout exceeded while trying to reach goal position. Current state: GOAL_POSE_ACCEL." << std::endl;
                 }
-                pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-                                                      min_linear_speed_, current_linear_speed, max_angular_speed_, 
-                                                      alpha_*2, beta_/4, goal_distance_ < 0, move_lat_));
-                current_linear_speed += linear_acceleration_/RATE;
-                break;
+	                {
+                        auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
+	                                                min_linear_speed_, current_linear_speed, max_angular_speed_, 
+	                                                alpha_*2, beta_/4, goal_distance_ < 0, move_lat_);
+	                    pub_cmd_vel_->publish(cmd);
+                    }
+	                current_linear_speed += linear_acceleration_/RATE;
+	                break;
                 
             case SM_STATE::GOAL_POSE_CRUISE:
                 get_robot_position_wrt_odom();
@@ -890,10 +903,13 @@ private:
                     state = SM_STATE::GOAL_POSE_FAILED;
                     std::cout << "SimpleMove.-> Timeout exceeded while trying to reach goal position. Current state: GOAL_POSE_CRUISE." << std::endl;
                 }
-                pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-                                                      min_linear_speed_, current_linear_speed, max_angular_speed_,
-                                                      alpha_*2, beta_/4, goal_distance_ < 0, move_lat_));
-                break;
+	                {
+                        auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
+	                                                min_linear_speed_, current_linear_speed, max_angular_speed_,
+	                                                alpha_*2, beta_/4, goal_distance_ < 0, move_lat_);
+	                    pub_cmd_vel_->publish(cmd);
+                    }
+	                break;
 
             case SM_STATE::GOAL_POSE_DECCEL:
                 get_robot_position_wrt_odom();
@@ -908,11 +924,14 @@ private:
                 }
                 current_linear_speed = temp_k * sqrt(global_error);
                 if(current_linear_speed < min_linear_speed_) current_linear_speed = min_linear_speed_;
-                pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-                                                       min_linear_speed_, current_linear_speed, max_angular_speed_,
-                                                       alpha_*2, beta_/4, goal_distance_ < 0, move_lat_,
-                                                       use_pot_fields_, rejection_force_.y));
-                break;
+	                {
+                        auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
+	                                                min_linear_speed_, current_linear_speed, max_angular_speed_,
+	                                                alpha_*2, beta_/4, goal_distance_ < 0, move_lat_,
+	                                                should_apply_potential_fields(), rejection_force_.y);
+	                    pub_cmd_vel_->publish(cmd);
+                    }
+	                break;
 
             case SM_STATE::GOAL_POSE_CORRECT_ANGLE:
                 get_robot_position_wrt_odom();
@@ -922,7 +941,10 @@ private:
                 global_error = fabs(global_error);
                 if(global_error < angle_tolerance_)
                     state = SM_STATE::GOAL_POSE_FINISH;
-                pub_cmd_vel_->publish(calculate_speeds(robot_t_, goal_t_, max_angular_speed_, beta_/4));
+	                {
+                        auto cmd = calculate_speeds(robot_t_, goal_t_, max_angular_speed_, beta_/4);
+	                    pub_cmd_vel_->publish(cmd);
+                    }
                 if(--attempts <= 0)
                 {
                     state = SM_STATE::GOAL_POSE_FAILED;
@@ -985,10 +1007,11 @@ private:
                         msg_goal_reached.text = "timeout_path_accel";
                         std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state: GOAL_PATH_ACCEL."<<std::endl;
                     }
-                    pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-                                                           min_linear_speed_, current_linear_speed, max_angular_speed_,
-                                                           alpha_, beta_, false, move_lat_,
-                                                           use_pot_fields_, rejection_force_.y));
+	                    auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
+	                                                min_linear_speed_, current_linear_speed, max_angular_speed_,
+	                                                alpha_, beta_, false, move_lat_,
+	                                                should_apply_potential_fields(), rejection_force_.y);
+	                    pub_cmd_vel_->publish(cmd);
                     if(move_head_ && !camera_bypass_) {
                         pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
                     }
@@ -1026,10 +1049,11 @@ private:
                         msg_goal_reached.text = "timeout_path_cruise";
                         std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state: GOAL_PATH_CRUISE."<<std::endl;
                     }
-                    pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-                                                           min_linear_speed_, current_linear_speed, max_angular_speed_, 
-                                                           alpha_, beta_, false, move_lat_,
-                                                           use_pot_fields_, rejection_force_.y));
+	                    auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
+	                                                min_linear_speed_, current_linear_speed, max_angular_speed_, 
+	                                                alpha_, beta_, false, move_lat_,
+	                                                should_apply_potential_fields(), rejection_force_.y);
+	                    pub_cmd_vel_->publish(cmd);
                     if(move_head_ && !camera_bypass_) {
                         pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
                     }
@@ -1062,10 +1086,11 @@ private:
                     }
                     current_linear_speed = temp_k * sqrt(global_error);
                     if(current_linear_speed < min_linear_speed_) current_linear_speed = min_linear_speed_;
-                    pub_cmd_vel_->publish(calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-                                                           min_linear_speed_, current_linear_speed, max_angular_speed_,
-                                                           alpha_, beta_, false, move_lat_,
-                                                           use_pot_fields_, rejection_force_.y));
+	                    auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
+	                                                min_linear_speed_, current_linear_speed, max_angular_speed_,
+	                                                alpha_, beta_, false, move_lat_,
+	                                                should_apply_potential_fields(), rejection_force_.y);
+	                    pub_cmd_vel_->publish(cmd);
                     if(move_head_ && !camera_bypass_) {
                         pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
                     }
