@@ -14,6 +14,7 @@
 #include "tf2/utils.h"
 #include "Eigen/Geometry"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 
@@ -47,8 +48,12 @@ public:
     this->declare_parameter("cloud_max_z",            2.0);
 
     this->declare_parameter("decay_factor",           10);
-    this->declare_parameter("inflation_radius",       0.25);
-    this->declare_parameter("cost_radius",            0.25);
+    this->declare_parameter("robot_radius",           0.35);
+    this->declare_parameter("static_obstacle_inflation_radius",  0.05);
+    this->declare_parameter("dynamic_obstacle_inflation_radius", 0.15);
+    this->declare_parameter("obstacle_inflation_radius",         -1.0);
+    this->declare_parameter("inflation_radius",       0.15);
+    this->declare_parameter("cost_radius",            0.35);
 
     this->declare_parameter("cloud_downsampling",     1);
     this->declare_parameter("cloud_downsampling2",    1);
@@ -61,16 +66,34 @@ public:
     this->declare_parameter("static_map_server",      "/static_map_server/map");
     this->declare_parameter("prohibition_map_server", "/prohibition_map_server/map");
     this->declare_parameter("base_link_name",         "base_footprint");
+    this->declare_parameter("debug_maps",             false);
 
     // load
     this->get_parameter("use_namespace", use_namespace_);
     this->get_parameter("use_online", use_online_);
     this->get_parameter("decay_factor", decay_factor_);
+    this->get_parameter("robot_radius", robot_radius_);
+    this->get_parameter("static_obstacle_inflation_radius", static_obstacle_inflation_radius_);
+    this->get_parameter("dynamic_obstacle_inflation_radius", dynamic_obstacle_inflation_radius_);
+    this->get_parameter("obstacle_inflation_radius", obstacle_inflation_radius_);
     this->get_parameter("inflation_radius", inflation_radius_);
     this->get_parameter("cost_radius", cost_radius_);
     this->get_parameter("static_map_server", static_map_server_);
     this->get_parameter("prohibition_map_server", prohibition_map_server_);
     this->get_parameter("base_link_name", base_link_name_);
+    this->get_parameter("debug_maps", debug_maps_);
+
+    if (static_obstacle_inflation_radius_ < 0.0) {
+      static_obstacle_inflation_radius_ =
+        obstacle_inflation_radius_ >= 0.0 ? obstacle_inflation_radius_ : inflation_radius_;
+    }
+    if (dynamic_obstacle_inflation_radius_ < 0.0) {
+      dynamic_obstacle_inflation_radius_ =
+        obstacle_inflation_radius_ >= 0.0 ? obstacle_inflation_radius_ : inflation_radius_;
+    }
+    robot_radius_ = std::max(0.0, robot_radius_);
+    static_obstacle_inflation_radius_ = std::max(0.0, static_obstacle_inflation_radius_);
+    dynamic_obstacle_inflation_radius_ = std::max(0.0, dynamic_obstacle_inflation_radius_);
 
     // param callback
     param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -82,6 +105,9 @@ public:
     // Publisher (MISMO)
     pub_augmented_map_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
       make_name("/augmented_map"),
+      rclcpp::QoS(10).transient_local());
+    pub_planning_map_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
+      make_name("/planning_map"),
       rclcpp::QoS(10).transient_local());
 
     // Subs (MISMO point_obstacle) + NEW obstacles_map
@@ -137,12 +163,16 @@ private:
   bool are_there_obstacles_ = false;
 
   nav_msgs::msg::OccupancyGrid static_map_;
+  nav_msgs::msg::OccupancyGrid merged_static_raw_map_;
+  nav_msgs::msg::OccupancyGrid static_obstacle_map_;
   nav_msgs::msg::OccupancyGrid prohibition_map_;
   nav_msgs::msg::OccupancyGrid static_cost_map_;
 
   nav_msgs::msg::OccupancyGrid obstacles_map_;          // recibido
   nav_msgs::msg::OccupancyGrid obstacles_inflated_map_;
+  nav_msgs::msg::OccupancyGrid obstacles_visual_inflated_map_;
   nav_msgs::msg::OccupancyGrid augmented_map_;
+  nav_msgs::msg::OccupancyGrid visual_augmented_map_;
 
   std::atomic<bool> obstacles_received_{false};
 
@@ -153,14 +183,20 @@ private:
   bool use_namespace_{false};
   bool use_online_{false};
   int decay_factor_{10};
-  double inflation_radius_{0.25};
-  double cost_radius_{0.25};
+  double robot_radius_{0.35};
+  double static_obstacle_inflation_radius_{0.05};
+  double dynamic_obstacle_inflation_radius_{0.15};
+  double obstacle_inflation_radius_{-1.0};
+  double inflation_radius_{0.15};
+  double cost_radius_{0.35};
   std::string static_map_server_;
   std::string prohibition_map_server_;
   std::string base_link_name_;
+  bool debug_maps_{false};
 
   // comms
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr pub_augmented_map_;
+  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr pub_planning_map_;
 
   rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr sub_clicked_point_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_obstacles_map_;
@@ -206,6 +242,7 @@ private:
   {
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = true;
+    bool cost_radius_changed = false;
 
     for (const auto &p : params)
     {
@@ -213,16 +250,95 @@ private:
       if (n == "use_namespace") use_namespace_ = p.as_bool();
       else if (n == "use_online") use_online_ = p.as_bool();
       else if (n == "decay_factor") decay_factor_ = p.as_int();
+      else if (n == "robot_radius") robot_radius_ = std::max(0.0, p.as_double());
+      else if (n == "static_obstacle_inflation_radius") static_obstacle_inflation_radius_ = std::max(0.0, p.as_double());
+      else if (n == "dynamic_obstacle_inflation_radius") dynamic_obstacle_inflation_radius_ = std::max(0.0, p.as_double());
+      else if (n == "obstacle_inflation_radius") {
+        obstacle_inflation_radius_ = std::max(0.0, p.as_double());
+        static_obstacle_inflation_radius_ = obstacle_inflation_radius_;
+        dynamic_obstacle_inflation_radius_ = obstacle_inflation_radius_;
+      }
       else if (n == "inflation_radius") inflation_radius_ = p.as_double();
-      else if (n == "cost_radius") cost_radius_ = p.as_double();
+      else if (n == "cost_radius") {
+        cost_radius_ = std::max(0.0, p.as_double());
+        cost_radius_changed = true;
+      }
       else if (n == "static_map_server") static_map_server_ = p.as_string();
       else if (n == "prohibition_map_server") prohibition_map_server_ = p.as_string();
       else if (n == "base_link_name") base_link_name_ = p.as_string();
+      else if (n == "debug_maps") debug_maps_ = p.as_bool();
       else {
         // Mantén compat: ignora los que no usa este nodo (sensores ahora viven en obstacle_detector)
       }
     }
+    if (cost_radius_changed && static_ready_ && !static_map_.data.empty()) {
+      static_cost_map_ = get_cost_map(static_map_, static_cast<float>(cost_radius_));
+    }
     return result;
+  }
+
+  double static_navigation_clearance_radius() const
+  {
+    return std::max(0.0, static_obstacle_inflation_radius_);
+  }
+
+  double dynamic_navigation_clearance_radius() const
+  {
+    return std::max(0.0, dynamic_obstacle_inflation_radius_);
+  }
+
+  size_t count_occupied_cells(const nav_msgs::msg::OccupancyGrid &map) const
+  {
+    return static_cast<size_t>(std::count_if(
+      map.data.begin(),
+      map.data.end(),
+      [](int8_t c) { return c > 0; }));
+  }
+
+  int max_cell_value(const nav_msgs::msg::OccupancyGrid &map) const
+  {
+    if (map.data.empty()) return 0;
+    auto it = std::max_element(map.data.begin(), map.data.end());
+    return static_cast<int>(*it);
+  }
+
+  void debug_log_map_stats(const char *context, bool force = false)
+  {
+    const size_t raw_static_occ = count_occupied_cells(merged_static_raw_map_);
+    const size_t static_occ = count_occupied_cells(static_map_);
+    const size_t static_visual_occ = count_occupied_cells(static_obstacle_map_);
+    const size_t obs_raw_occ = count_occupied_cells(obstacles_map_);
+    const size_t obs_inflated_occ = count_occupied_cells(obstacles_inflated_map_);
+    const size_t obs_visual_occ = count_occupied_cells(obstacles_visual_inflated_map_);
+    const size_t planning_occ = count_occupied_cells(augmented_map_);
+    const size_t visual_occ = count_occupied_cells(visual_augmented_map_);
+    const size_t static_cost_occ = count_occupied_cells(static_cost_map_);
+
+    if (obs_raw_occ == 0 && planning_occ > static_occ) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 1000,
+        "MapAugmenter.DEBUG[%s].-> Planning map grew without raw dynamic obstacles: static=%zu planning=%zu raw_static=%zu",
+        context, static_occ, planning_occ, raw_static_occ);
+    }
+
+    if (!debug_maps_ && !force) return;
+
+    RCLCPP_INFO_THROTTLE(
+      this->get_logger(), *this->get_clock(), 1000,
+      "MapAugmenter.DEBUG[%s].-> occ raw_static=%zu static_inflated=%zu static_visual=%zu static_cost=%zu obs_raw=%zu obs_inflated=%zu obs_visual=%zu planning=%zu visual=%zu max(obs=%d, planning=%d, visual=%d)",
+      context,
+      raw_static_occ,
+      static_occ,
+      static_visual_occ,
+      static_cost_occ,
+      obs_raw_occ,
+      obs_inflated_occ,
+      obs_visual_occ,
+      planning_occ,
+      visual_occ,
+      max_cell_value(obstacles_map_),
+      max_cell_value(augmented_map_),
+      max_cell_value(visual_augmented_map_));
   }
 
   Eigen::Affine3d get_relative_position(const std::string &target_frame, const std::string &source_frame)
@@ -384,11 +500,17 @@ private:
   {
     if (!(is_static_map_ && is_prohibition_map_)) return;
 
-    static_map_ = merge_maps(static_map_, prohibition_map_);
-    static_map_ = inflate_map(static_map_, static_cast<float>(inflation_radius_));
+    const auto merged_static_map = merge_maps(static_map_, prohibition_map_);
+    merged_static_raw_map_ = merged_static_map;
+    static_obstacle_map_ = inflate_map(
+      merged_static_map,
+      static_cast<float>(std::max(0.0, static_obstacle_inflation_radius_)));
+    static_map_ = inflate_map(
+      merged_static_map,
+      static_cast<float>(static_navigation_clearance_radius()));
     static_cost_map_ = get_cost_map(static_map_, static_cast<float>(cost_radius_));
 
-    // init obstáculos con tamaño correcto (si todavía no llega del detector)
+    // init obstáculos con geometría correcta (si todavía no llega del detector)
     obstacles_map_ = static_map_;
     for (auto &c : obstacles_map_.data) c = 0;
 
@@ -396,7 +518,11 @@ private:
 
     is_static_map_ = false;
     is_prohibition_map_ = false;
-    RCLCPP_INFO(this->get_logger(), "MapAugmenter.-> Statics maps updated.");
+    RCLCPP_INFO(this->get_logger(),
+      "MapAugmenter.-> Static maps updated. robot_radius=%.2f static_obstacle_radius=%.2f dynamic_obstacle_radius=%.2f cost_radius=%.2f static_clearance=%.2f dynamic_clearance=%.2f",
+      robot_radius_, static_obstacle_inflation_radius_, dynamic_obstacle_inflation_radius_,
+      cost_radius_, static_navigation_clearance_radius(), dynamic_navigation_clearance_radius());
+    debug_log_map_stats("process_maps", true);
   }
 
   void publish_augmented_now()
@@ -407,10 +533,16 @@ private:
     // Si NO, puedes dejar esta línea para mantener la lógica original:
     are_there_obstacles_ = decay_map_and_check_if_obstacles(obstacles_map_, decay_factor_);
 
-    obstacles_inflated_map_ = inflate_map(obstacles_map_, inflation_radius_);
+    obstacles_visual_inflated_map_ = inflate_map(
+      obstacles_map_,
+      static_cast<float>(std::max(0.0, dynamic_obstacle_inflation_radius_)));
+    obstacles_inflated_map_ = inflate_map(obstacles_map_, dynamic_navigation_clearance_radius());
     augmented_map_ = merge_maps(static_map_, obstacles_inflated_map_);
+    visual_augmented_map_ = merge_maps(static_obstacle_map_, obstacles_visual_inflated_map_);
+    debug_log_map_stats("publish_now");
 
-    pub_augmented_map_->publish(augmented_map_);
+    pub_augmented_map_->publish(visual_augmented_map_);
+    pub_planning_map_->publish(augmented_map_);
   }
 
 
@@ -443,6 +575,7 @@ private:
     obstacles_map_ = *msg;
     obstacles_dirty_ = true;
     publish_augmented_now();
+    debug_log_map_stats("obstacles_callback");
   }
 
 
@@ -477,7 +610,7 @@ private:
       // ok: usa obstacles_map_ inicializado en process_maps()
     }
 
-    obstacles_inflated_map_ = inflate_map(obstacles_map_, static_cast<float>(inflation_radius_));
+    obstacles_inflated_map_ = inflate_map(obstacles_map_, static_cast<float>(dynamic_navigation_clearance_radius()));
     augmented_map_ = merge_maps(static_map_, obstacles_inflated_map_);
     res->map = augmented_map_;
   }*/
@@ -492,8 +625,13 @@ private:
       return;
     }
 
-    obstacles_inflated_map_ = inflate_map(obstacles_map_, inflation_radius_);
+    obstacles_visual_inflated_map_ = inflate_map(
+      obstacles_map_,
+      static_cast<float>(std::max(0.0, dynamic_obstacle_inflation_radius_)));
+    obstacles_inflated_map_ = inflate_map(obstacles_map_, dynamic_navigation_clearance_radius());
     augmented_map_ = merge_maps(static_map_, obstacles_inflated_map_);
+    visual_augmented_map_ = merge_maps(static_obstacle_map_, obstacles_visual_inflated_map_);
+    debug_log_map_stats("get_augmented_map");
     response->map = augmented_map_;
   }
 
@@ -557,9 +695,15 @@ private:
 
       // Si el decay ya lo hace el detector, deja decay_factor=0 en este nodo (launch)
       are_there_obstacles_ = decay_map_and_check_if_obstacles(obstacles_map_, decay_factor_);
-      obstacles_inflated_map_ = inflate_map(obstacles_map_, inflation_radius_);
+      obstacles_visual_inflated_map_ = inflate_map(
+        obstacles_map_,
+        static_cast<float>(std::max(0.0, dynamic_obstacle_inflation_radius_)));
+      obstacles_inflated_map_ = inflate_map(obstacles_map_, dynamic_navigation_clearance_radius());
       augmented_map_ = merge_maps(static_map_, obstacles_inflated_map_);
-      pub_augmented_map_->publish(augmented_map_);
+      visual_augmented_map_ = merge_maps(static_obstacle_map_, obstacles_visual_inflated_map_);
+      debug_log_map_stats("timer_publish");
+      pub_augmented_map_->publish(visual_augmented_map_);
+      pub_planning_map_->publish(augmented_map_);
     }
   }
 

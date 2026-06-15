@@ -37,9 +37,9 @@
 
   <!-- Prisma estricto de obstaculos. cloud_filter lo usa como base y lo amplia internamente. -->
   <arg name="cloud_min_x" default="0.30"/>
-  <arg name="cloud_max_x" default="0.80"/>
-  <arg name="cloud_min_y" default="-0.30"/>
-  <arg name="cloud_max_y" default="0.30"/>
+  <arg name="cloud_max_x" default="1.20"/>
+  <arg name="cloud_min_y" default="-0.45"/>
+  <arg name="cloud_max_y" default="0.45"/>
   <arg name="cloud_min_z" default="0.05"/>
   <arg name="cloud_max_z" default="1.00"/>
 

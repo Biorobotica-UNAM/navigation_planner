@@ -3,6 +3,7 @@
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
+#include "std_srvs/srv/set_bool.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 
 #include "tf2_ros/buffer.h"
@@ -57,6 +58,7 @@ public:
     declare_parameter<bool>("publish_debug_markers", true);
     declare_parameter<std::string>("debug_marker_topic", "cloud_filter/debug_markers");
     declare_parameter<double>("status_period_sec", 2.0);
+    declare_parameter<bool>("enabled", true);
     declare_parameter<bool>("debug", false);
 
     load_parameters();
@@ -72,21 +74,14 @@ public:
     pub_markers_ = create_publisher<visualization_msgs::msg::MarkerArray>(
       debug_marker_topic_, rclcpp::QoS(1).transient_local());
 
-    // En el robot real la nube puede venir con QoS reliable o best_effort
-    // segun el driver. El modo dual mantiene el filtro compatible con ambos.
-    const auto cb = std::bind(&CloudFilterNode::callback_cloud, this, std::placeholders::_1);
-    if (input_qos_mode_ == "reliable") {
-      sub_cloud_reliable_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        input_topic_, rclcpp::QoS(5).reliable(), cb);
-    } else if (input_qos_mode_ == "best_effort") {
-      sub_cloud_best_effort_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        input_topic_, rclcpp::SensorDataQoS(), cb);
-    } else {
-      sub_cloud_best_effort_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        input_topic_, rclcpp::SensorDataQoS(), cb);
-      sub_cloud_reliable_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        input_topic_, rclcpp::QoS(5).reliable(), cb);
-    }
+    enable_srv_ = create_service<std_srvs::srv::SetBool>(
+      "enable",
+      std::bind(
+        &CloudFilterNode::enable_callback,
+        this,
+        std::placeholders::_1,
+        std::placeholders::_2));
+    set_enabled(enabled_, false);
 
     const auto processing_period = std::chrono::duration<double>(1.0 / processing_rate_hz_);
     processing_timer_ = create_wall_timer(
@@ -154,6 +149,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_reliable_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cloud_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_markers_;
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr enable_srv_;
   OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
   rclcpp::TimerBase::SharedPtr processing_timer_;
   rclcpp::TimerBase::SharedPtr marker_timer_;
@@ -216,6 +212,7 @@ private:
   double tf_fallback_warn_threshold_sec_;
   double status_period_sec_;
   bool publish_debug_markers_;
+  bool enabled_;
   bool debug_;
 
   void load_parameters()
@@ -248,6 +245,7 @@ private:
     get_parameter("tf_fallback_warn_threshold_sec", tf_fallback_warn_threshold_sec_);
     get_parameter("publish_debug_markers", publish_debug_markers_);
     get_parameter("status_period_sec", status_period_sec_);
+    get_parameter("enabled", enabled_);
     get_parameter("debug", debug_);
 
     voxel_leaf_size_ = std::max(0.005, voxel_leaf_size_);
@@ -323,6 +321,7 @@ private:
         status_period_sec_ = std::max(0.5, param.as_double());
       }
       else if (name == "publish_debug_markers") publish_debug_markers_ = param.as_bool();
+      else if (name == "enabled") set_enabled(param.as_bool(), true);
       else if (name == "debug") debug_ = param.as_bool();
       else if (name == "input_topic" || name == "output_topic" || name == "debug_marker_topic") {
         result.successful = false;
@@ -333,6 +332,66 @@ private:
 
     update_filter_bounds();
     return result;
+  }
+
+  void create_input_subscriptions()
+  {
+    const auto cb = std::bind(&CloudFilterNode::callback_cloud, this, std::placeholders::_1);
+    if (input_qos_mode_ == "reliable") {
+      sub_cloud_reliable_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        input_topic_, rclcpp::QoS(5).reliable(), cb);
+      sub_cloud_best_effort_.reset();
+    } else if (input_qos_mode_ == "best_effort") {
+      sub_cloud_best_effort_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        input_topic_, rclcpp::SensorDataQoS(), cb);
+      sub_cloud_reliable_.reset();
+    } else {
+      sub_cloud_best_effort_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        input_topic_, rclcpp::SensorDataQoS(), cb);
+      sub_cloud_reliable_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+        input_topic_, rclcpp::QoS(5).reliable(), cb);
+    }
+  }
+
+  void clear_input_subscriptions()
+  {
+    sub_cloud_best_effort_.reset();
+    sub_cloud_reliable_.reset();
+    std::lock_guard<std::mutex> lock(latest_cloud_mutex_);
+    latest_cloud_.reset();
+    ++latest_cloud_sequence_;
+  }
+
+  void set_enabled(bool enabled, bool log_change)
+  {
+    if (enabled_ == enabled &&
+        ((enabled && (sub_cloud_best_effort_ || sub_cloud_reliable_)) ||
+         (!enabled && !sub_cloud_best_effort_ && !sub_cloud_reliable_))) {
+      return;
+    }
+
+    enabled_ = enabled;
+    if (enabled_) {
+      create_input_subscriptions();
+    } else {
+      clear_input_subscriptions();
+    }
+
+    if (log_change) {
+      RCLCPP_INFO(
+        get_logger(),
+        "CloudFilter.-> %s",
+        enabled_ ? "enabled" : "paused");
+    }
+  }
+
+  void enable_callback(
+    const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+    std::shared_ptr<std_srvs::srv::SetBool::Response> response)
+  {
+    set_enabled(request->data, true);
+    response->success = true;
+    response->message = enabled_ ? "cloud_filter_enabled" : "cloud_filter_paused";
   }
 
   visualization_msgs::msg::Marker make_box_marker(
@@ -381,7 +440,7 @@ private:
 
   void publish_debug_markers()
   {
-    if (!publish_debug_markers_) {
+    if (!enabled_ || !publish_debug_markers_) {
       return;
     }
 
@@ -409,6 +468,13 @@ private:
     const auto published = published_clouds_.load();
     const auto input_publishers = count_publishers(input_topic_);
     const auto output_subscribers = count_subscribers(output_topic_);
+
+    if (!enabled_) {
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "CloudFilter.-> paused by enable service.");
+      return;
+    }
 
     if (received == 0) {
       RCLCPP_WARN_THROTTLE(
@@ -583,6 +649,9 @@ private:
     if (!msg) {
       return;
     }
+    if (!enabled_) {
+      return;
+    }
 
     // La entrada del Kinect puede llegar a 30 Hz. Si procesamos cada nube en
     // el callback, cualquier pico de CPU crea una cola de mensajes viejos y
@@ -596,6 +665,10 @@ private:
 
   void process_latest_cloud()
   {
+    if (!enabled_) {
+      return;
+    }
+
     sensor_msgs::msg::PointCloud2::SharedPtr msg;
     uint64_t sequence = 0;
     {

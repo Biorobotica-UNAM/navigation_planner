@@ -71,6 +71,7 @@ ament_target_dependencies(cloud_filter_node
   rclcpp
   rcl_interfaces
   sensor_msgs
+  std_srvs
   visualization_msgs
   tf2
   tf2_ros
