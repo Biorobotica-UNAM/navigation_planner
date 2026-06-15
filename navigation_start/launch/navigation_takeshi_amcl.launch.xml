@@ -24,7 +24,7 @@
   <arg name="use_lidar"        default="True"/>
   <arg name="use_point_cloud"  default="True"/>
   <arg name="use_point_cloud2" default="false"/>
-  <arg name="use_pot_fields"   default="False"/>
+  <arg name="use_pot_fields"   default="True"/>
 
   <!-- ===== Tuning / thresholds ===== -->
   <arg name="cloud_downsampling"     default="5"/>
