@@ -90,6 +90,8 @@
   <arg name="slam_resolution"          default="0.05"/>
   <arg name="slam_max_laser_range"     default="20.0"/>
   <arg name="slam_map_update_interval" default="1.0"/>
+  <arg name="slam_min_travel_distance" default="0.1"/>
+  <arg name="slam_map_update_heading" default="0.2"/>
 
 
   <!-- ================================================================== -->
@@ -114,7 +116,7 @@
         namespace="$(var namespace_nav)">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="autostart"    value="true"/>
-    <param name="node_names"   value="['prohibition_map_server']"/>
+    <param name="node_names" value="['slam_toolbox', 'prohibition_map_server']"/>
   </node>
 
 
