@@ -83,12 +83,14 @@
   <arg name="cloud_pot_fields_k_rej" default="0.20"/>
 
   <!-- ===== SLAM Toolbox ===== -->
-  <arg name="slam_map_frame"           default="map"/>
-  <arg name="slam_odom_frame"          default="odom"/>
-  <arg name="slam_base_frame"          default="base_footprint"/>
-  <arg name="slam_resolution"          default="0.05"/>
-  <arg name="slam_max_laser_range"     default="20.0"/>
-  <arg name="slam_map_update_interval" default="1.0"/>
+  <arg name="slam_map_frame"              default="map"/>
+  <arg name="slam_odom_frame"             default="odom"/>
+  <arg name="slam_base_frame"             default="base_footprint"/>
+  <arg name="slam_resolution"             default="0.05"/>
+  <arg name="slam_max_laser_range"        default="20.0"/>
+  <arg name="slam_map_update_interval"    default="1.0"/>
+  <arg name="slam_min_travel_distance"    default="0.1"/>
+  <arg name="slam_min_travel_heading"     default="0.2"/>
 
 
   <!-- ================================================================== -->
@@ -133,9 +135,11 @@
     <param name="odom_frame"          value="$(var slam_odom_frame)"/>
     <param name="base_frame"          value="$(var slam_base_frame)"/>
     <param name="mode"                value="mapping"/>
-    <param name="map_update_interval" value="$(var slam_map_update_interval)"/>
-    <param name="resolution"          value="$(var slam_resolution)"/>
-    <param name="max_laser_range"     value="$(var slam_max_laser_range)"/>
+    <param name="map_update_interval"    value="$(var slam_map_update_interval)"/>
+    <param name="resolution"             value="$(var slam_resolution)"/>
+    <param name="max_laser_range"        value="$(var slam_max_laser_range)"/>
+    <param name="minimum_travel_distance" value="$(var slam_min_travel_distance)"/>
+    <param name="minimum_travel_heading"  value="$(var slam_min_travel_heading)"/>
     <remap from="/map"          to="map"/>
     <remap from="/map_metadata" to="map_metadata"/>
   </node>

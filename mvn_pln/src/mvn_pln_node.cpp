@@ -845,7 +845,7 @@ private:
                 last_replan_x_ = start_x;
                 last_replan_y_ = start_y;
 
-                if (replan_count_ > 6) {
+                if (replan_count_ > 9) {
                     RCLCPP_WARN(this->get_logger(), "MotionPlanner.-> Repeated replans from same start (count=%d). Requesting stop.", replan_count_);
                     publish_status(actionlib_msgs::msg::GoalStatus::ABORTED, goal_id, "repeated_replans_same_start");
                     std_msgs::msg::Empty stop_msg;
