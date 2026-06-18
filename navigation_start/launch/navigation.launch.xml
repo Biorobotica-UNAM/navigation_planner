@@ -12,7 +12,11 @@
 
   <!-- ===== Topic args (I/O) ===== -->
   <arg name="pose_topic" default="pose"/>
-  <arg name="point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
+  <!-- La nube cruda se conserva separada para debug; navegacion usa la nube
+       filtrada para evitar ruido y reducir carga en los nodos de obstaculos. -->
+  <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
+  <arg name="point_cloud_topic" default="/$(var namespace_nav)/camera/points_filtered"/>
+  <arg name="cloud_filter_input_qos_mode" default="dual"/>
   <!--arg name="bumper_f_topic" default="/bumper"/-->
 
   <arg name="laser_scan_topic"  default="/$(var namespace_hardware)/base/scan"/>
@@ -28,26 +32,47 @@
   <arg name="use_pot_fields" default="False"/>
 
   <!-- ===== Thresholds / tuning ===== -->
-  <arg name="cloud_downsampling" default="5"/>
+  <arg name="cloud_downsampling" default="4"/>
+  <arg name="cloud_filter_debug" default="false"/>
+  <arg name="cloud_filter_min_points_per_voxel" default="2"/>
+  <arg name="cloud_filter_min_neighbor_voxels" default="2"/>
   <arg name="lidar_downsampling" default="1"/>
-  <arg name="cloud_points_threshold" default="100"/>
+  <arg name="static_obstacle_ignore_radius" default="0.10"/>
+  <arg name="cloud_points_threshold" default="20"/>
   <arg name="lidar_points_threshold" default="20"/>
+  <arg name="obstacle_cloud_min_points_per_cell" default="2"/>
+  <arg name="obstacle_cloud_min_neighbor_cells" default="2"/>
+  <arg name="obstacle_decay_factor" default="2"/>
+  <arg name="robot_radius" default="0.35"/>
+  <arg name="static_obstacle_inflation_radius" default="0.05"/>
+  <arg name="dynamic_obstacle_inflation_radius" default="0.12"/>
+  <arg name="cost_radius" default="0.25"/>
+  <arg name="obstacle_inflation_radius" default="0.15"/>
+  <arg name="map_augmenter_debug" default="false"/>
+  <arg name="simple_move_max_linear_speed" default="0.6"/>
+  <arg name="simple_move_max_angular_speed" default="0.6"/>
+  <arg name="simple_move_linear_acceleration" default="0.10"/>
   <arg name="mvn_pln_patience" default="True"/>
+  <arg name="mvn_pln_proximity_criterion" default="0.25"/>
 
   <!-- ===== Sensing windows (laser) ===== -->
   <arg name="laser_min_x" default="0.17"/>
   <arg name="laser_max_x" default="0.55"/>
-  <arg name="laser_min_y" default="-0.35"/>
-  <arg name="laser_max_y" default="0.35"/>
+  <arg name="laser_min_y" default="-0.50"/>
+  <arg name="laser_max_y" default="0.50"/>
+  <arg name="laser_collision_min_y" default="-0.40"/>
+  <arg name="laser_collision_max_y" default="0.40"/>
   <arg name="laser_min_z" default="0.025"/>
   <arg name="laser_max_z" default="1.00"/>
 
   <!-- ===== Sensing windows (cloud) ===== -->
   <arg name="cloud_min_x" default="0.30"/>
-  <arg name="cloud_max_x" default="0.80"/>
-  <arg name="cloud_min_y" default="-0.30"/>
-  <arg name="cloud_max_y" default="0.30"/>
-  <arg name="cloud_min_z" default="0.01"/>
+  <arg name="cloud_max_x" default="1.20"/>
+  <arg name="cloud_min_y" default="-0.45"/>
+  <arg name="cloud_max_y" default="0.45"/>
+  <arg name="cloud_collision_min_y" default="-0.40"/>
+  <arg name="cloud_collision_max_y" default="0.40"/>
+  <arg name="cloud_min_z" default="0.05"/>
   <arg name="cloud_max_z" default="1.0"/>
 
   <!-- ===== Map servers ===== -->
@@ -199,6 +224,8 @@
     <param name="laser_min_x" value="$(var laser_min_x)"/>
     <param name="laser_max_y" value="$(var laser_max_y)"/>
     <param name="laser_min_y" value="$(var laser_min_y)"/>
+    <param name="laser_collision_max_y" value="$(var laser_collision_max_y)"/>
+    <param name="laser_collision_min_y" value="$(var laser_collision_min_y)"/>
     <param name="laser_max_z" value="$(var laser_max_z)"/>
     <param name="laser_min_z" value="$(var laser_min_z)"/>
 
@@ -206,9 +233,40 @@
     <param name="cloud_min_x" value="$(var cloud_min_x)"/>
     <param name="cloud_max_y" value="$(var cloud_max_y)"/>
     <param name="cloud_min_y" value="$(var cloud_min_y)"/>
+    <param name="cloud_collision_max_y" value="$(var cloud_collision_max_y)"/>
+    <param name="cloud_collision_min_y" value="$(var cloud_collision_min_y)"/>
     <param name="cloud_max_z" value="$(var cloud_max_z)"/>
     <param name="cloud_min_z" value="$(var cloud_min_z)"/>
   </node>-->
+
+  <!-- ===== Kinect Cloud Filter ===== -->
+  <node name="cloud_filter"
+        pkg="map_augmenter"
+        exec="cloud_filter_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="input_topic" value="$(var raw_point_cloud_topic)"/>
+    <param name="output_topic" value="$(var point_cloud_topic)"/>
+    <param name="input_qos_mode" value="$(var cloud_filter_input_qos_mode)"/>
+    <param name="base_link_name" value="base_link"/>
+
+    <param name="min_x" value="$(var cloud_min_x)"/>
+    <param name="max_x" value="$(var cloud_max_x)"/>
+    <param name="min_y" value="$(var cloud_min_y)"/>
+    <param name="max_y" value="$(var cloud_max_y)"/>
+    <param name="min_z" value="$(var cloud_min_z)"/>
+    <param name="max_z" value="$(var cloud_max_z)"/>
+
+    <param name="voxel_leaf_size" value="0.03"/>
+    <param name="input_downsampling" value="4"/>
+    <param name="processing_rate_hz" value="20.0"/>
+    <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
+    <param name="min_points_per_voxel" value="$(var cloud_filter_min_points_per_voxel)"/>
+    <param name="min_neighbor_voxels" value="$(var cloud_filter_min_neighbor_voxels)"/>
+    <param name="debug" value="$(var cloud_filter_debug)"/>
+  </node>
 
 <!-- ===== Obstacle Detector (fast) ===== -->
 <node name="obstacle_detector"
@@ -238,7 +296,13 @@
   <param name="lidar_downsampling" value="1"/>
 
   <!-- Detector rápido -->
-  <param name="decay_factor" value="2"/>
+  <param name="decay_factor" value="$(var obstacle_decay_factor)"/>
+  <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
+  <param name="static_obstacle_ignore_radius" value="$(var static_obstacle_ignore_radius)"/>
+  <!-- La nube del Kinect ya viene filtrada, pero aqui pedimos evidencia
+       por celda para que un punto suelto no se convierta en obstaculo. -->
+  <param name="cloud_min_points_per_cell" value="$(var obstacle_cloud_min_points_per_cell)"/>
+  <param name="cloud_min_neighbor_cells" value="$(var obstacle_cloud_min_neighbor_cells)"/>
 
   <!-- límites -->
   <param name="laser_max_x" value="$(var laser_max_x)"/>
@@ -291,8 +355,18 @@
   <!-- Para NO doble-decay: el detector ya hace decay -->
   <param name="decay_factor" value="0"/>
 
-  <param name="inflation_radius" value="0.10"/>
-  <param name="cost_radius" value="0.25"/>
+  <!-- robot_radius documents the physical robot/body clearance, but it is not
+       hard-applied to the global A* map because the current planner moves a
+       point and large hard inflation can disconnect narrow areas. The hard map
+       inflation is controlled by static/dynamic_obstacle_inflation_radius;
+       body safety is handled by sensor windows and potential_fields. -->
+  <param name="robot_radius" value="$(var robot_radius)"/>
+  <param name="static_obstacle_inflation_radius" value="$(var static_obstacle_inflation_radius)"/>
+  <param name="dynamic_obstacle_inflation_radius" value="$(var dynamic_obstacle_inflation_radius)"/>
+  <param name="obstacle_inflation_radius" value="$(var obstacle_inflation_radius)"/>
+  <param name="inflation_radius" value="$(var dynamic_obstacle_inflation_radius)"/>
+  <param name="cost_radius" value="$(var cost_radius)"/>
+  <param name="debug_maps" value="$(var map_augmenter_debug)"/>
 
   <param name="use_online" value="False"/>
 
@@ -337,8 +411,9 @@
         namespace="$(var namespace_nav)">
     <param name="use_namespace" value="$(var use_namespace)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
-    <param name="max_linear_speed" value="0.8"/>
-    <param name="max_angular_speed" value="0.6"/>
+    <param name="max_linear_speed" value="$(var simple_move_max_linear_speed)"/>
+    <param name="max_angular_speed" value="$(var simple_move_max_angular_speed)"/>
+    <param name="linear_acceleration" value="$(var simple_move_linear_acceleration)"/>
     <!--param name="control_alpha" value="0.2"/-->
     <param name="control_alpha" value="0.08"/>
     <!--param name="control_beta" value="0.8"/-->
@@ -369,6 +444,8 @@
     <param name="laser_min_x" value="$(var laser_min_x)"/>
     <param name="laser_max_y" value="$(var laser_max_y)"/>
     <param name="laser_min_y" value="$(var laser_min_y)"/>
+    <param name="laser_collision_max_y" value="$(var laser_collision_max_y)"/>
+    <param name="laser_collision_min_y" value="$(var laser_collision_min_y)"/>
     <param name="laser_max_z" value="$(var laser_max_z)"/>
     <param name="laser_min_z" value="$(var laser_min_z)"/>
 
@@ -376,6 +453,8 @@
     <param name="cloud_min_x" value="$(var cloud_min_x)"/>
     <param name="cloud_max_y" value="$(var cloud_max_y)"/>
     <param name="cloud_min_y" value="$(var cloud_min_y)"/>
+    <param name="cloud_collision_max_y" value="$(var cloud_collision_max_y)"/>
+    <param name="cloud_collision_min_y" value="$(var cloud_collision_min_y)"/>
     <param name="cloud_max_z" value="$(var cloud_max_z)"/>
     <param name="cloud_min_z" value="$(var cloud_min_z)"/>
 
@@ -417,6 +496,7 @@
     <param name="use_namespace" value="$(var use_namespace)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="patience" value="$(var mvn_pln_patience)"/>
+    <param name="proximity_criterion" value="$(var mvn_pln_proximity_criterion)"/>
     <param name="base_link_name" value="base_link"/>
   </node>
 
