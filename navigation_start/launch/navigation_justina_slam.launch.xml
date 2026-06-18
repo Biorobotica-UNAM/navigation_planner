@@ -24,7 +24,8 @@
   <arg name="use_lidar"        default="True"/>
   <arg name="use_point_cloud"  default="True"/>
   <arg name="use_point_cloud2" default="false"/>
-  <arg name="use_pot_fields"   default="False"/>
+  <!-- Activa la evasion reactiva local mientras el mapa SLAM aun esta incompleto. -->
+  <arg name="use_pot_fields"   default="True"/>
 
   <!-- ===== Tuning / thresholds ===== -->
   <arg name="cloud_downsampling"     default="5"/>
@@ -69,8 +70,10 @@
 
   <!-- ===== Simple Move ===== -->
   <!-- More conservative speeds while exploring an unknown map -->
-  <arg name="max_linear_speed"  default="0.7"/>
-  <arg name="max_angular_speed" default="0.55"/>
+  <!-- Velocidad lineal maxima del robot; se mantiene baja para no rebasar al SLAM. -->
+  <arg name="max_linear_speed"  default="0.6"/>
+  <!-- Velocidad angular maxima; ayuda a explorar sin giros demasiado lentos. -->
+  <arg name="max_angular_speed" default="0.8"/>
   <arg name="control_alpha"     default="0.08"/>
   <arg name="control_beta"      default="0.4"/>
   <arg name="move_head"         default="True"/>
@@ -87,11 +90,16 @@
   <arg name="slam_map_frame"           default="map"/>
   <arg name="slam_odom_frame"          default="odom"/>
   <arg name="slam_base_frame"          default="base_link"/>
+  <!-- Tamano de celda del mapa generado por SLAM; 0.05 m evita cargar demasiado CPU. -->
   <arg name="slam_resolution"          default="0.05"/>
-  <arg name="slam_max_laser_range"     default="20.0"/>
-  <arg name="slam_map_update_interval" default="1.0"/>
-  <arg name="slam_min_travel_distance" default="0.1"/>
-  <arg name="slam_map_update_heading" default="0.2"/>
+  <!-- Rango util del lidar para interiores; evita procesar lecturas lejanas o ruidosas. -->
+  <arg name="slam_max_laser_range"     default="4.0"/>
+  <!-- Periodo de publicacion del mapa; menor valor hace que RViz/navegacion lo vean antes. -->
+  <arg name="slam_map_update_interval" default="0.4"/>
+  <!-- Distancia minima recorrida para integrar un nuevo scan al mapa. -->
+  <arg name="slam_min_travel_distance" default="0.06"/>
+  <!-- Giro minimo para integrar un nuevo scan; permite mapear mejor mientras rota. -->
+  <arg name="slam_min_travel_heading"  default="0.05"/>
 
 
   <!-- ================================================================== -->
@@ -139,6 +147,13 @@
     <param name="map_update_interval" value="$(var slam_map_update_interval)"/>
     <param name="resolution"          value="$(var slam_resolution)"/>
     <param name="max_laser_range"     value="$(var slam_max_laser_range)"/>
+    <!-- Umbrales bajos: integran scans con movimientos pequenos para que el mapa crezca fluido. -->
+    <param name="minimum_travel_distance" value="$(var slam_min_travel_distance)"/>
+    <param name="minimum_travel_heading"  value="$(var slam_min_travel_heading)"/>
+    <!-- Limita la frecuencia de procesamiento de scans para no saturar CPU. -->
+    <param name="minimum_time_interval"   value="0.09"/>
+    <!-- Publica map->odom con mas frecuencia para que la navegacion use una TF fresca. -->
+    <param name="transform_publish_period" value="0.05"/>
     <remap from="/map"          to="map"/>
     <remap from="/map_metadata" to="map_metadata"/>
   </node>
