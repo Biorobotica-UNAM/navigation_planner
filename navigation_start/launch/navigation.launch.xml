@@ -45,8 +45,8 @@
   <arg name="obstacle_decay_factor" default="2"/>
   <arg name="robot_radius" default="0.35"/>
   <arg name="static_obstacle_inflation_radius" default="0.05"/>
-  <arg name="dynamic_obstacle_inflation_radius" default="0.15"/>
-  <arg name="cost_radius" default="0.35"/>
+  <arg name="dynamic_obstacle_inflation_radius" default="0.12"/>
+  <arg name="cost_radius" default="0.25"/>
   <arg name="obstacle_inflation_radius" default="0.15"/>
   <arg name="map_augmenter_debug" default="false"/>
   <arg name="simple_move_max_linear_speed" default="0.6"/>
