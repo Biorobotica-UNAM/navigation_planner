@@ -214,8 +214,6 @@ private:
   OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
   rclcpp::TimerBase::SharedPtr service_check_timer_;
-  rclcpp::TimerBase::SharedPtr retry_timer_;
-  std::atomic<bool> online_refresh_pending_{false};
 
 
   bool services_ready_ = false;
@@ -502,34 +500,14 @@ private:
   {
     if (!(is_static_map_ && is_prohibition_map_)) return;
 
-    // SLAM map not built yet — retry rather than publishing an empty map
-    if (static_map_.info.width == 0 || static_map_.info.height == 0) {
-      RCLCPP_WARN(this->get_logger(),
-        "MapAugmenter.-> Static map is empty (SLAM not ready), retrying in 3s...");
-      is_static_map_ = false;
-      // Keep is_prohibition_map_ / prohibition_map_ — no need to re-fetch the static prohibition
-      if (retry_timer_) retry_timer_->cancel();
-      retry_timer_ = this->create_wall_timer(std::chrono::seconds(3), [this]() {
-        retry_timer_->cancel();
-        if (!services_ready_) return;
-        auto req = std::make_shared<nav_msgs::srv::GetMap::Request>();
-        clt_get_static_map_->async_send_request(req,
-          [this](rclcpp::Client<nav_msgs::srv::GetMap>::SharedFuture fut) {
-            try {
-              static_map_ = fut.get()->map;
-              is_static_map_ = true;
-              process_maps();
-            } catch (const std::exception &e) {
-              RCLCPP_ERROR(get_logger(),
-                "MapAugmenter.-> Static map retry failed: %s", e.what());
-            }
-          });
-      });
-      return;
-    }
-
-    static_map_ = merge_maps(static_map_, prohibition_map_);
-    static_map_ = inflate_map(static_map_, static_cast<float>(inflation_radius_));
+    const auto merged_static_map = merge_maps(static_map_, prohibition_map_);
+    merged_static_raw_map_ = merged_static_map;
+    static_obstacle_map_ = inflate_map(
+      merged_static_map,
+      static_cast<float>(std::max(0.0, static_obstacle_inflation_radius_)));
+    static_map_ = inflate_map(
+      merged_static_map,
+      static_cast<float>(static_navigation_clearance_radius()));
     static_cost_map_ = get_cost_map(static_map_, static_cast<float>(cost_radius_));
 
     // init obstáculos con geometría correcta (si todavía no llega del detector)
@@ -726,39 +704,6 @@ private:
       debug_log_map_stats("timer_publish");
       pub_augmented_map_->publish(visual_augmented_map_);
       pub_planning_map_->publish(augmented_map_);
-    }
-
-    // In SLAM mode (use_online_=true): refresh the static map every ~5s so the growing
-    // SLAM map propagates into the augmented map as the robot explores new areas.
-    if (use_online_ && !online_refresh_pending_) {
-      static int online_counter = 0;
-      if (++online_counter > 50) {
-        online_counter = 0;
-        online_refresh_pending_ = true;
-        auto req = std::make_shared<nav_msgs::srv::GetMap::Request>();
-        clt_get_static_map_->async_send_request(req,
-          [this](rclcpp::Client<nav_msgs::srv::GetMap>::SharedFuture fut) {
-            online_refresh_pending_ = false;
-            try {
-              auto new_map = fut.get()->map;
-              if (new_map.info.width == 0) return;
-
-              // merge_maps returns new_map when sizes differ (blank prohibition = no-op anyway)
-              auto merged = merge_maps(new_map, prohibition_map_);
-              merged = inflate_map(merged, static_cast<float>(inflation_radius_));
-              static_cost_map_ = get_cost_map(merged, static_cast<float>(cost_radius_));
-
-              // If the SLAM map grew, reset obstacles_map_ to the new size
-              if (merged.info.width  != static_map_.info.width ||
-                  merged.info.height != static_map_.info.height) {
-                obstacles_map_ = merged;
-                for (auto &c : obstacles_map_.data) c = 0;
-              }
-
-              static_map_ = merged;
-            } catch (...) {}
-          });
-      }
     }
   }
 
