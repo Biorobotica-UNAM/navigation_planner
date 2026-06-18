@@ -89,10 +89,10 @@ public:
         //############
         // Publishers
         pub_pot_fields_enable_ = this->create_publisher<std_msgs::msg::Bool>(
-            make_name("/navigation/potential_fields/enable"), 
+            make_name("/potential_fields/enable"), 
             rclcpp::QoS(10).transient_local());
         pub_pot_fields_enable_cloud_ = this->create_publisher<std_msgs::msg::Bool>(
-            make_name("/navigation/potential_fields/enable_cloud"), 
+            make_name("/potential_fields/enable_cloud"), 
             rclcpp::QoS(10).transient_local());
         pub_goal_path_ = this->create_publisher<nav_msgs::msg::Path>(
             make_name("/simple_move/goal_path"), 
@@ -107,6 +107,10 @@ public:
             make_name("/simple_move/stop"), 
             rclcpp::QoS(10).transient_local());
 
+        pub_navigation_stop_ = this->create_publisher<std_msgs::msg::Empty>(
+            make_name("/navigation/stop"),
+            rclcpp::QoS(10).transient_local());
+
         //############
         // Subscribers
         //// stop
@@ -115,10 +119,10 @@ public:
             rclcpp::SensorDataQoS(), 
             std::bind(&MotionPlannerNode::callback_general_stop, this, std::placeholders::_1));
 
-        sub_nav_ctrl_stop_ = this->create_subscription<std_msgs::msg::Empty>(
-            make_name("/navigation/stop"), 
-            rclcpp::SensorDataQoS(), 
-            std::bind(&MotionPlannerNode::callback_navigation_stop, this, std::placeholders::_1));
+        //sub_nav_ctrl_stop_ = this->create_subscription<std_msgs::msg::Empty>(
+        //    make_name("/stop"), 
+        //    rclcpp::SensorDataQoS(), 
+        //    std::bind(&MotionPlannerNode::callback_navigation_stop, this, std::placeholders::_1));
 
         //// goal
         sub_simple_goal_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -133,12 +137,12 @@ public:
 
         //// motion
         sub_set_patience_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/navigation/set_patience"), 
+            make_name("/set_patience"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&MotionPlannerNode::callback_set_patience, this, std::placeholders::_1));
 
         sub_collision_risk_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/navigation/potential_fields/collision_risk"), 
+            make_name("/potential_fields/collision_risk"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&MotionPlannerNode::callback_collision_risk, this, std::placeholders::_1));
 
@@ -146,6 +150,15 @@ public:
         //############
         // Wait for transforms
         wait_for_transforms("map", base_link_name_);
+
+        // Start fetching the augmented map in background
+        last_map_fetch_time_ = this->now();
+        fetch_augmented_map();
+
+        // Timer to keep map cache refreshed
+        map_refresh_timer_ = this->create_wall_timer(
+            std::chrono::seconds(2),
+            std::bind(&MotionPlannerNode::refresh_map_cache, this));
 
         // Simple Move main processing
         processing_timer_ = this->create_wall_timer(
@@ -178,6 +191,19 @@ private:
     bool is_path_ = false;
     bool is_path_response_ = false;
 
+    // Replan-detection: track last start and consecutive replans
+    float last_replan_x_ = 1e9f;
+    float last_replan_y_ = 1e9f;
+    int replan_count_ = 0; // consecutive replans from same start
+    const float replan_same_threshold2_ = 1.0f; // 1 m^2 area -> squared distance threshold
+    rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr pub_navigation_stop_; // to request a global stop
+
+    // Augmented map cache for finding free points
+    nav_msgs::msg::OccupancyGrid cached_augmented_map_;
+    bool has_cached_map_ = false;
+    rclcpp::Time last_map_fetch_time_;
+    bool map_fetch_pending_ = false;
+
     // Internal parameter values
     bool  patience_;
     float proximity_criterion_;
@@ -190,6 +216,7 @@ private:
     int simple_move_sequencer = -1;
     int goal_id = -1;
     int current_status = 0;
+    SM_STATE previous_state_ = SM_STATE::INIT;
 
     bool near_goal_sent = false;
     // ROS 2 message types
@@ -270,6 +297,7 @@ private:
 
     // Main processing loop
     rclcpp::TimerBase::SharedPtr processing_timer_;
+    rclcpp::TimerBase::SharedPtr map_refresh_timer_;
 
 
     //############
@@ -588,6 +616,50 @@ private:
         return status;
     }
 
+    void publish_state_status(SM_STATE state)
+    {
+        switch (state) {
+            case SM_STATE::WAITING_FOR_TASK:
+                if (goal_id >= 0) {
+                    current_status = publish_status(actionlib_msgs::msg::GoalStatus::PENDING, goal_id, "Waiting for new navigation goal");
+                }
+                break;
+            case SM_STATE::CALCULATE_PATH:
+                current_status = publish_status(actionlib_msgs::msg::GoalStatus::ACTIVE, goal_id, "Calculating path to the goal");
+                break;
+            case SM_STATE::WAIT_FOR_PATH_RESPONSE:
+                current_status = publish_status(actionlib_msgs::msg::GoalStatus::PENDING, goal_id, "Waiting for path planner response");
+                break;
+            case SM_STATE::CHECK_IF_INSIDE_OBSTACLES:
+                current_status = publish_status(actionlib_msgs::msg::GoalStatus::ACTIVE, goal_id, "Checking if robot starts inside an obstacle");
+                break;
+            case SM_STATE::CHECK_IF_OBSTACLES:
+                current_status = publish_status(actionlib_msgs::msg::GoalStatus::ACTIVE, goal_id, "Checking obstacles on current path");
+                break;
+            case SM_STATE::WAIT_FOR_NO_OBSTACLES:
+                current_status = publish_status(actionlib_msgs::msg::GoalStatus::ACTIVE, goal_id, "Waiting for temporal obstacles to clear");
+                break;
+            case SM_STATE::ENABLE_POT_FIELDS:
+            case SM_STATE::WAIT_FOR_POT_FIELDS:
+                current_status = publish_status(actionlib_msgs::msg::GoalStatus::ACTIVE, goal_id, "Waiting for potential fields data");
+                break;
+            case SM_STATE::START_MOVE_PATH:
+                current_status = publish_status(actionlib_msgs::msg::GoalStatus::ACTIVE, goal_id, "Starting path following");
+                break;
+            case SM_STATE::WAIT_FOR_MOVE_FINISHED:
+                current_status = publish_status(actionlib_msgs::msg::GoalStatus::ACTIVE, goal_id, "Moving toward the goal");
+                break;
+            case SM_STATE::CORRECT_FINAL_ANGLE:
+                current_status = publish_status(actionlib_msgs::msg::GoalStatus::ACTIVE, goal_id, "Correcting final orientation");
+                break;
+            case SM_STATE::WAIT_FOR_ANGLE_CORRECTED:
+                current_status = publish_status(actionlib_msgs::msg::GoalStatus::ACTIVE, goal_id, "Waiting for final angle correction");
+                break;
+            default:
+                break;
+        }
+    }
+
     bool simple_move_abort_was_collision() const
     {
         // simple_move uses GoalStatus.text to explain ABORTED. Without this
@@ -596,6 +668,78 @@ private:
         return collision_risk_ || simple_move_goal_status_.text == "collision_risk";
     }
 
+    bool is_cell_free(const nav_msgs::msg::OccupancyGrid &map, float world_x, float world_y) const
+    {
+        int cell_x = static_cast<int>((world_x - map.info.origin.position.x) / map.info.resolution);
+        int cell_y = static_cast<int>((world_y - map.info.origin.position.y) / map.info.resolution);
+        int idx = cell_y * static_cast<int>(map.info.width) + cell_x;
+
+        return (idx >= 0 && static_cast<size_t>(idx) < map.data.size() && map.data[idx] == 0);
+    }
+
+    bool find_nearest_free_point(float current_x, float current_y, float &free_x, float &free_y)
+    {
+        if (!has_cached_map_) return false;
+
+        float resolution = cached_augmented_map_.info.resolution;
+        int max_search_radius = static_cast<int>(2.0f / resolution); // Search up to 2m away
+
+        for (int radius = 0; radius <= max_search_radius; ++radius) {
+            // Check points in a circle at this radius
+            for (int i = -radius; i <= radius; ++i) {
+                for (int j = -radius; j <= radius; ++j) {
+                    // Only check boundary of circle (skip interior)
+                    if (std::abs(i) != radius && std::abs(j) != radius) continue;
+
+                    float test_x = current_x + i * resolution;
+                    float test_y = current_y + j * resolution;
+
+                    if (is_cell_free(cached_augmented_map_, test_x, test_y)) {
+                        free_x = test_x;
+                        free_y = test_y;
+                        RCLCPP_INFO(this->get_logger(),
+                            "MotionPlanner.-> Found free point at distance %.2f m from start",
+                            std::hypot(i * resolution, j * resolution));
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    void fetch_augmented_map()
+    {
+        if (map_fetch_pending_) return; // Already fetching
+
+        if (!clt_get_aug_map_->wait_for_service(std::chrono::milliseconds(100))) {
+            return; // Service not available, skip this time
+        }
+
+        map_fetch_pending_ = true;
+        auto request = std::make_shared<nav_msgs::srv::GetMap::Request>();
+        clt_get_aug_map_->async_send_request(request,
+            [this](rclcpp::Client<nav_msgs::srv::GetMap>::SharedFuture future) {
+                try {
+                    auto result = future.get();
+                    if (result) {
+                        cached_augmented_map_ = result->map;
+                        has_cached_map_ = true;
+                        last_map_fetch_time_ = this->now();
+                    }
+                } catch (const std::exception &e) {
+                    RCLCPP_WARN(this->get_logger(), "MotionPlanner.-> Failed to fetch augmented map: %s", e.what());
+                }
+                map_fetch_pending_ = false;
+            });
+    }
+
+    void refresh_map_cache()
+    {
+        if (!map_fetch_pending_) {
+            fetch_augmented_map();
+        }
+    }
 
     //############
     //Simple Move main processing
@@ -605,6 +749,11 @@ private:
         {
             RCLCPP_ERROR(this->get_logger(), "MotionPlanner.-> Services not ready.");
             return;
+        }
+
+        if (state != previous_state_) {
+            publish_state_status(state);
+            previous_state_ = state;
         }
 
         try
@@ -660,11 +809,57 @@ private:
             }
 
             
-	            case SM_STATE::CALCULATE_PATH:
-	            {
-	                get_robot_position();
-	                //plan_path_from_augmented_map(robot_x_, robot_y_, global_goal_.position.x, global_goal_.position.y);
-	                get_plan_path_from_augmented_map(robot_x_, robot_y_, global_goal_.position.x, global_goal_.position.y);
+            case SM_STATE::CALCULATE_PATH:
+            {
+                get_robot_position();
+
+                float start_x = robot_x_;
+                float start_y = robot_y_;
+
+                // Try to adjust start position if inside obstacle (map should be cached by now)
+                if (has_cached_map_ && !is_cell_free(cached_augmented_map_, start_x, start_y)) {
+                    float free_x, free_y;
+                    if (find_nearest_free_point(start_x, start_y, free_x, free_y)) {
+                        RCLCPP_INFO(this->get_logger(),
+                            "MotionPlanner.-> Using free point [%.2f, %.2f] as start (original: [%.2f, %.2f])",
+                            free_x, free_y, start_x, start_y);
+                        start_x = free_x;
+                        start_y = free_y;
+                    } else {
+                        RCLCPP_WARN(this->get_logger(),
+                            "MotionPlanner.-> Robot inside obstacle but no free point found. Attempting path from current position anyway.");
+                    }
+                }
+
+                // Replan detection: if we keep recalculating from the same start
+                // position (within a 1 m^2 area) many times in a row, treat it as failure.
+                if (last_replan_x_ < 1e8f) {
+                    const float dx = start_x - last_replan_x_;
+                    const float dy = start_y - last_replan_y_;
+                    const float dist2 = dx * dx + dy * dy;
+                    if (dist2 <= replan_same_threshold2_) {
+                        replan_count_++;
+                    } else {
+                        replan_count_ = 0;
+                    }
+                } else {
+                    replan_count_ = 0;
+                }
+                last_replan_x_ = start_x;
+                last_replan_y_ = start_y;
+
+                if (replan_count_ > 9) {
+                    RCLCPP_WARN(this->get_logger(), "MotionPlanner.-> Repeated replans from same start (count=%d). Requesting stop.", replan_count_);
+                    publish_status(actionlib_msgs::msg::GoalStatus::ABORTED, goal_id, "repeated_replans_same_start");
+                    std_msgs::msg::Empty stop_msg;
+                    pub_simple_move_stop_->publish(stop_msg);
+                    pub_navigation_stop_->publish(stop_msg);
+                    replan_count_ = 0;
+                    state = SM_STATE::INIT;
+                    break;
+                }
+
+                get_plan_path_from_augmented_map(start_x, start_y, global_goal_.position.x, global_goal_.position.y);
 
                 state = SM_STATE::WAIT_FOR_PATH_RESPONSE;
 
@@ -683,7 +878,8 @@ private:
                     std::cout << "MotionPlanner.-> Cannot calc path to " << global_goal_.position.x << " " << global_goal_.position.y << std::endl;
                     pub_simple_move_stop_->publish(std_msgs::msg::Empty());
 
-                    state = patience_ ? SM_STATE::CHECK_IF_OBSTACLES : SM_STATE::CHECK_IF_INSIDE_OBSTACLES;
+                    //state = patience_ ? SM_STATE::CHECK_IF_OBSTACLES : SM_STATE::CHECK_IF_INSIDE_OBSTACLES;
+                    state = SM_STATE::CHECK_IF_INSIDE_OBSTACLES;
                 } else {
                     if (is_temporary_no_cloud_pot_fields_){
                         no_cloud_pot_fields_start_time_ = this->now(); //reset timer
@@ -722,7 +918,8 @@ private:
             case SM_STATE::WAIT_FOR_INSIDE_OBSTACLES_RESPONSE:
             {
                 if (!is_in_obstacles_response_) {
-                    RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Waiting for obstacle check response...");
+                    RCLCPP_INFO(this->get_logger(), 
+                    "MotionPlanner.[WAIT_INSIDE_OBSTACLES_RESPONSE] Waiting for /map_augmenter/is_inside_obstacles response...");
                     break;
                 }
 
@@ -787,7 +984,7 @@ private:
             case SM_STATE::WAIT_FOR_IF_OBSTACLES_RESPONSE:
             {
                 if (!is_check_obs_response_) {
-                    RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Waiting for obstacle check response...");
+                    RCLCPP_INFO(this->get_logger(), "MotionPlanner.[WAIT_IF_OBSTACLES_RESPONSE] Waiting for /map_augmenter/are_there_obstacles response...");
                     break;
                 }
 
