@@ -144,6 +144,11 @@
     <param name="odom_frame"          value="$(var slam_odom_frame)"/>
     <param name="base_frame"          value="$(var slam_base_frame)"/>
     <param name="mode"                value="mapping"/>
+    <!-- Fuerza inicio con mapa limpio, sin serialización previa -->
+    <param name="map_start_at_dock"       value="true"/>
+    <param name="map_start_pose_x"        value="0.0"/>
+    <param name="map_start_pose_y"        value="0.0"/>
+    <param name="map_start_pose_yaw"      value="0.0"/>
     <param name="map_update_interval" value="$(var slam_map_update_interval)"/>
     <param name="resolution"          value="$(var slam_resolution)"/>
     <param name="max_laser_range"     value="$(var slam_max_laser_range)"/>
