@@ -58,11 +58,11 @@
   <!-- use_online=True: re-fetches the SLAM map on every request (map changes continuously) -->
   <!-- Higher decay/inflation because the SLAM map can have momentary noise -->
   <arg name="augmenter_decay_factor"     default="18"/>
-  <arg name="augmenter_inflation_radius" default="0.18"/>
-  <arg name="augmenter_cost_radius"      default="0.20"/>
+  <arg name="augmenter_inflation_radius" default="0.08"/>
+  <arg name="augmenter_cost_radius"      default="0.18"/>
   <!-- Solo SLAM: rectangulo libre alrededor del mapa actual, en todas direcciones
        (frente, atras y laterales), para planear mientras SLAM va rellenando el mapa. -->
-  <arg name="slam_free_space_padding"     default="5.0"/>
+  <arg name="slam_free_space_padding"     default="10.0"/>
 
   <!-- ===== Obstacle Detector ===== -->
   <arg name="detector_decay_factor" default="2"/>
