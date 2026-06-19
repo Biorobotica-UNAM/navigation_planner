@@ -198,6 +198,9 @@
     <param name="inflation_radius"       value="$(var augmenter_inflation_radius)"/>
     <param name="cost_radius"            value="$(var augmenter_cost_radius)"/>
     <param name="use_online"             value="True"/>
+    <!-- Solo para este launch SLAM: permite planear por celdas -1 no observadas
+         tratandolas como libres mientras el mapa se construye. No usar en AMCL/mapa fijo. -->
+    <param name="unknown_as_free"         value="True"/>
   </node>
 
   <node name="obstacle_detector"

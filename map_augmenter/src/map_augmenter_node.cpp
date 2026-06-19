@@ -31,6 +31,8 @@ public:
     this->declare_parameter("use_point_cloud",        false);
     this->declare_parameter("use_point_cloud2",       false);
     this->declare_parameter("use_online",             false);
+    // Default false: solo launches SLAM explicitos deben permitir planear sobre desconocido.
+    this->declare_parameter("unknown_as_free",        false);
 
     this->declare_parameter("laser_min_x",            -10.0);
     this->declare_parameter("laser_max_x",            10.0);
@@ -65,6 +67,7 @@ public:
     // load
     this->get_parameter("use_namespace", use_namespace_);
     this->get_parameter("use_online", use_online_);
+    this->get_parameter("unknown_as_free", unknown_as_free_);
     this->get_parameter("decay_factor", decay_factor_);
     this->get_parameter("inflation_radius", inflation_radius_);
     this->get_parameter("cost_radius", cost_radius_);
@@ -152,6 +155,7 @@ private:
   // params
   bool use_namespace_{false};
   bool use_online_{false};
+  bool unknown_as_free_{false};
   int decay_factor_{10};
   double inflation_radius_{0.25};
   double cost_radius_{0.25};
@@ -214,6 +218,7 @@ private:
       const auto &n = p.get_name();
       if (n == "use_namespace") use_namespace_ = p.as_bool();
       else if (n == "use_online") use_online_ = p.as_bool();
+      else if (n == "unknown_as_free") unknown_as_free_ = p.as_bool();
       else if (n == "decay_factor") decay_factor_ = p.as_int();
       else if (n == "inflation_radius") inflation_radius_ = p.as_double();
       else if (n == "cost_radius") cost_radius_ = p.as_double();
@@ -237,6 +242,31 @@ private:
     }
   }
 
+  void convert_unknown_to_free(nav_msgs::msg::OccupancyGrid &map) const
+  {
+    if (!unknown_as_free_) return;
+
+    // En modo SLAM permitimos navegar por celdas no observadas; los obstaculos
+    // reales siguen llegando por el mapa de obstaculos y por potential_fields.
+    for (auto &cell : map.data) {
+      if (cell < 0) cell = 0;
+    }
+  }
+
+  int8_t merge_cell(int8_t a, int8_t b) const
+  {
+    if (unknown_as_free_) {
+      int av = a < 0 ? 0 : static_cast<int>(a);
+      int bv = b < 0 ? 0 : static_cast<int>(b);
+      return static_cast<int8_t>(std::max(av, bv));
+    }
+
+    if (a < 0 && b < 0) return -1;
+    if (a < 0) return b > 0 ? b : static_cast<int8_t>(-1);
+    if (b < 0) return a > 0 ? a : static_cast<int8_t>(-1);
+    return static_cast<int8_t>(std::max(static_cast<int>(a), static_cast<int>(b)));
+  }
+
   nav_msgs::msg::OccupancyGrid merge_maps(const nav_msgs::msg::OccupancyGrid &a,
                                          const nav_msgs::msg::OccupancyGrid &b)
   {
@@ -247,8 +277,7 @@ private:
 
     nav_msgs::msg::OccupancyGrid c = a;
     for (size_t i = 0; i < c.data.size(); ++i) {
-      c.data[i] = static_cast<int8_t>(
-        std::max(static_cast<uint8_t>(a.data[i]), static_cast<uint8_t>(b.data[i])));
+      c.data[i] = merge_cell(a.data[i], b.data[i]);
     }
     return c;
   }
@@ -412,6 +441,7 @@ private:
       return;
     }
 
+    convert_unknown_to_free(static_map_);
     static_map_ = merge_maps(static_map_, prohibition_map_);
     static_map_ = inflate_map(static_map_, static_cast<float>(inflation_radius_));
     static_cost_map_ = get_cost_map(static_map_, static_cast<float>(cost_radius_));
@@ -604,6 +634,7 @@ private:
             try {
               auto new_map = fut.get()->map;
               if (new_map.info.width == 0) return;
+              convert_unknown_to_free(new_map);
 
               // merge_maps returns new_map when sizes differ (blank prohibition = no-op anyway)
               auto merged = merge_maps(new_map, prohibition_map_);
