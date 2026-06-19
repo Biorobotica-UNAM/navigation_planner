@@ -30,6 +30,7 @@ public:
     this->declare_parameter("use_point_cloud",        false);
     this->declare_parameter("use_point_cloud2",       false);
     this->declare_parameter("use_online",             false); // no se usa aquí, pero se mantiene
+    this->declare_parameter("free_space_padding",     0.0);
 
     this->declare_parameter("laser_min_x",            -10.0);
     this->declare_parameter("laser_max_x",             10.0);
@@ -71,6 +72,7 @@ public:
     this->get_parameter("use_lidar", use_lidar_);
     this->get_parameter("use_point_cloud", use_cloud_);
     this->get_parameter("use_point_cloud2", use_cloud2_);
+    this->get_parameter("free_space_padding", free_space_padding_);
 
     this->get_parameter("laser_min_x", laser_min_x_);
     this->get_parameter("laser_max_x", laser_max_x_);
@@ -158,6 +160,7 @@ private:
   bool use_lidar_{false};
   bool use_cloud_{false};
   bool use_cloud2_{false};
+  double free_space_padding_{0.0};
 
   float laser_min_x_, laser_max_x_, laser_min_y_, laser_max_y_, laser_min_z_, laser_max_z_;
   float cloud_min_x_, cloud_max_x_, cloud_min_y_, cloud_max_y_, cloud_min_z_, cloud_max_z_;
@@ -208,6 +211,7 @@ private:
       else if (n == "use_lidar")        use_lidar_     = p.as_bool();
       else if (n == "use_point_cloud")  use_cloud_     = p.as_bool();
       else if (n == "use_point_cloud2") use_cloud2_    = p.as_bool();
+      else if (n == "free_space_padding") free_space_padding_ = p.as_double();
 
       else if (n == "laser_min_x") laser_min_x_ = p.as_double();
       else if (n == "laser_max_x") laser_max_x_ = p.as_double();
@@ -249,6 +253,30 @@ private:
     } catch (...) {
       return Eigen::Affine3d::Identity();
     }
+  }
+
+  nav_msgs::msg::OccupancyGrid pad_grid_geometry(const nav_msgs::msg::OccupancyGrid &map) const
+  {
+    if (free_space_padding_ <= 0.0 || map.info.resolution <= 0.0f ||
+        map.info.width == 0 || map.info.height == 0 || map.data.empty()) {
+      return map;
+    }
+
+    const int old_width = static_cast<int>(map.info.width);
+    const int old_height = static_cast<int>(map.info.height);
+    const int padding_cells = static_cast<int>(std::ceil(free_space_padding_ / map.info.resolution));
+    if (padding_cells <= 0) return map;
+
+    const int new_width = old_width + 2 * padding_cells;
+    const int new_height = old_height + 2 * padding_cells;
+
+    nav_msgs::msg::OccupancyGrid padded = map;
+    padded.info.width = static_cast<uint32_t>(new_width);
+    padded.info.height = static_cast<uint32_t>(new_height);
+    padded.info.origin.position.x -= padding_cells * map.info.resolution;
+    padded.info.origin.position.y -= padding_cells * map.info.resolution;
+    padded.data.assign(static_cast<size_t>(new_width) * static_cast<size_t>(new_height), 0);
+    return padded;
   }
 
   // ===== map init =====
@@ -303,7 +331,7 @@ private:
           return;
         }
 
-        obstacles_map_ = map;
+        obstacles_map_ = pad_grid_geometry(map);
         for (auto &c : obstacles_map_.data) c = 0;
         have_grid_ = true;
 
@@ -572,4 +600,3 @@ int main(int argc, char **argv)
   rclcpp::shutdown();
   return 0;
 }
-

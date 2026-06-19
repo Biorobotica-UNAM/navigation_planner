@@ -60,6 +60,9 @@
   <arg name="augmenter_decay_factor"     default="18"/>
   <arg name="augmenter_inflation_radius" default="0.18"/>
   <arg name="augmenter_cost_radius"      default="0.20"/>
+  <!-- Solo SLAM: rectangulo libre alrededor del mapa actual, en todas direcciones
+       (frente, atras y laterales), para planear mientras SLAM va rellenando el mapa. -->
+  <arg name="slam_free_space_padding"     default="5.0"/>
 
   <!-- ===== Obstacle Detector ===== -->
   <arg name="detector_decay_factor" default="2"/>
@@ -201,6 +204,7 @@
     <!-- Solo para este launch SLAM: permite planear por celdas -1 no observadas
          tratandolas como libres mientras el mapa se construye. No usar en AMCL/mapa fijo. -->
     <param name="unknown_as_free"         value="True"/>
+    <param name="free_space_padding"      value="$(var slam_free_space_padding)"/>
   </node>
 
   <node name="obstacle_detector"
@@ -220,6 +224,7 @@
     <param name="cloud_downsampling" value="$(var cloud_downsampling)"/>
     <param name="lidar_downsampling" value="$(var lidar_downsampling)"/>
     <param name="decay_factor"       value="$(var detector_decay_factor)"/>
+    <param name="free_space_padding"  value="$(var slam_free_space_padding)"/>
     <param name="laser_min_x"        value="$(var laser_min_x)"/>
     <param name="laser_max_x"        value="$(var laser_max_x)"/>
     <param name="laser_min_y"        value="$(var laser_min_y)"/>

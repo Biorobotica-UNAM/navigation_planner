@@ -33,6 +33,7 @@ public:
     this->declare_parameter("use_online",             false);
     // Default false: solo launches SLAM explicitos deben permitir planear sobre desconocido.
     this->declare_parameter("unknown_as_free",        false);
+    this->declare_parameter("free_space_padding",     0.0);
 
     this->declare_parameter("laser_min_x",            -10.0);
     this->declare_parameter("laser_max_x",            10.0);
@@ -68,6 +69,7 @@ public:
     this->get_parameter("use_namespace", use_namespace_);
     this->get_parameter("use_online", use_online_);
     this->get_parameter("unknown_as_free", unknown_as_free_);
+    this->get_parameter("free_space_padding", free_space_padding_);
     this->get_parameter("decay_factor", decay_factor_);
     this->get_parameter("inflation_radius", inflation_radius_);
     this->get_parameter("cost_radius", cost_radius_);
@@ -156,6 +158,7 @@ private:
   bool use_namespace_{false};
   bool use_online_{false};
   bool unknown_as_free_{false};
+  double free_space_padding_{0.0};
   int decay_factor_{10};
   double inflation_radius_{0.25};
   double cost_radius_{0.25};
@@ -219,6 +222,7 @@ private:
       if (n == "use_namespace") use_namespace_ = p.as_bool();
       else if (n == "use_online") use_online_ = p.as_bool();
       else if (n == "unknown_as_free") unknown_as_free_ = p.as_bool();
+      else if (n == "free_space_padding") free_space_padding_ = p.as_double();
       else if (n == "decay_factor") decay_factor_ = p.as_int();
       else if (n == "inflation_radius") inflation_radius_ = p.as_double();
       else if (n == "cost_radius") cost_radius_ = p.as_double();
@@ -265,6 +269,91 @@ private:
     if (a < 0) return b > 0 ? b : static_cast<int8_t>(-1);
     if (b < 0) return a > 0 ? a : static_cast<int8_t>(-1);
     return static_cast<int8_t>(std::max(static_cast<int>(a), static_cast<int>(b)));
+  }
+
+  nav_msgs::msg::OccupancyGrid pad_map_with_free_space(const nav_msgs::msg::OccupancyGrid &map) const
+  {
+    if (!unknown_as_free_ || free_space_padding_ <= 0.0 ||
+        map.info.resolution <= 0.0f || map.info.width == 0 || map.info.height == 0 ||
+        map.data.empty()) {
+      return map;
+    }
+
+    const int old_width = static_cast<int>(map.info.width);
+    const int old_height = static_cast<int>(map.info.height);
+    const int padding_cells = static_cast<int>(std::ceil(free_space_padding_ / map.info.resolution));
+    if (padding_cells <= 0) return map;
+
+    const int new_width = old_width + 2 * padding_cells;
+    const int new_height = old_height + 2 * padding_cells;
+
+    nav_msgs::msg::OccupancyGrid padded = map;
+    padded.info.width = static_cast<uint32_t>(new_width);
+    padded.info.height = static_cast<uint32_t>(new_height);
+    padded.info.origin.position.x -= padding_cells * map.info.resolution;
+    padded.info.origin.position.y -= padding_cells * map.info.resolution;
+    padded.data.assign(static_cast<size_t>(new_width) * static_cast<size_t>(new_height), 0);
+
+    for (int y = 0; y < old_height; ++y) {
+      for (int x = 0; x < old_width; ++x) {
+        const int old_idx = y * old_width + x;
+        const int new_idx = (y + padding_cells) * new_width + (x + padding_cells);
+        const int8_t value = map.data[old_idx];
+        padded.data[new_idx] = value < 0 ? 0 : value;
+      }
+    }
+
+    return padded;
+  }
+
+  bool same_geometry(const nav_msgs::msg::OccupancyGrid &a,
+                     const nav_msgs::msg::OccupancyGrid &b) const
+  {
+    return a.info.width == b.info.width &&
+           a.info.height == b.info.height &&
+           std::abs(a.info.resolution - b.info.resolution) <= 1e-6 &&
+           std::abs(a.info.origin.position.x - b.info.origin.position.x) <= 1e-6 &&
+           std::abs(a.info.origin.position.y - b.info.origin.position.y) <= 1e-6;
+  }
+
+  nav_msgs::msg::OccupancyGrid project_obstacles_to_static_map(
+      const nav_msgs::msg::OccupancyGrid &obstacles) const
+  {
+    nav_msgs::msg::OccupancyGrid projected = static_map_;
+    for (auto &cell : projected.data) cell = 0;
+
+    if (obstacles.info.resolution <= 0.0f || obstacles.data.empty() ||
+        static_map_.info.resolution <= 0.0f || static_map_.data.empty()) {
+      return projected;
+    }
+
+    const int src_width = static_cast<int>(obstacles.info.width);
+    const int src_height = static_cast<int>(obstacles.info.height);
+    const int dst_width = static_cast<int>(projected.info.width);
+    const int dst_height = static_cast<int>(projected.info.height);
+    const double src_res = obstacles.info.resolution;
+    const double dst_res = projected.info.resolution;
+
+    for (int y = 0; y < src_height; ++y) {
+      for (int x = 0; x < src_width; ++x) {
+        const int src_idx = y * src_width + x;
+        if (src_idx < 0 || static_cast<size_t>(src_idx) >= obstacles.data.size() ||
+            obstacles.data[src_idx] <= 0) {
+          continue;
+        }
+
+        const double world_x = obstacles.info.origin.position.x + (x + 0.5) * src_res;
+        const double world_y = obstacles.info.origin.position.y + (y + 0.5) * src_res;
+        const int dst_x = static_cast<int>((world_x - projected.info.origin.position.x) / dst_res);
+        const int dst_y = static_cast<int>((world_y - projected.info.origin.position.y) / dst_res);
+
+        if (dst_x >= 0 && dst_x < dst_width && dst_y >= 0 && dst_y < dst_height) {
+          projected.data[dst_y * dst_width + dst_x] = obstacles.data[src_idx];
+        }
+      }
+    }
+
+    return projected;
   }
 
   nav_msgs::msg::OccupancyGrid merge_maps(const nav_msgs::msg::OccupancyGrid &a,
@@ -442,6 +531,7 @@ private:
     }
 
     convert_unknown_to_free(static_map_);
+    static_map_ = pad_map_with_free_space(static_map_);
     static_map_ = merge_maps(static_map_, prohibition_map_);
     static_map_ = inflate_map(static_map_, static_cast<float>(inflation_radius_));
     static_cost_map_ = get_cost_map(static_map_, static_cast<float>(cost_radius_));
@@ -486,19 +576,18 @@ private:
       return;
     }
 
-    // Geometría distinta -> ignora (evita spam de merge)
-    if (msg->info.width  != static_map_.info.width ||
-        msg->info.height != static_map_.info.height ||
-        std::abs(msg->info.resolution - static_map_.info.resolution) > 1e-6)
-    {
+    // En SLAM el mapa puede crecer o llevar padding libre; si cambia la geometria,
+    // reproyectamos los obstaculos al mapa base actual en vez de perderlos.
+    if (!same_geometry(*msg, static_map_)) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-        "MapAugmenter.-> Ignoring obstacles_map: geometry mismatch (obs %ux%u res=%.3f) vs (static %ux%u res=%.3f)",
+        "MapAugmenter.-> Reprojecting obstacles_map: geometry mismatch (obs %ux%u res=%.3f) vs (static %ux%u res=%.3f)",
         msg->info.width, msg->info.height, msg->info.resolution,
         static_map_.info.width, static_map_.info.height, static_map_.info.resolution);
-      return;
+      obstacles_map_ = project_obstacles_to_static_map(*msg);
+    } else {
+      obstacles_map_ = *msg;
     }
 
-    obstacles_map_ = *msg;
     obstacles_dirty_ = true;
     publish_augmented_now();
   }
@@ -635,6 +724,7 @@ private:
               auto new_map = fut.get()->map;
               if (new_map.info.width == 0) return;
               convert_unknown_to_free(new_map);
+              new_map = pad_map_with_free_space(new_map);
 
               // merge_maps returns new_map when sizes differ (blank prohibition = no-op anyway)
               auto merged = merge_maps(new_map, prohibition_map_);
