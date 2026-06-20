@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cmath>
 
 class MapAugmenterNode : public rclcpp::Node
@@ -126,6 +127,11 @@ public:
       rclcpp::QoS(10),
       std::bind(&MapAugmenterNode::callback_obstacles_map, this, std::placeholders::_1));
 
+    sub_persistent_cloud_map_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+      make_name("/persistent_cloud_map"),
+      rclcpp::QoS(1).transient_local(),
+      std::bind(&MapAugmenterNode::callback_persistent_cloud_map, this, std::placeholders::_1));
+
     // Services (MISMOS)
     srv_static_map_ = this->create_service<nav_msgs::srv::GetMap>(
       make_name("/map_augmenter/get_static_map"),
@@ -172,6 +178,7 @@ private:
   nav_msgs::msg::OccupancyGrid static_obstacle_map_;
   nav_msgs::msg::OccupancyGrid prohibition_map_;
   nav_msgs::msg::OccupancyGrid static_cost_map_;
+  nav_msgs::msg::OccupancyGrid persistent_cloud_map_;
 
   nav_msgs::msg::OccupancyGrid obstacles_map_;          // recibido
   nav_msgs::msg::OccupancyGrid obstacles_inflated_map_;
@@ -189,6 +196,7 @@ private:
   bool use_online_{false};
   bool unknown_as_free_{false};
   double free_space_padding_{0.0};
+  std::uint64_t persistent_cloud_signature_{0};
   int decay_factor_{10};
   double robot_radius_{0.35};
   double static_obstacle_inflation_radius_{0.05};
@@ -207,6 +215,7 @@ private:
 
   rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr sub_clicked_point_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_obstacles_map_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_persistent_cloud_map_;
 
   rclcpp::Client<nav_msgs::srv::GetMap>::SharedPtr clt_get_static_map_;
   rclcpp::Client<nav_msgs::srv::GetMap>::SharedPtr clt_get_prohibition_map_;
@@ -432,6 +441,45 @@ private:
            std::abs(a.info.origin.position.y - b.info.origin.position.y) <= 1e-6;
   }
 
+  nav_msgs::msg::OccupancyGrid burn_persistent_cloud_into_base(
+    const nav_msgs::msg::OccupancyGrid &base_map) const
+  {
+    if (base_map.data.empty() ||
+        persistent_cloud_map_.data.empty()) {
+      return base_map;
+    }
+
+    if (!same_geometry(base_map, persistent_cloud_map_)) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "MapAugmenter.-> persistent_cloud_map geometry does not match base map; not burning into base.");
+      return base_map;
+    }
+
+    nav_msgs::msg::OccupancyGrid burned = base_map;
+    for (size_t i = 0; i < burned.data.size(); ++i) {
+      if (persistent_cloud_map_.data[i] > 0) {
+        burned.data[i] = std::max(burned.data[i], persistent_cloud_map_.data[i]);
+      }
+    }
+    return burned;
+  }
+
+  std::uint64_t persistent_cloud_signature(const nav_msgs::msg::OccupancyGrid &map) const
+  {
+    std::uint64_t signature = 1469598103934665603ULL;
+    bool has_occupied = false;
+    for (size_t i = 0; i < map.data.size(); ++i) {
+      if (map.data[i] <= 0) continue;
+      has_occupied = true;
+      signature ^= static_cast<std::uint64_t>(i + 1);
+      signature *= 1099511628211ULL;
+      signature ^= static_cast<std::uint64_t>(static_cast<unsigned char>(map.data[i]));
+      signature *= 1099511628211ULL;
+    }
+    return has_occupied ? signature : 0;
+  }
+
   nav_msgs::msg::OccupancyGrid project_obstacles_to_static_map(
       const nav_msgs::msg::OccupancyGrid &obstacles) const
   {
@@ -650,11 +698,12 @@ private:
     auto base_map = pad_map_with_free_space(static_map_);
     const auto merged_static_map = merge_maps(base_map, prohibition_map_);
     merged_static_raw_map_ = merged_static_map;
+    const auto effective_static_map = burn_persistent_cloud_into_base(merged_static_map);
     static_obstacle_map_ = inflate_map(
-      merged_static_map,
+      effective_static_map,
       static_cast<float>(std::max(0.0, static_obstacle_inflation_radius_)));
     static_map_ = inflate_map(
-      merged_static_map,
+      effective_static_map,
       static_cast<float>(static_navigation_clearance_radius()));
     static_cost_map_ = get_cost_map(static_map_, static_cast<float>(cost_radius_));
 
@@ -723,6 +772,17 @@ private:
     obstacles_dirty_ = true;
     publish_augmented_now();
     debug_log_map_stats("obstacles_callback");
+  }
+
+  void callback_persistent_cloud_map(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
+  {
+    const auto previous_signature = persistent_cloud_signature_;
+    persistent_cloud_map_ = *msg;
+    persistent_cloud_signature_ = persistent_cloud_signature(persistent_cloud_map_);
+
+    if (services_ready_ && persistent_cloud_signature_ != previous_signature) {
+      get_first_maps();
+    }
   }
 
 
@@ -873,11 +933,12 @@ private:
               // merge_maps returns new_map when sizes differ (blank prohibition = no-op anyway)
               auto merged = merge_maps(new_map, prohibition_map_);
               merged_static_raw_map_ = merged;
+              const auto effective_static_map = burn_persistent_cloud_into_base(merged);
               static_obstacle_map_ = inflate_map(
-                merged,
+                effective_static_map,
                 static_cast<float>(std::max(0.0, static_obstacle_inflation_radius_)));
               auto planning_static = inflate_map(
-                merged,
+                effective_static_map,
                 static_cast<float>(static_navigation_clearance_radius()));
               static_cost_map_ = get_cost_map(planning_static, static_cast<float>(cost_radius_));
 

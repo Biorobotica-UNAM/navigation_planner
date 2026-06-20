@@ -5,6 +5,7 @@
 #include "geometry_msgs/msg/pose2_d.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/vector3.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "std_msgs/msg/float32.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
@@ -30,6 +31,7 @@
 #include <cmath>
 #include <sstream>
 #include <string>
+#include <limits>
 ///
 
 #define RATE 30
@@ -69,6 +71,11 @@ public:
         this->declare_parameter<float>("fine_dist_tolerance",   0.03f);
         this->declare_parameter<float>("coarse_dist_tolerance", 0.2f);
         this->declare_parameter<float>("angle_tolerance",       0.05f);
+        this->declare_parameter<bool>("mapped_area_speed_enabled", false);
+        this->declare_parameter<float>("mapped_area_max_linear_speed", 0.55f);
+        this->declare_parameter<float>("mapped_area_radius", 0.75f);
+        this->declare_parameter<float>("mapped_area_min_known_ratio", 0.85f);
+        this->declare_parameter<std::string>("mapped_area_map_topic", "map");
 
         this->declare_parameter<bool>("move_head", true);
         this->declare_parameter<bool>("use_pot_fields", false);
@@ -92,6 +99,11 @@ public:
         this->get_parameter("fine_dist_tolerance",   fine_dist_tolerance_);
         this->get_parameter("coarse_dist_tolerance", coarse_dist_tolerance_);
         this->get_parameter("angle_tolerance",       angle_tolerance_);
+        this->get_parameter("mapped_area_speed_enabled", mapped_area_speed_enabled_);
+        this->get_parameter("mapped_area_max_linear_speed", mapped_area_max_linear_speed_);
+        this->get_parameter("mapped_area_radius", mapped_area_radius_);
+        this->get_parameter("mapped_area_min_known_ratio", mapped_area_min_known_ratio_);
+        this->get_parameter("mapped_area_map_topic", mapped_area_map_topic_);
 
         this->get_parameter("move_head",             move_head_);
         this->get_parameter("use_pot_fields",        use_pot_fields_);
@@ -151,6 +163,11 @@ public:
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_goal_path, this, std::placeholders::_1));
 
+        sub_slam_map_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+            resolve_topic_name(mapped_area_map_topic_),
+            rclcpp::QoS(1).transient_local(),
+            std::bind(&SimpleMoveNode::callback_slam_map, this, std::placeholders::_1));
+
         //// motion
         sub_moveLateral_ = this->create_subscription<std_msgs::msg::Float32>(
             make_name("/simple_move/goal_dist_lateral"), 
@@ -209,7 +226,9 @@ private:
     tf2_ros::TransformListener tf_listener_;
 
     nav_msgs::msg::Path           goal_path_;
+    nav_msgs::msg::OccupancyGrid  slam_map_;
     geometry_msgs::msg::Vector3   rejection_force_;
+    bool is_slam_map_ = false;
 
     // Internal parameter values
     float max_linear_speed_;
@@ -221,6 +240,11 @@ private:
     float fine_dist_tolerance_;
     float coarse_dist_tolerance_;
     float angle_tolerance_;
+    bool mapped_area_speed_enabled_;
+    float mapped_area_max_linear_speed_;
+    float mapped_area_radius_;
+    float mapped_area_min_known_ratio_;
+    std::string mapped_area_map_topic_;
 
     bool move_head_;
     bool use_pot_fields_;
@@ -262,6 +286,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sub_goalDistance_;
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr sub_goalDistAngle_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr sub_goalPath_;
+    rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_slam_map_;
 
     //// motion
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sub_moveLateral_;
@@ -295,6 +320,15 @@ private:
             else if (param.get_name() == "fine_dist_tolerance")   fine_dist_tolerance_     = param.as_double();
             else if (param.get_name() == "coarse_dist_tolerance") coarse_dist_tolerance_   = param.as_double();
             else if (param.get_name() == "angle_tolerance")       angle_tolerance_         = param.as_double();
+            else if (param.get_name() == "mapped_area_speed_enabled") mapped_area_speed_enabled_ = param.as_bool();
+            else if (param.get_name() == "mapped_area_max_linear_speed") mapped_area_max_linear_speed_ = param.as_double();
+            else if (param.get_name() == "mapped_area_radius") mapped_area_radius_ = std::max(0.0, param.as_double());
+            else if (param.get_name() == "mapped_area_min_known_ratio") mapped_area_min_known_ratio_ = std::clamp(param.as_double(), 0.0, 1.0);
+            else if (param.get_name() == "mapped_area_map_topic") {
+                result.successful = false;
+                result.reason = "SimpleMove.-> mapped_area_map_topic requires node restart.";
+                break;
+            }
 
             else if (param.get_name() == "move_head")             move_head_               = param.as_bool();
             else if (param.get_name() == "use_pot_fields")        use_pot_fields_          = param.as_bool();
@@ -337,6 +371,13 @@ private:
         }
 
         return name;
+    }
+
+    std::string resolve_topic_name(const std::string &topic) const
+    {
+        if (!topic.empty() && topic.front() == '/')
+            return topic;
+        return make_name(topic);
     }
 
     // Wait for transforms 
@@ -491,6 +532,15 @@ private:
         }
     }
 
+    void callback_slam_map(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
+    {
+        slam_map_ = *msg;
+        is_slam_map_ = !slam_map_.data.empty() &&
+                       slam_map_.info.width > 0 &&
+                       slam_map_.info.height > 0 &&
+                       slam_map_.info.resolution > 0.0f;
+    }
+
     void callback_move_lateral(const std_msgs::msg::Float32::SharedPtr msg) 
     {
         try 
@@ -569,6 +619,70 @@ private:
     bool should_apply_potential_fields() const
     {
         return use_pot_fields_ && collision_risk_;
+    }
+
+    float get_mapped_area_known_ratio(const float x, const float y) const
+    {
+        if (!is_slam_map_ || slam_map_.info.resolution <= 0.0f) {
+            return 0.0f;
+        }
+
+        const float resolution = slam_map_.info.resolution;
+        const float origin_x = static_cast<float>(slam_map_.info.origin.position.x);
+        const float origin_y = static_cast<float>(slam_map_.info.origin.position.y);
+        const int width = static_cast<int>(slam_map_.info.width);
+        const int height = static_cast<int>(slam_map_.info.height);
+        const int center_x = static_cast<int>(std::floor((x - origin_x) / resolution));
+        const int center_y = static_cast<int>(std::floor((y - origin_y) / resolution));
+
+        if (center_x < 0 || center_x >= width || center_y < 0 || center_y >= height) {
+            return 0.0f;
+        }
+
+        const int radius_cells = std::max(1, static_cast<int>(std::ceil(mapped_area_radius_ / resolution)));
+        int known_cells = 0;
+        int total_cells = 0;
+
+        for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
+            for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
+                if (dx * dx + dy * dy > radius_cells * radius_cells) continue;
+                ++total_cells;
+
+                const int mx = center_x + dx;
+                const int my = center_y + dy;
+                if (mx < 0 || mx >= width || my < 0 || my >= height) continue;
+
+                const size_t idx = static_cast<size_t>(my) * static_cast<size_t>(width) +
+                                   static_cast<size_t>(mx);
+                if (idx < slam_map_.data.size() && slam_map_.data[idx] >= 0) {
+                    ++known_cells;
+                }
+            }
+        }
+
+        if (total_cells == 0) return 0.0f;
+        return static_cast<float>(known_cells) / static_cast<float>(total_cells);
+    }
+
+    float get_path_max_linear_speed_cap() const
+    {
+        if (!mapped_area_speed_enabled_ || collision_risk_ ||
+            mapped_area_max_linear_speed_ <= max_linear_speed_) {
+            return max_linear_speed_;
+        }
+
+        const float known_ratio = get_mapped_area_known_ratio(robot_x_, robot_y_);
+        if (known_ratio >= mapped_area_min_known_ratio_) {
+            return mapped_area_max_linear_speed_;
+        }
+        return max_linear_speed_;
+    }
+
+    void clamp_current_linear_speed_to(const float speed_cap)
+    {
+        if (current_linear_speed > speed_cap) {
+            current_linear_speed = std::max(speed_cap, current_linear_speed - linear_acceleration_ / RATE);
+        }
     }
 
     geometry_msgs::msg::Twist calculate_speeds( float robot_angle, float goal_angle, float angular_speed, float beta)
@@ -983,11 +1097,13 @@ private:
                     }
                 }
                 else{
-                    get_robot_position_wrt_map();
-                    get_next_goal_from_path(prev_pose_idx, next_pose_idx);
-                    global_error = sqrt((global_goal_x_ - robot_x_)*(global_goal_x_ - robot_x_) + (global_goal_y_ - robot_y_)*(global_goal_y_- robot_y_));
+	                    get_robot_position_wrt_map();
+	                    get_next_goal_from_path(prev_pose_idx, next_pose_idx);
+	                    global_error = sqrt((global_goal_x_ - robot_x_)*(global_goal_x_ - robot_x_) + (global_goal_y_ - robot_y_)*(global_goal_y_- robot_y_));
+                        const float path_speed_cap = get_path_max_linear_speed_cap();
+                        clamp_current_linear_speed_to(path_speed_cap);
 
-                    if(global_error < coarse_dist_tolerance_)
+	                    if(global_error < coarse_dist_tolerance_)
                     {
                         state = SM_STATE::GOAL_PATH_FINISH;
                     }
@@ -996,10 +1112,10 @@ private:
                         state = SM_STATE::GOAL_PATH_DECCEL;
                         temp_k = current_linear_speed/sqrt(global_error);
                     }
-                    else if(current_linear_speed >= max_linear_speed_)
-                    {
-                        state = SM_STATE::GOAL_PATH_CRUISE;
-                        current_linear_speed = max_linear_speed_;
+	                    else if(current_linear_speed >= path_speed_cap)
+	                    {
+	                        state = SM_STATE::GOAL_PATH_CRUISE;
+	                        current_linear_speed = path_speed_cap;
                     }
                     if(--attempts <= 0)
                     {
@@ -1016,8 +1132,9 @@ private:
                         pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
                     }
 
-                    current_linear_speed += linear_acceleration_/RATE;
-                }
+	                    current_linear_speed += linear_acceleration_/RATE;
+                        if(current_linear_speed > path_speed_cap) current_linear_speed = path_speed_cap;
+	                }
                 break;
 
             case SM_STATE::GOAL_PATH_CRUISE:
@@ -1033,11 +1150,16 @@ private:
                 }
                 else
                 {
-                    get_robot_position_wrt_map();
-                    get_next_goal_from_path(prev_pose_idx, next_pose_idx);
-                    global_error = sqrt((global_goal_x_ - robot_x_)*(global_goal_x_ - robot_x_) + (global_goal_y_ - robot_y_)*(global_goal_y_ - robot_y_));
-                    if(global_error < coarse_dist_tolerance_)
-                        state = SM_STATE::GOAL_PATH_FINISH;
+	                    get_robot_position_wrt_map();
+	                    get_next_goal_from_path(prev_pose_idx, next_pose_idx);
+	                    global_error = sqrt((global_goal_x_ - robot_x_)*(global_goal_x_ - robot_x_) + (global_goal_y_ - robot_y_)*(global_goal_y_ - robot_y_));
+                        const float path_speed_cap = get_path_max_linear_speed_cap();
+                        clamp_current_linear_speed_to(path_speed_cap);
+                        if(current_linear_speed < path_speed_cap) {
+                            current_linear_speed = std::min(path_speed_cap, current_linear_speed + linear_acceleration_/RATE);
+                        }
+	                    if(global_error < coarse_dist_tolerance_)
+	                        state = SM_STATE::GOAL_PATH_FINISH;
                     else if(global_error < current_linear_speed*current_linear_speed/linear_acceleration_)
                     {
                         state = SM_STATE::GOAL_PATH_DECCEL;
@@ -1073,19 +1195,21 @@ private:
                 }
                 else
                 {
-                    get_robot_position_wrt_map();
-                    get_next_goal_from_path(prev_pose_idx, next_pose_idx);
-                    global_error = sqrt((global_goal_x_ - robot_x_)*(global_goal_x_ - robot_x_) + (global_goal_y_ - robot_y_)*(global_goal_y_ - robot_y_));
-                    if(global_error < coarse_dist_tolerance_)
-                        state = SM_STATE::GOAL_PATH_FINISH;
+	                    get_robot_position_wrt_map();
+	                    get_next_goal_from_path(prev_pose_idx, next_pose_idx);
+	                    global_error = sqrt((global_goal_x_ - robot_x_)*(global_goal_x_ - robot_x_) + (global_goal_y_ - robot_y_)*(global_goal_y_ - robot_y_));
+                        const float path_speed_cap = get_path_max_linear_speed_cap();
+	                    if(global_error < coarse_dist_tolerance_)
+	                        state = SM_STATE::GOAL_PATH_FINISH;
                     if(--attempts <= 0)
                     {
                         state = SM_STATE::GOAL_PATH_FAILED;
                         msg_goal_reached.text = "timeout_path_deccel";
                         std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state:GOAL_PATH_DECCEL."<<std::endl;
-                    }
-                    current_linear_speed = temp_k * sqrt(global_error);
-                    if(current_linear_speed < min_linear_speed_) current_linear_speed = min_linear_speed_;
+	                    }
+	                    current_linear_speed = temp_k * sqrt(global_error);
+                        if(current_linear_speed > path_speed_cap) current_linear_speed = path_speed_cap;
+	                    if(current_linear_speed < min_linear_speed_) current_linear_speed = min_linear_speed_;
 	                    auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
 	                                                min_linear_speed_, current_linear_speed, max_angular_speed_,
 	                                                alpha_, beta_, false, move_lat_,

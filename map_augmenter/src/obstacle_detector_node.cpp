@@ -16,7 +16,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <limits>
 #include <unordered_map>
+#include <vector>
 
 class ObstacleDetectorNode : public rclcpp::Node
 {
@@ -59,6 +61,13 @@ public:
     this->declare_parameter("cloud_min_neighbor_cells",  1);
     this->declare_parameter("tf_fallback_warn_threshold_sec", 0.20);
     this->declare_parameter("static_obstacle_ignore_radius", 0.10);
+    this->declare_parameter("persistent_cloud_obstacles_enabled", false);
+    this->declare_parameter("persistent_cloud_hits_required", 6);
+    this->declare_parameter("persistent_cloud_evidence_decay", 1);
+    this->declare_parameter("persistent_cloud_min_range", 0.40);
+    this->declare_parameter("persistent_cloud_max_range", 2.50);
+    this->declare_parameter("persistent_cloud_clear_on_disable", true);
+    this->declare_parameter("persistent_cloud_debug", false);
 
     this->declare_parameter("point_cloud_topic",      "/point_cloud");
     this->declare_parameter("point_cloud_topic2",     "/point_cloud2");
@@ -102,6 +111,17 @@ public:
     this->get_parameter("cloud_min_neighbor_cells", cloud_min_neighbor_cells_);
     this->get_parameter("tf_fallback_warn_threshold_sec", tf_fallback_warn_threshold_sec_);
     this->get_parameter("static_obstacle_ignore_radius", static_obstacle_ignore_radius_);
+    this->get_parameter("persistent_cloud_obstacles_enabled", persistent_cloud_obstacles_enabled_);
+    this->get_parameter("persistent_cloud_hits_required", persistent_cloud_hits_required_);
+    this->get_parameter("persistent_cloud_evidence_decay", persistent_cloud_evidence_decay_);
+    this->get_parameter("persistent_cloud_min_range", persistent_cloud_min_range_);
+    this->get_parameter("persistent_cloud_max_range", persistent_cloud_max_range_);
+    this->get_parameter("persistent_cloud_clear_on_disable", persistent_cloud_clear_on_disable_);
+    this->get_parameter("persistent_cloud_debug", persistent_cloud_debug_);
+    persistent_cloud_hits_required_ = std::max(1, persistent_cloud_hits_required_);
+    persistent_cloud_evidence_decay_ = std::max(0, persistent_cloud_evidence_decay_);
+    persistent_cloud_min_range_ = std::max(0.0, persistent_cloud_min_range_);
+    persistent_cloud_max_range_ = std::max(persistent_cloud_min_range_, persistent_cloud_max_range_);
 
     this->get_parameter("point_cloud_topic", point_cloud_topic_);
     this->get_parameter("point_cloud_topic2", point_cloud_topic2_);
@@ -117,6 +137,9 @@ public:
     pub_obstacles_map_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
       make_name("/obstacles_map"),
       rclcpp::QoS(1).transient_local()); // latched para que el merger tenga algo inmediato
+    pub_persistent_cloud_map_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
+      make_name("/persistent_cloud_map"),
+      rclcpp::QoS(1).transient_local());
 
     // Subs sensores
     sub_point_cloud_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -155,6 +178,8 @@ private:
 
   nav_msgs::msg::OccupancyGrid obstacles_map_;
   nav_msgs::msg::OccupancyGrid static_reference_map_;
+  nav_msgs::msg::OccupancyGrid persistent_cloud_map_;
+  std::vector<int> persistent_cloud_evidence_;
   std::atomic<bool> have_grid_{false};
 
   // latest sensors
@@ -181,6 +206,13 @@ private:
   int cloud_min_neighbor_cells_{1};
   double tf_fallback_warn_threshold_sec_{0.20};
   double static_obstacle_ignore_radius_{0.10};
+  bool persistent_cloud_obstacles_enabled_{false};
+  int persistent_cloud_hits_required_{6};
+  int persistent_cloud_evidence_decay_{1};
+  double persistent_cloud_min_range_{0.40};
+  double persistent_cloud_max_range_{2.50};
+  bool persistent_cloud_clear_on_disable_{true};
+  bool persistent_cloud_debug_{false};
 
   std::string point_cloud_topic_, point_cloud_topic2_, laser_scan_topic_;
   std::string static_map_server_;
@@ -188,6 +220,7 @@ private:
 
   // comms
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr pub_obstacles_map_;
+  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr pub_persistent_cloud_map_;
 
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_point_cloud_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_point_cloud2_;
@@ -253,6 +286,31 @@ private:
       }
       else if (n == "static_obstacle_ignore_radius") {
         static_obstacle_ignore_radius_ = std::max(0.0, p.as_double());
+      }
+      else if (n == "persistent_cloud_obstacles_enabled") {
+        persistent_cloud_obstacles_enabled_ = p.as_bool();
+        if (!persistent_cloud_obstacles_enabled_ && persistent_cloud_clear_on_disable_) {
+          clear_persistent_cloud_obstacles();
+          publish_persistent_cloud_map();
+        }
+      }
+      else if (n == "persistent_cloud_hits_required") {
+        persistent_cloud_hits_required_ = std::max(1, static_cast<int>(p.as_int()));
+      }
+      else if (n == "persistent_cloud_evidence_decay") {
+        persistent_cloud_evidence_decay_ = std::max(0, static_cast<int>(p.as_int()));
+      }
+      else if (n == "persistent_cloud_min_range") {
+        persistent_cloud_min_range_ = std::max(0.0, p.as_double());
+      }
+      else if (n == "persistent_cloud_max_range") {
+        persistent_cloud_max_range_ = std::max(persistent_cloud_min_range_, p.as_double());
+      }
+      else if (n == "persistent_cloud_clear_on_disable") {
+        persistent_cloud_clear_on_disable_ = p.as_bool();
+      }
+      else if (n == "persistent_cloud_debug") {
+        persistent_cloud_debug_ = p.as_bool();
       }
 
       else if (n == "point_cloud_topic")  point_cloud_topic_  = p.as_string();
@@ -412,10 +470,11 @@ private:
           return;
         }
 
-        static_reference_map_ = pad_grid_geometry(map);
-        obstacles_map_ = static_reference_map_;
-        for (auto &c : obstacles_map_.data) c = 0;
-        have_grid_ = true;
+	        static_reference_map_ = pad_grid_geometry(map);
+	        obstacles_map_ = static_reference_map_;
+	        for (auto &c : obstacles_map_.data) c = 0;
+	        init_persistent_cloud_layer();
+	        have_grid_ = true;
 
         RCLCPP_INFO(this->get_logger(),
                     "ObstacleDetector.-> Got base grid %u x %u (res %.3f). Starting publish.",
@@ -468,7 +527,80 @@ private:
       }
     }
 
-    return false;
+	    return false;
+	  }
+
+  void init_persistent_cloud_layer()
+  {
+    persistent_cloud_map_ = obstacles_map_;
+    for (auto &c : persistent_cloud_map_.data) c = 0;
+    persistent_cloud_evidence_.assign(persistent_cloud_map_.data.size(), 0);
+  }
+
+  void clear_persistent_cloud_obstacles()
+  {
+    if (!persistent_cloud_map_.data.empty()) {
+      for (auto &c : persistent_cloud_map_.data) c = 0;
+    }
+    std::fill(persistent_cloud_evidence_.begin(), persistent_cloud_evidence_.end(), 0);
+  }
+
+  void decay_persistent_cloud_evidence()
+  {
+    if (!persistent_cloud_obstacles_enabled_ || persistent_cloud_evidence_decay_ <= 0) return;
+
+    for (auto &value : persistent_cloud_evidence_) {
+      value = std::max(0, value - persistent_cloud_evidence_decay_);
+    }
+  }
+
+  bool persistent_cloud_layer_ready() const
+  {
+    return !persistent_cloud_map_.data.empty() &&
+           persistent_cloud_map_.data.size() == obstacles_map_.data.size() &&
+           persistent_cloud_evidence_.size() == obstacles_map_.data.size();
+  }
+
+  void promote_persistent_cloud_cell(const int idx, const int cell_x, const int cell_y)
+  {
+    if (!persistent_cloud_obstacles_enabled_ || !persistent_cloud_layer_ready()) return;
+    if (idx < 0 || idx >= static_cast<int>(persistent_cloud_evidence_.size())) return;
+    if (is_near_static_obstacle(cell_x, cell_y)) return;
+
+    auto &evidence = persistent_cloud_evidence_[idx];
+    evidence = std::min(persistent_cloud_hits_required_, evidence + 1);
+    if (evidence >= persistent_cloud_hits_required_) {
+      persistent_cloud_map_.data[idx] = 100;
+    }
+  }
+
+  void merge_persistent_cloud_obstacles()
+  {
+    if (!persistent_cloud_obstacles_enabled_ || !persistent_cloud_layer_ready()) return;
+
+    size_t persistent_count = 0;
+    for (size_t i = 0; i < persistent_cloud_map_.data.size(); ++i) {
+      if (persistent_cloud_map_.data[i] > 0) {
+        obstacles_map_.data[i] = std::max(obstacles_map_.data[i], persistent_cloud_map_.data[i]);
+        ++persistent_count;
+      }
+    }
+
+    if (persistent_cloud_debug_) {
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "ObstacleDetector.-> persistent cloud cells=%zu hits_required=%d",
+        persistent_count,
+        persistent_cloud_hits_required_);
+    }
+  }
+
+  void publish_persistent_cloud_map()
+  {
+    if (!persistent_cloud_layer_ready()) return;
+    persistent_cloud_map_.header.stamp = this->now();
+    persistent_cloud_map_.header.frame_id = "map";
+    pub_persistent_cloud_map_->publish(persistent_cloud_map_);
   }
 
   inline void mark_cell(double mx, double my)
@@ -509,6 +641,7 @@ private:
   struct CellEvidence
   {
     int count{0};
+    int persistent_count{0};
     int cell_x{0};
     int cell_y{0};
   };
@@ -627,20 +760,27 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
           v_robot.y() > cloud_min_y_ && v_robot.y() < cloud_max_y_ &&
           v_robot.z() > cloud_min_z_ && v_robot.z() < cloud_max_z_)
       {
-        Eigen::Vector3d v_map = robot_to_map * v_robot;
-
-        int cell_x = static_cast<int>((v_map.x() - origin_x) * inv_res);
-        int cell_y = static_cast<int>((v_map.y() - origin_y) * inv_res);
-        if (cell_x < 0 || cell_x >= width || cell_y < 0 || cell_y >= height) {
+	        Eigen::Vector3d v_map = robot_to_map * v_robot;
+	        const double robot_range = std::hypot(v_robot.x(), v_robot.y());
+	        const bool persistent_range_ok =
+	          robot_range >= persistent_cloud_min_range_ &&
+	          robot_range <= persistent_cloud_max_range_;
+	
+	        int cell_x = static_cast<int>((v_map.x() - origin_x) * inv_res);
+	        int cell_y = static_cast<int>((v_map.y() - origin_y) * inv_res);
+	        if (cell_x < 0 || cell_x >= width || cell_y < 0 || cell_y >= height) {
           p += skip;
           continue;
         }
 
         int idx = cell_y * width + cell_x;
-        auto &hit = cell_hits[idx];
-        hit.count++;
-        hit.cell_x = cell_x;
-        hit.cell_y = cell_y;
+	        auto &hit = cell_hits[idx];
+	        hit.count++;
+	        if (persistent_range_ok) {
+	          hit.persistent_count++;
+	        }
+	        hit.cell_x = cell_x;
+	        hit.cell_y = cell_y;
       }
       p += skip;
     }
@@ -680,13 +820,16 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
       }
 
       if (idx >= 0 && idx < map_size) {
-        if (is_near_static_obstacle(hit.cell_x, hit.cell_y)) {
-          continue;
-        }
-        obstacles_map_.data[idx] = 100;
-      }
-    }
-  }
+	        if (is_near_static_obstacle(hit.cell_x, hit.cell_y)) {
+	          continue;
+	        }
+	        obstacles_map_.data[idx] = 100;
+	        if (hit.persistent_count >= min_points) {
+	          promote_persistent_cloud_cell(idx, hit.cell_x, hit.cell_y);
+	        }
+	      }
+	    }
+	  }
 
   void add_obstacles_from_scan(const sensor_msgs::msg::LaserScan::SharedPtr &scan, int downsample)
   {
@@ -757,15 +900,18 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
 
     try{
 
-    // decay rápido (esto te quita “ghost obstacles” sin depender del merger)
-    decay_map(obstacles_map_, decay_factor_);
-
-    // integra sensores “lo más rápido posible”
-    if (use_cloud_  && cloud1_received_) { add_obstacles_from_cloud(latest_cloud1_,  std::max(1, cloud_downsampling_));  cloud1_received_ = false; }
-    if (use_cloud2_ && cloud2_received_) { add_obstacles_from_cloud(latest_cloud2_, std::max(1, cloud_downsampling2_)); cloud2_received_ = false; }
-    if (use_lidar_  && scan_received_)   { add_obstacles_from_scan (latest_scan_,   std::max(1, lidar_downsampling_));  scan_received_ = false; }
-
-    obstacles_map_.header.stamp = this->now();
+	    // decay rápido (esto te quita “ghost obstacles” sin depender del merger)
+	    decay_map(obstacles_map_, decay_factor_);
+	    decay_persistent_cloud_evidence();
+	
+	    // integra sensores “lo más rápido posible”
+	    if (use_cloud_  && cloud1_received_) { add_obstacles_from_cloud(latest_cloud1_,  std::max(1, cloud_downsampling_));  cloud1_received_ = false; }
+	    if (use_cloud2_ && cloud2_received_) { add_obstacles_from_cloud(latest_cloud2_, std::max(1, cloud_downsampling2_)); cloud2_received_ = false; }
+	    if (use_lidar_  && scan_received_)   { add_obstacles_from_scan (latest_scan_,   std::max(1, lidar_downsampling_));  scan_received_ = false; }
+	    merge_persistent_cloud_obstacles();
+	    publish_persistent_cloud_map();
+	
+	    obstacles_map_.header.stamp = this->now();
     obstacles_map_.header.frame_id = "map";
     pub_obstacles_map_->publish(obstacles_map_);
     }

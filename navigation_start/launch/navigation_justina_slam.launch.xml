@@ -18,7 +18,8 @@
   <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
   <arg name="point_cloud_topic"  default="/$(var namespace_nav)/camera/points_filtered"/>
   <arg name="point_cloud_topic2" default="/$(var namespace_hardware)/camera/points"/>
-  <arg name="laser_scan_topic"   default="/$(var namespace_hardware)/base/scan"/>
+  <arg name="raw_laser_scan_topic" default="/$(var namespace_hardware)/base/scan"/>
+  <arg name="laser_scan_topic"   default="/$(var namespace_nav)/base/scan_filtered"/>
   <arg name="cmd_vel_topic"      default="/$(var namespace_hardware)/base/cmd_vel"/>
 
   <!-- ===== Sensor toggles ===== -->
@@ -41,6 +42,16 @@
   <arg name="cloud_points_threshold" default="100"/>
   <arg name="lidar_points_threshold" default="20"/>
   <arg name="mvn_pln_patience"       default="True"/>
+
+  <!-- ===== Laser scan filter ===== -->
+  <!-- Limpia lecturas aisladas antes de SLAM para reducir manchas permanentes en el mapa. -->
+  <arg name="laser_filter_enabled" default="True"/>
+  <arg name="laser_filter_debug" default="false"/>
+  <arg name="laser_filter_min_valid_range" default="0.08"/>
+  <arg name="laser_filter_max_valid_range" default="4.0"/>
+  <arg name="laser_filter_neighbor_window" default="2"/>
+  <arg name="laser_filter_min_similar_neighbors" default="1"/>
+  <arg name="laser_filter_similar_range_tolerance" default="0.18"/>
 
   <!-- ===== Laser detection window ===== -->
   <arg name="laser_min_x" default="0.17"/>
@@ -78,6 +89,15 @@
 
   <!-- ===== Obstacle Detector ===== -->
   <arg name="detector_decay_factor" default="2"/>
+  <!-- Herramienta experimental: promueve obstaculos Kinect muy confirmados a capa persistente
+       y map_augmenter la integra automaticamente al mapa efectivo de navegacion. -->
+  <arg name="persistent_cloud_obstacles_enabled" default="False"/>
+  <arg name="persistent_cloud_hits_required" default="6"/>
+  <arg name="persistent_cloud_evidence_decay" default="1"/>
+  <arg name="persistent_cloud_min_range" default="0.40"/>
+  <arg name="persistent_cloud_max_range" default="2.50"/>
+  <arg name="persistent_cloud_clear_on_disable" default="True"/>
+  <arg name="persistent_cloud_debug" default="false"/>
 
   <!-- ===== Path Planner ===== -->
   <!-- Diagonal paths disabled while SLAM is still building the map -->
@@ -86,12 +106,17 @@
   <!-- ===== Simple Move ===== -->
   <!-- More conservative speeds while exploring an unknown map -->
   <!-- Velocidad lineal maxima del robot; se mantiene baja para no rebasar al SLAM. -->
-  <arg name="max_linear_speed"  default="0.6"/>
+  <arg name="max_linear_speed"  default="0.4"/>
   <!-- Velocidad angular maxima; ayuda a explorar sin giros demasiado lentos. -->
-  <arg name="max_angular_speed" default="0.8"/>
+  <arg name="max_angular_speed" default="0.6"/>
   <arg name="control_alpha"     default="0.08"/>
   <arg name="control_beta"      default="0.4"/>
   <arg name="move_head"         default="True"/>
+  <!-- Permite subir un poco la velocidad solo cuando el mapa SLAM ya conoce la zona local. -->
+  <arg name="mapped_area_speed_enabled" default="True"/>
+  <arg name="mapped_area_max_linear_speed" default="0.55"/>
+  <arg name="mapped_area_radius" default="0.75"/>
+  <arg name="mapped_area_min_known_ratio" default="0.85"/>
 
   <!-- ===== Potential Fields ===== -->
   <arg name="pot_fields_debug"       default="False"/>
@@ -140,6 +165,28 @@
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="autostart"    value="true"/>
     <param name="node_names" value="['slam_toolbox', 'prohibition_map_server']"/>
+  </node>
+
+
+  <!-- ================================================================== -->
+  <!--                         Laser Scan Filter                          -->
+  <!-- ================================================================== -->
+
+  <node name="laser_scan_filter"
+        pkg="map_augmenter"
+        exec="laser_scan_filter_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="input_topic" value="$(var raw_laser_scan_topic)"/>
+    <param name="output_topic" value="$(var laser_scan_topic)"/>
+    <param name="enabled" value="$(var laser_filter_enabled)"/>
+    <param name="debug" value="$(var laser_filter_debug)"/>
+    <param name="min_valid_range" value="$(var laser_filter_min_valid_range)"/>
+    <param name="max_valid_range" value="$(var laser_filter_max_valid_range)"/>
+    <param name="neighbor_window" value="$(var laser_filter_neighbor_window)"/>
+    <param name="min_similar_neighbors" value="$(var laser_filter_min_similar_neighbors)"/>
+    <param name="similar_range_tolerance" value="$(var laser_filter_similar_range_tolerance)"/>
   </node>
 
 
@@ -271,6 +318,13 @@
     <param name="static_obstacle_ignore_radius" value="$(var static_obstacle_ignore_radius)"/>
     <param name="cloud_min_points_per_cell" value="$(var obstacle_cloud_min_points_per_cell)"/>
     <param name="cloud_min_neighbor_cells" value="$(var obstacle_cloud_min_neighbor_cells)"/>
+    <param name="persistent_cloud_obstacles_enabled" value="$(var persistent_cloud_obstacles_enabled)"/>
+    <param name="persistent_cloud_hits_required" value="$(var persistent_cloud_hits_required)"/>
+    <param name="persistent_cloud_evidence_decay" value="$(var persistent_cloud_evidence_decay)"/>
+    <param name="persistent_cloud_min_range" value="$(var persistent_cloud_min_range)"/>
+    <param name="persistent_cloud_max_range" value="$(var persistent_cloud_max_range)"/>
+    <param name="persistent_cloud_clear_on_disable" value="$(var persistent_cloud_clear_on_disable)"/>
+    <param name="persistent_cloud_debug" value="$(var persistent_cloud_debug)"/>
     <param name="laser_min_x"        value="$(var laser_min_x)"/>
     <param name="laser_max_x"        value="$(var laser_max_x)"/>
     <param name="laser_min_y"        value="$(var laser_min_y)"/>
@@ -314,6 +368,11 @@
     <param name="move_head"         value="$(var move_head)"/>
     <param name="use_pot_fields"    value="$(var use_pot_fields)"/>
     <param name="base_link_name"    value="$(var base_link_name)"/>
+    <param name="mapped_area_speed_enabled" value="$(var mapped_area_speed_enabled)"/>
+    <param name="mapped_area_max_linear_speed" value="$(var mapped_area_max_linear_speed)"/>
+    <param name="mapped_area_radius" value="$(var mapped_area_radius)"/>
+    <param name="mapped_area_min_known_ratio" value="$(var mapped_area_min_known_ratio)"/>
+    <param name="mapped_area_map_topic" value="map"/>
     <remap from="/cmd_vel" to="$(var cmd_vel_topic)"/>
   </node>
 

@@ -79,10 +79,21 @@ ament_target_dependencies(cloud_filter_node
 )
 target_link_libraries(cloud_filter_node Eigen3::Eigen)
 
+# 4) Laser scan filter
+add_executable(laser_scan_filter_node
+  src/laser_scan_filter_node.cpp
+)
+ament_target_dependencies(laser_scan_filter_node
+  rclcpp
+  rcl_interfaces
+  sensor_msgs
+)
+
 # ===== Install =====
 install(TARGETS
   map_augmenter_node
   cloud_filter_node
+  laser_scan_filter_node
   obstacle_detector_node
   DESTINATION lib/${PROJECT_NAME}
 )
