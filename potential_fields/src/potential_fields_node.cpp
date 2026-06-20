@@ -21,15 +21,14 @@
 // Action messages (used less directly in ROS 2; here for compatibility)
 #include "action_msgs/msg/goal_status.hpp"
 
-//DEBUG
 #include "opencv2/core.hpp"
 #include "opencv2/highgui.hpp"
 
 // Standard
-#include <iostream>
+#include <cmath>
+#include <sstream>
 #include <vector>
 #include <exception>
-///
 
 class PotentialFieldsNode : public rclcpp::Node
 {
@@ -50,6 +49,8 @@ public:
         this->declare_parameter<float>("laser_max_x", 0.80);
         this->declare_parameter<float>("laser_min_y", -0.30);
         this->declare_parameter<float>("laser_max_y", 0.30);
+        this->declare_parameter<float>("laser_collision_min_y", -0.22);
+        this->declare_parameter<float>("laser_collision_max_y", 0.22);
         this->declare_parameter<float>("laser_min_z", 0.05);
         this->declare_parameter<float>("laser_max_z", 1.50);
 
@@ -57,6 +58,8 @@ public:
         this->declare_parameter<float>("cloud_max_x", 0.80);
         this->declare_parameter<float>("cloud_min_y", -0.30);
         this->declare_parameter<float>("cloud_max_y", 0.30);
+        this->declare_parameter<float>("cloud_collision_min_y", -0.22);
+        this->declare_parameter<float>("cloud_collision_max_y", 0.22);
         this->declare_parameter<float>("cloud_min_z", 0.05);
         this->declare_parameter<float>("cloud_max_z", 1.50);
 
@@ -88,6 +91,8 @@ public:
         this->get_parameter("laser_max_x", laser_max_x_);
         this->get_parameter("laser_min_y", laser_min_y_);
         this->get_parameter("laser_max_y", laser_max_y_);
+        this->get_parameter("laser_collision_min_y", laser_collision_min_y_);
+        this->get_parameter("laser_collision_max_y", laser_collision_max_y_);
         this->get_parameter("laser_min_z", laser_min_z_);
         this->get_parameter("laser_max_z", laser_max_z_);
 
@@ -95,6 +100,8 @@ public:
         this->get_parameter("cloud_max_x", cloud_max_x_);
         this->get_parameter("cloud_min_y", cloud_min_y_);
         this->get_parameter("cloud_max_y", cloud_max_y_);
+        this->get_parameter("cloud_collision_min_y", cloud_collision_min_y_);
+        this->get_parameter("cloud_collision_max_y", cloud_collision_max_y_);
         this->get_parameter("cloud_min_z", cloud_min_z_);
         this->get_parameter("cloud_max_z", cloud_max_z_);
 
@@ -195,8 +202,8 @@ private:
     // Internal parameter values
     bool debug_, show_img_, use_pot_fields_, use_lidar_, use_cloud_;
 
-    float laser_min_x_, laser_max_x_, laser_min_y_, laser_max_y_, laser_min_z_, laser_max_z_;
-    float cloud_min_x_, cloud_max_x_, cloud_min_y_, cloud_max_y_, cloud_min_z_, cloud_max_z_;
+    float laser_min_x_, laser_max_x_, laser_min_y_, laser_max_y_, laser_collision_min_y_, laser_collision_max_y_, laser_min_z_, laser_max_z_;
+    float cloud_min_x_, cloud_max_x_, cloud_min_y_, cloud_max_y_, cloud_collision_min_y_, cloud_collision_max_y_, cloud_min_z_, cloud_max_z_;
     float laser_pot_fields_d0_, laser_pot_fields_k_rej_;
     float cloud_pot_fields_d0_, cloud_pot_fields_k_rej_;
     float no_sensor_data_timeout_;
@@ -257,6 +264,8 @@ private:
             else if (name == "laser_max_x") laser_max_x_ = param.as_double();
             else if (name == "laser_min_y") laser_min_y_ = param.as_double();
             else if (name == "laser_max_y") laser_max_y_ = param.as_double();
+            else if (name == "laser_collision_min_y") laser_collision_min_y_ = param.as_double();
+            else if (name == "laser_collision_max_y") laser_collision_max_y_ = param.as_double();
             else if (name == "laser_min_z") laser_min_z_ = param.as_double();
             else if (name == "laser_max_z") laser_max_z_ = param.as_double();
 
@@ -264,6 +273,8 @@ private:
             else if (name == "cloud_max_x") cloud_max_x_ = param.as_double();
             else if (name == "cloud_min_y") cloud_min_y_ = param.as_double();
             else if (name == "cloud_max_y") cloud_max_y_ = param.as_double();
+            else if (name == "cloud_collision_min_y") cloud_collision_min_y_ = param.as_double();
+            else if (name == "cloud_collision_max_y") cloud_collision_max_y_ = param.as_double();
             else if (name == "cloud_min_z") cloud_min_z_ = param.as_double();
             else if (name == "cloud_max_z") cloud_max_z_ = param.as_double();
 
@@ -530,7 +541,7 @@ private:
             v = tf * v;
 
             if (v.x() > laser_min_x_ && v.x() < optimal_x &&
-                v.y() > laser_min_y_ && v.y() < laser_max_y_ &&
+                v.y() > laser_collision_min_y_ && v.y() < laser_collision_max_y_ &&
                 v.z() > laser_min_z_ && v.z() < laser_max_z_)
             {
                 obstacle_count++;
@@ -551,13 +562,6 @@ private:
         } else {
             rejection_force_x = 0.0;
             rejection_force_y = 0.0;
-        }
-
-        if (debug_) {
-            if (obstacle_count > lidar_threshold_ && rejection_force_y != 0.0) {
-                RCLCPP_INFO(this->get_logger(), "PotentialFields.-> Laser->Rejection force: x=%.3f y=%.3f",
-                            rejection_force_x, rejection_force_y);
-            }
         }
 
         return obstacle_count > lidar_threshold_;
@@ -609,7 +613,7 @@ private:
             v = tf * v;
 
             if (v.x() > cloud_min_x_ && v.x() < optimal_x &&
-                v.y() > cloud_min_y_ && v.y() < cloud_max_y_ &&
+                v.y() > cloud_collision_min_y_ && v.y() < cloud_collision_max_y_ &&
                 v.z() > cloud_min_z_ && v.z() < cloud_max_z_)
             {
                 obstacle_count++;
@@ -637,16 +641,6 @@ private:
         if(show_img_){
             cv::imshow("POTENTIAL FIELDS OBSTACLE", mask);
             cv::waitKey(30);
-        }
-
-        if (debug_)
-        {
-            if (rejection_force_y != 0)
-            {
-                std::cout << "PotentialFields.cloud->rejection_force_x: "
-                        << rejection_force_x << "  rejection_force_y: "
-                        << rejection_force_y << std::endl;
-            }
         }
 
         return obstacle_count > cloud_threshold_;

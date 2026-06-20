@@ -13,8 +13,10 @@
 #include "tf2/utils.h"
 #include "Eigen/Geometry"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <unordered_map>
 
 class ObstacleDetectorNode : public rclcpp::Node
 {
@@ -53,6 +55,10 @@ public:
     this->declare_parameter("cloud_downsampling",     1);
     this->declare_parameter("cloud_downsampling2",    1);
     this->declare_parameter("lidar_downsampling",     1);
+    this->declare_parameter("cloud_min_points_per_cell", 2);
+    this->declare_parameter("cloud_min_neighbor_cells",  1);
+    this->declare_parameter("tf_fallback_warn_threshold_sec", 0.20);
+    this->declare_parameter("static_obstacle_ignore_radius", 0.10);
 
     this->declare_parameter("point_cloud_topic",      "/point_cloud");
     this->declare_parameter("point_cloud_topic2",     "/point_cloud2");
@@ -92,6 +98,10 @@ public:
     this->get_parameter("cloud_downsampling", cloud_downsampling_);
     this->get_parameter("cloud_downsampling2", cloud_downsampling2_);
     this->get_parameter("lidar_downsampling", lidar_downsampling_);
+    this->get_parameter("cloud_min_points_per_cell", cloud_min_points_per_cell_);
+    this->get_parameter("cloud_min_neighbor_cells", cloud_min_neighbor_cells_);
+    this->get_parameter("tf_fallback_warn_threshold_sec", tf_fallback_warn_threshold_sec_);
+    this->get_parameter("static_obstacle_ignore_radius", static_obstacle_ignore_radius_);
 
     this->get_parameter("point_cloud_topic", point_cloud_topic_);
     this->get_parameter("point_cloud_topic2", point_cloud_topic2_);
@@ -144,6 +154,7 @@ private:
   tf2_ros::TransformListener tf_listener_;
 
   nav_msgs::msg::OccupancyGrid obstacles_map_;
+  nav_msgs::msg::OccupancyGrid static_reference_map_;
   std::atomic<bool> have_grid_{false};
 
   // latest sensors
@@ -166,6 +177,10 @@ private:
   float cloud_min_x_, cloud_max_x_, cloud_min_y_, cloud_max_y_, cloud_min_z_, cloud_max_z_;
   int decay_factor_{10};
   int cloud_downsampling_{1}, cloud_downsampling2_{1}, lidar_downsampling_{1};
+  int cloud_min_points_per_cell_{2};
+  int cloud_min_neighbor_cells_{1};
+  double tf_fallback_warn_threshold_sec_{0.20};
+  double static_obstacle_ignore_radius_{0.10};
 
   std::string point_cloud_topic_, point_cloud_topic2_, laser_scan_topic_;
   std::string static_map_server_;
@@ -231,6 +246,14 @@ private:
       else if (n == "cloud_downsampling")  cloud_downsampling_  = p.as_int();
       else if (n == "cloud_downsampling2") cloud_downsampling2_ = p.as_int();
       else if (n == "lidar_downsampling")  lidar_downsampling_  = p.as_int();
+      else if (n == "cloud_min_points_per_cell") cloud_min_points_per_cell_ = p.as_int();
+      else if (n == "cloud_min_neighbor_cells")  cloud_min_neighbor_cells_  = p.as_int();
+      else if (n == "tf_fallback_warn_threshold_sec") {
+        tf_fallback_warn_threshold_sec_ = std::max(0.0, p.as_double());
+      }
+      else if (n == "static_obstacle_ignore_radius") {
+        static_obstacle_ignore_radius_ = std::max(0.0, p.as_double());
+      }
 
       else if (n == "point_cloud_topic")  point_cloud_topic_  = p.as_string();
       else if (n == "point_cloud_topic2") point_cloud_topic2_ = p.as_string();
@@ -276,7 +299,65 @@ private:
     padded.info.origin.position.x -= padding_cells * map.info.resolution;
     padded.info.origin.position.y -= padding_cells * map.info.resolution;
     padded.data.assign(static_cast<size_t>(new_width) * static_cast<size_t>(new_height), 0);
+
+    for (int y = 0; y < old_height; ++y) {
+      for (int x = 0; x < old_width; ++x) {
+        const int old_idx = y * old_width + x;
+        const int new_idx = (y + padding_cells) * new_width + (x + padding_cells);
+        padded.data[new_idx] = map.data[old_idx];
+      }
+    }
+
     return padded;
+  }
+
+  bool lookup_transform_with_latest_fallback(
+    const std::string &target_frame,
+    const std::string &source_frame,
+    const rclcpp::Time &stamp,
+    Eigen::Affine3d &transform)
+  {
+    try {
+      auto tf = tf_buffer_.lookupTransform(
+        target_frame,
+        source_frame,
+        stamp,
+        rclcpp::Duration::from_seconds(0.03));
+      transform = tf2::transformToEigen(tf.transform);
+      return true;
+    } catch (const std::exception &exact_error) {
+      try {
+        // Los sensores pueden llegar unos milisegundos por delante del ultimo
+        // TF publicado. Usar la TF mas reciente como respaldo evita perder
+        // frames completos y mantiene estable /navigation/obstacles_map.
+        auto tf = tf_buffer_.lookupTransform(
+          target_frame,
+          source_frame,
+          rclcpp::Time(0),
+          rclcpp::Duration::from_seconds(0.03));
+        transform = tf2::transformToEigen(tf.transform);
+        const double tf_delta_sec =
+          std::fabs((stamp - rclcpp::Time(tf.header.stamp)).seconds());
+        if (tf_delta_sec > tf_fallback_warn_threshold_sec_) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 3000,
+            "ObstacleDetector.-> Exact TF failed from '%s' to '%s' by %.3f s, using latest TF: %s",
+            source_frame.c_str(),
+            target_frame.c_str(),
+            tf_delta_sec,
+            exact_error.what());
+        }
+        return true;
+      } catch (const std::exception &latest_error) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "ObstacleDetector.-> TF lookup failed from '%s' to '%s': %s",
+          source_frame.c_str(),
+          target_frame.c_str(),
+          latest_error.what());
+        return false;
+      }
+    }
   }
 
   // ===== map init =====
@@ -331,7 +412,8 @@ private:
           return;
         }
 
-        obstacles_map_ = pad_grid_geometry(map);
+        static_reference_map_ = pad_grid_geometry(map);
+        obstacles_map_ = static_reference_map_;
         for (auto &c : obstacles_map_.data) c = 0;
         have_grid_ = true;
 
@@ -355,31 +437,81 @@ private:
   void cb_scan  (const sensor_msgs::msg::LaserScan::SharedPtr msg)   { latest_scan_   = msg; scan_received_   = true; }
 
   // ===== core =====
+  bool is_near_static_obstacle(int cell_x, int cell_y) const
+  {
+    if (static_reference_map_.data.empty()) return false;
+
+    const int width = static_cast<int>(static_reference_map_.info.width);
+    const int height = static_cast<int>(static_reference_map_.info.height);
+    if (cell_x < 0 || cell_x >= width || cell_y < 0 || cell_y >= height) return false;
+
+    const double resolution = static_reference_map_.info.resolution;
+    if (resolution <= 0.0) return false;
+
+    const int radius_cells = static_cast<int>(
+      std::ceil(std::max(0.0, static_obstacle_ignore_radius_) / resolution));
+
+    for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
+      for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
+        if (dx * dx + dy * dy > radius_cells * radius_cells) continue;
+
+        const int nx = cell_x + dx;
+        const int ny = cell_y + dy;
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+
+        const int nidx = ny * width + nx;
+        if (nidx >= 0 &&
+            nidx < static_cast<int>(static_reference_map_.data.size()) &&
+            static_reference_map_.data[nidx] > 0) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   inline void mark_cell(double mx, double my)
   {
     int cell_x = static_cast<int>((mx - obstacles_map_.info.origin.position.x) / obstacles_map_.info.resolution);
     int cell_y = static_cast<int>((my - obstacles_map_.info.origin.position.y) / obstacles_map_.info.resolution);
     int idx = cell_y * static_cast<int>(obstacles_map_.info.width) + cell_x;
-    if (idx >= 0 && idx < static_cast<int>(obstacles_map_.data.size()))
+    if (idx >= 0 && idx < static_cast<int>(obstacles_map_.data.size())) {
+      if (is_near_static_obstacle(cell_x, cell_y)) {
+        return;
+      }
       obstacles_map_.data[idx] = 100;
+    }
   }
 
   // Usamos argumentos por valor para que el compilador los ponga en registros (CPU registers)
   inline void mark_cell_fast(double x, double y, 
                             double origin_x, double origin_y, 
-                            double inv_res, int width, int map_size)
+                            double inv_res, int width, int height, int map_size)
   {
     // Usar el inverso de la resolución (multiplicación) es más rápido que dividir
     int cell_x = static_cast<int>((x - origin_x) * inv_res);
     int cell_y = static_cast<int>((y - origin_y) * inv_res);
-    
+
+    if (cell_x < 0 || cell_x >= width || cell_y < 0 || cell_y >= height) return;
+
     int idx = cell_y * width + cell_x;
 
     // Verificación de límites rápida
     if (idx >= 0 && idx < map_size) {
+      if (is_near_static_obstacle(cell_x, cell_y)) {
+        return;
+      }
       obstacles_map_.data[idx] = 100;
     }
   }
+
+  struct CellEvidence
+  {
+    int count{0};
+    int cell_x{0};
+    int cell_y{0};
+  };
 /*
 void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cloud, int downsample)
 {
@@ -446,26 +578,31 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
     // --- 1. TFs ÚNICAS POR NUBE ---
     Eigen::Affine3d cam_to_robot;
     Eigen::Affine3d robot_to_map;
-    try {
-      // De cámara a base_link (para la cajita)
-      auto tf1 = tf_buffer_.lookupTransform(base_link_name_, cloud->header.frame_id, 
-                                            cloud->header.stamp, rclcpp::Duration::from_seconds(0.05));
-      cam_to_robot = tf2::transformToEigen(tf1.transform);
-
-      // De base_link a mapa (para marcar en el grid)
-      auto tf2 = tf_buffer_.lookupTransform("map", base_link_name_, 
-                                            cloud->header.stamp, rclcpp::Duration::from_seconds(0.05));
-      robot_to_map = tf2::transformToEigen(tf2.transform);
-    } catch (...) { return; }
+    // De camara a base_link (para la cajita) y de base_link a mapa (grid).
+    if (!lookup_transform_with_latest_fallback(
+        base_link_name_, cloud->header.frame_id, cloud->header.stamp, cam_to_robot)) {
+      return;
+    }
+    if (!lookup_transform_with_latest_fallback(
+        "map", base_link_name_, cloud->header.stamp, robot_to_map)) {
+      return;
+    }
 
     // --- 2. PRECALCULO DE REJILLA ---
     double inv_res = 1.0 / obstacles_map_.info.resolution;
     double origin_x = obstacles_map_.info.origin.position.x;
     double origin_y = obstacles_map_.info.origin.position.y;
     int width = static_cast<int>(obstacles_map_.info.width);
+    int height = static_cast<int>(obstacles_map_.info.height);
     int map_size = static_cast<int>(obstacles_map_.data.size());
 
     // --- 3. BUCLE DE PUNTOS ---
+    // La nube del Kinect puede traer ruido temporal o puntos aislados en bordes.
+    // En vez de marcar una celda con un solo punto, acumulamos evidencia por celda
+    // y solo publicamos obstaculos donde exista densidad y continuidad espacial.
+    std::unordered_map<int, CellEvidence> cell_hits;
+    cell_hits.reserve(1024);
+
     const unsigned char *p = cloud->data.data();
     const size_t point_step = cloud->point_step;
     const size_t total = static_cast<size_t>(cloud->width) * static_cast<size_t>(cloud->height);
@@ -479,6 +616,11 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
         *reinterpret_cast<const float*>(p + 4),
         *reinterpret_cast<const float*>(p + 8)
       );
+      if (!std::isfinite(v_cam.x()) || !std::isfinite(v_cam.y()) || !std::isfinite(v_cam.z())) {
+        p += skip;
+        continue;
+      }
+
       Eigen::Vector3d v_robot = cam_to_robot * v_cam;
 
       if (v_robot.x() > cloud_min_x_ && v_robot.x() < cloud_max_x_ &&
@@ -486,10 +628,63 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
           v_robot.z() > cloud_min_z_ && v_robot.z() < cloud_max_z_)
       {
         Eigen::Vector3d v_map = robot_to_map * v_robot;
-        
-        mark_cell_fast(v_map.x(), v_map.y(), origin_x, origin_y, inv_res, width, map_size);
+
+        int cell_x = static_cast<int>((v_map.x() - origin_x) * inv_res);
+        int cell_y = static_cast<int>((v_map.y() - origin_y) * inv_res);
+        if (cell_x < 0 || cell_x >= width || cell_y < 0 || cell_y >= height) {
+          p += skip;
+          continue;
+        }
+
+        int idx = cell_y * width + cell_x;
+        auto &hit = cell_hits[idx];
+        hit.count++;
+        hit.cell_x = cell_x;
+        hit.cell_y = cell_y;
       }
       p += skip;
+    }
+
+    // --- 4. VALIDACION DE CELDAS ---
+    // Una silla/mesa real proyectada al mapa normalmente ocupa varias celdas cercanas.
+    // Si una celda no tiene suficientes puntos o no tiene vecinos con evidencia,
+    // se considera ruido y no se manda al mapa de obstaculos.
+    const int min_points = std::max(1, cloud_min_points_per_cell_);
+    const int min_neighbors = std::max(0, cloud_min_neighbor_cells_);
+
+    for (const auto &entry : cell_hits)
+    {
+      const int idx = entry.first;
+      const CellEvidence &hit = entry.second;
+
+      if (hit.count < min_points) continue;
+
+      if (min_neighbors > 0) {
+        int neighbors = 0;
+        for (int dy = -1; dy <= 1; ++dy) {
+          for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+
+            const int nx = hit.cell_x + dx;
+            const int ny = hit.cell_y + dy;
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+
+            const int nidx = ny * width + nx;
+            auto nentry = cell_hits.find(nidx);
+            if (nentry != cell_hits.end() && nentry->second.count >= min_points) {
+              neighbors++;
+            }
+          }
+        }
+        if (neighbors < min_neighbors) continue;
+      }
+
+      if (idx >= 0 && idx < map_size) {
+        if (is_near_static_obstacle(hit.cell_x, hit.cell_y)) {
+          continue;
+        }
+        obstacles_map_.data[idx] = 100;
+      }
     }
   }
 
@@ -500,17 +695,13 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
     // --- 1. TFs ÚNICAS (UNA VEZ POR ESCANEO) ---
     Eigen::Affine3d lidar_to_robot;
     Eigen::Affine3d robot_to_map;
-    try {
-      auto tf1 = tf_buffer_.lookupTransform(base_link_name_, scan->header.frame_id, 
-                                            scan->header.stamp, rclcpp::Duration::from_seconds(0.05));
-      lidar_to_robot = tf2::transformToEigen(tf1.transform);
-
-      // Del robot al mapa (para el posicionamiento global)
-      auto tf2 = tf_buffer_.lookupTransform("map", base_link_name_, 
-                                            scan->header.stamp, rclcpp::Duration::from_seconds(0.05));
-      robot_to_map = tf2::transformToEigen(tf2.transform);
-    } catch (...) { 
-      return; // Si falla la TF, ignoramos este mensaje
+    if (!lookup_transform_with_latest_fallback(
+        base_link_name_, scan->header.frame_id, scan->header.stamp, lidar_to_robot)) {
+      return;
+    }
+    if (!lookup_transform_with_latest_fallback(
+        "map", base_link_name_, scan->header.stamp, robot_to_map)) {
+      return;
     }
 
     // --- 2. PRECALCULO DE REJILLA ---
@@ -518,6 +709,7 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
     double origin_x = obstacles_map_.info.origin.position.x;
     double origin_y = obstacles_map_.info.origin.position.y;
     int width = static_cast<int>(obstacles_map_.info.width);
+    int height = static_cast<int>(obstacles_map_.info.height);
     int map_size = static_cast<int>(obstacles_map_.data.size());
 
     // --- 3. BUCLE DE LECTURAS ---
@@ -546,7 +738,7 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
         // PASO B: Si está en la caja, lo pasamos al MAPA
         Eigen::Vector3d v_map = robot_to_map * v_robot;
         
-        mark_cell_fast(v_map.x(), v_map.y(), origin_x, origin_y, inv_res, width, map_size);
+        mark_cell_fast(v_map.x(), v_map.y(), origin_x, origin_y, inv_res, width, height, map_size);
       }
     }
   }

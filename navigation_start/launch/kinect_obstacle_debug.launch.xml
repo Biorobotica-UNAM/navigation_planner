@@ -1,0 +1,238 @@
+<launch>
+
+  <!-- Entorno minimo para depurar Kinect -> nube filtrada -> obstaculos. -->
+  <arg name="use_sim_time" default="false"/>
+  <arg name="namespace_hardware" default="hardware"/>
+  <arg name="namespace_nav" default="navigation"/>
+  <arg name="use_namespace" default="true"/>
+  <arg name="use_rviz" default="true"/>
+  <arg name="use_simple_sim" default="true"/>
+  <arg name="use_robot_state_publisher" default="true"/>
+  <arg name="use_kinect" default="true"/>
+  <!-- El motor del Kinect comparte el dispositivo USB y puede inestabilizar
+       la profundidad en algunas pruebas; se prende solo cuando haga falta. -->
+  <arg name="use_kinect_motor" default="true"/>
+  <arg name="publish_static_map_to_odom" default="true"/>
+  <arg name="rviz_config" default="$(find-pkg-share navigation_start)/rviz/kinect_obstacle_debug.rviz"/>
+
+  <arg name="static_map_file" default="$(find-pkg-share navigation_start)/maps/maps/lab2025/map.yaml"/>
+  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/maps/lab2025/map.yaml"/>
+
+  <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
+  <arg name="point_cloud_topic" default="/$(var namespace_nav)/camera/points_filtered"/>
+  <arg name="laser_scan_topic" default="/$(var namespace_hardware)/base/scan"/>
+
+  <arg name="use_lidar" default="false"/>
+  <arg name="use_point_cloud" default="true"/>
+
+  <arg name="initial_x" default="0.0"/>
+  <arg name="initial_y" default="0.0"/>
+  <arg name="initial_yaw" default="0.0"/>
+  <arg name="laser_beams" default="361"/>
+  <arg name="laser_range_max" default="6.0"/>
+  <arg name="laser_unknown_is_obstacle" default="false"/>
+  <arg name="laser_publish_max_range" default="false"/>
+
+  <let name="justina_share" value="$(find-pkg-share justina_description)"/>
+
+  <!-- Prisma estricto de obstaculos. cloud_filter lo usa como base y lo amplia internamente. -->
+  <arg name="cloud_min_x" default="0.30"/>
+  <arg name="cloud_max_x" default="1.20"/>
+  <arg name="cloud_min_y" default="-0.45"/>
+  <arg name="cloud_max_y" default="0.45"/>
+  <arg name="cloud_min_z" default="0.05"/>
+  <arg name="cloud_max_z" default="1.00"/>
+
+  <arg name="laser_min_x" default="0.17"/>
+  <arg name="laser_max_x" default="0.55"/>
+  <arg name="laser_min_y" default="-0.35"/>
+  <arg name="laser_max_y" default="0.35"/>
+  <arg name="laser_min_z" default="0.025"/>
+  <arg name="laser_max_z" default="1.00"/>
+
+  <!-- Simulador minimo: publica /hardware/base/odom, odom -> base_link,
+       /hardware/joint_states y /hardware/base/scan. -->
+  <node pkg="justina_description"
+        exec="simple_justina_sim.py"
+        name="simple_justina_sim"
+        output="screen"
+        if="$(var use_simple_sim)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="initial_x" value="$(var initial_x)"/>
+    <param name="initial_y" value="$(var initial_y)"/>
+    <param name="initial_yaw" value="$(var initial_yaw)"/>
+    <param name="laser_beams" value="$(var laser_beams)"/>
+    <param name="laser_range_max" value="$(var laser_range_max)"/>
+    <param name="laser_unknown_is_obstacle" value="$(var laser_unknown_is_obstacle)"/>
+    <param name="laser_publish_max_range" value="$(var laser_publish_max_range)"/>
+  </node>
+
+  <!-- URDF + TF fijo de Justina para que camera_link exista en el arbol TF. -->
+  <node pkg="robot_state_publisher"
+        exec="robot_state_publisher"
+        name="robot_state_publisher"
+        output="screen"
+        if="$(var use_robot_state_publisher)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="robot_description" value="$(command 'cat $(var justina_share)/urdf/justina.urdf')"/>
+    <remap from="joint_states" to="/hardware/joint_states"/>
+    <remap from="robot_description" to="/hardware/robot_description"/>
+  </node>
+
+  <!-- Kinect real bajo /hardware/camera. Publica imagen, profundidad y nube. -->
+  <group if="$(var use_kinect)">
+    <push_ros_namespace namespace="$(var namespace_hardware)"/>
+    <include file="$(find-pkg-share kinect_ros2)/launch/kinect.launch.xml"/>
+  </group>
+
+  <!-- Opcional: mueve fisicamente el tilt del Kinect si estas probando con motor. -->
+  <node pkg="justina_description"
+        exec="kinect_tilt_motor_node.py"
+        name="kinect_tilt_motor_node"
+        output="screen"
+        if="$(var use_kinect_motor)">
+    <param name="head_pose_topic" value="/hardware/head/current_pose"/>
+    <param name="invert_tilt" value="false"/>
+    <param name="angle_offset_deg" value="0.0"/>
+  </node>
+
+  <!-- Une map -> odom para visualizar y proyectar obstaculos sin AMCL. -->
+  <node pkg="tf2_ros"
+        exec="static_transform_publisher"
+        name="debug_map_to_odom"
+        args="--x 0 --y 0 --z 0 --roll 0 --pitch 0 --yaw 0 --frame-id map --child-frame-id odom"
+        if="$(var publish_static_map_to_odom)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
+
+  <!-- Mapas base para que obstacle_detector y map_augmenter tengan geometria de grid. -->
+  <node name="static_map_server"
+        pkg="nav2_map_server"
+        exec="map_server"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="yaml_filename" value="$(var static_map_file)"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
+
+  <node name="prohibition_map_server"
+        pkg="nav2_map_server"
+        exec="map_server"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="yaml_filename" value="$(var prohibition_map_file)"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <remap from="map" to="fixed_prohibition_layer_map"/>
+  </node>
+
+  <node name="lifecycle_manager_map"
+        pkg="nav2_lifecycle_manager"
+        exec="lifecycle_manager"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="autostart" value="true"/>
+    <param name="node_names" value="['static_map_server', 'prohibition_map_server']"/>
+  </node>
+
+  <!-- Nube cruda -> nube limpia, con markers de los prismas para RViz. -->
+  <node name="cloud_filter"
+        pkg="map_augmenter"
+        exec="cloud_filter_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="input_topic" value="$(var raw_point_cloud_topic)"/>
+    <param name="output_topic" value="$(var point_cloud_topic)"/>
+    <param name="base_link_name" value="base_link"/>
+
+    <param name="min_x" value="$(var cloud_min_x)"/>
+    <param name="max_x" value="$(var cloud_max_x)"/>
+    <param name="min_y" value="$(var cloud_min_y)"/>
+    <param name="max_y" value="$(var cloud_max_y)"/>
+    <param name="min_z" value="$(var cloud_min_z)"/>
+    <param name="max_z" value="$(var cloud_max_z)"/>
+
+    <param name="voxel_leaf_size" value="0.03"/>
+    <param name="input_downsampling" value="4"/>
+    <param name="processing_rate_hz" value="20.0"/>
+    <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
+    <param name="min_points_per_voxel" value="2"/>
+    <param name="min_neighbor_voxels" value="1"/>
+    <param name="publish_debug_markers" value="true"/>
+    <param name="debug" value="false"/>
+  </node>
+
+  <!-- Convierte la nube filtrada en /navigation/obstacles_map. -->
+  <node name="obstacle_detector"
+        pkg="map_augmenter"
+        exec="obstacle_detector_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_namespace" value="$(var use_namespace)"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="laser_scan_topic" value="$(var laser_scan_topic)"/>
+    <param name="point_cloud_topic" value="$(var point_cloud_topic)"/>
+    <param name="static_map_server" value="static_map_server/map"/>
+    <param name="base_link_name" value="base_link"/>
+    <param name="use_lidar" value="$(var use_lidar)"/>
+    <param name="use_point_cloud" value="$(var use_point_cloud)"/>
+    <param name="use_point_cloud2" value="false"/>
+    <param name="cloud_downsampling" value="1"/>
+    <param name="lidar_downsampling" value="1"/>
+    <param name="decay_factor" value="2"/>
+    <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
+    <!-- Filtro final por geometria de mapa:
+         cada celda necesita varios puntos y al menos una celda vecina consistente.
+         Esto reduce cuadros falsos por ruido aislado del Kinect. -->
+    <param name="cloud_min_points_per_cell" value="2"/>
+    <param name="cloud_min_neighbor_cells" value="1"/>
+
+    <param name="laser_max_x" value="$(var laser_max_x)"/>
+    <param name="laser_min_x" value="$(var laser_min_x)"/>
+    <param name="laser_max_y" value="$(var laser_max_y)"/>
+    <param name="laser_min_y" value="$(var laser_min_y)"/>
+    <param name="laser_max_z" value="$(var laser_max_z)"/>
+    <param name="laser_min_z" value="$(var laser_min_z)"/>
+
+    <param name="cloud_max_x" value="$(var cloud_max_x)"/>
+    <param name="cloud_min_x" value="$(var cloud_min_x)"/>
+    <param name="cloud_max_y" value="$(var cloud_max_y)"/>
+    <param name="cloud_min_y" value="$(var cloud_min_y)"/>
+    <param name="cloud_max_z" value="$(var cloud_max_z)"/>
+    <param name="cloud_min_z" value="$(var cloud_min_z)"/>
+  </node>
+
+  <!-- Mezcla mapa estatico + obstaculos temporales para ver el mapa que usaria el planner. -->
+  <node name="map_augmenter"
+        pkg="map_augmenter"
+        exec="map_augmenter_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_namespace" value="$(var use_namespace)"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="static_map_server" value="static_map_server/map"/>
+    <param name="prohibition_map_server" value="prohibition_map_server/map"/>
+    <param name="base_link_name" value="base_link"/>
+    <param name="decay_factor" value="0"/>
+    <!-- En debug usamos menor inflacion para distinguir el tamano real detectado
+         del margen de seguridad que despues necesita el robot para navegar. -->
+    <param name="inflation_radius" value="0.07"/>
+    <param name="cost_radius" value="0.25"/>
+    <param name="use_online" value="False"/>
+  </node>
+
+  <node pkg="rviz2"
+        exec="rviz2"
+        name="rviz2_kinect_obstacle_debug"
+        output="screen"
+        if="$(var use_rviz)"
+        args="-d $(var rviz_config)"/>
+
+</launch>

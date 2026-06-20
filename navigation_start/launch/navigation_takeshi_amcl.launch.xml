@@ -15,7 +15,8 @@
   <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/prohibition_maps/tidbots/map.yaml"/>
 
   <!-- ===== Sensor topics ===== -->
-  <arg name="point_cloud_topic"  default="/$(var namespace_hardware)/camera/points"/>
+  <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
+  <arg name="point_cloud_topic"  default="/$(var namespace_nav)/camera/points_filtered"/>
   <arg name="point_cloud_topic2" default="/$(var namespace_hardware)/camera/points"/>
   <arg name="laser_scan_topic"   default="/$(var namespace_hardware)/base/scan"/>
   <arg name="cmd_vel_topic"      default="/$(var namespace_hardware)/base/cmd_vel"/>
@@ -28,7 +29,14 @@
 
   <!-- ===== Tuning / thresholds ===== -->
   <arg name="cloud_downsampling"     default="5"/>
+  <arg name="cloud_filter_input_qos_mode" default="dual"/>
+  <arg name="cloud_filter_debug" default="false"/>
+  <arg name="cloud_filter_min_points_per_voxel" default="2"/>
+  <arg name="cloud_filter_min_neighbor_voxels" default="2"/>
   <arg name="lidar_downsampling"     default="1"/>
+  <arg name="static_obstacle_ignore_radius" default="0.10"/>
+  <arg name="obstacle_cloud_min_points_per_cell" default="2"/>
+  <arg name="obstacle_cloud_min_neighbor_cells" default="2"/>
   <arg name="cloud_points_threshold" default="100"/>
   <arg name="lidar_points_threshold" default="20"/>
   <arg name="mvn_pln_patience"       default="True"/>
@@ -60,6 +68,10 @@
   <arg name="augmenter_inflation_radius" default="0.15"/>
   <arg name="augmenter_cost_radius"      default="0.25"/>
   <arg name="augmenter_use_online"       default="False"/>
+  <arg name="robot_radius" default="0.35"/>
+  <arg name="static_obstacle_inflation_radius" default="0.05"/>
+  <arg name="dynamic_obstacle_inflation_radius" default="0.12"/>
+  <arg name="map_augmenter_debug" default="false"/>
 
   <!-- ===== Obstacle Detector ===== -->
   <arg name="detector_decay_factor" default="10"/>
@@ -158,7 +170,37 @@
     <param name="decay_factor"           value="$(var augmenter_decay_factor)"/>
     <param name="inflation_radius"       value="$(var augmenter_inflation_radius)"/>
     <param name="cost_radius"            value="$(var augmenter_cost_radius)"/>
+    <param name="robot_radius"           value="$(var robot_radius)"/>
+    <param name="static_obstacle_inflation_radius" value="$(var static_obstacle_inflation_radius)"/>
+    <param name="dynamic_obstacle_inflation_radius" value="$(var dynamic_obstacle_inflation_radius)"/>
+    <param name="debug_maps"             value="$(var map_augmenter_debug)"/>
     <param name="use_online"             value="$(var augmenter_use_online)"/>
+  </node>
+
+  <node name="cloud_filter"
+        pkg="map_augmenter"
+        exec="cloud_filter_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="input_topic" value="$(var raw_point_cloud_topic)"/>
+    <param name="output_topic" value="$(var point_cloud_topic)"/>
+    <param name="input_qos_mode" value="$(var cloud_filter_input_qos_mode)"/>
+    <param name="base_link_name" value="$(var base_link_name)"/>
+    <param name="min_x" value="$(var cloud_min_x)"/>
+    <param name="max_x" value="$(var cloud_max_x)"/>
+    <param name="min_y" value="$(var cloud_min_y)"/>
+    <param name="max_y" value="$(var cloud_max_y)"/>
+    <param name="min_z" value="$(var cloud_min_z)"/>
+    <param name="max_z" value="$(var cloud_max_z)"/>
+    <param name="voxel_leaf_size" value="0.03"/>
+    <param name="input_downsampling" value="4"/>
+    <param name="processing_rate_hz" value="20.0"/>
+    <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
+    <param name="min_points_per_voxel" value="$(var cloud_filter_min_points_per_voxel)"/>
+    <param name="min_neighbor_voxels" value="$(var cloud_filter_min_neighbor_voxels)"/>
+    <param name="debug" value="$(var cloud_filter_debug)"/>
   </node>
 
   <node name="obstacle_detector"
@@ -178,6 +220,10 @@
     <param name="cloud_downsampling" value="$(var cloud_downsampling)"/>
     <param name="lidar_downsampling" value="$(var lidar_downsampling)"/>
     <param name="decay_factor"       value="$(var detector_decay_factor)"/>
+    <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
+    <param name="static_obstacle_ignore_radius" value="$(var static_obstacle_ignore_radius)"/>
+    <param name="cloud_min_points_per_cell" value="$(var obstacle_cloud_min_points_per_cell)"/>
+    <param name="cloud_min_neighbor_cells" value="$(var obstacle_cloud_min_neighbor_cells)"/>
     <param name="laser_min_x"        value="$(var laser_min_x)"/>
     <param name="laser_max_x"        value="$(var laser_max_x)"/>
     <param name="laser_min_y"        value="$(var laser_min_y)"/>

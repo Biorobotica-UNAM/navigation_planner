@@ -33,6 +33,7 @@
 #include <vector>
 #include <chrono>
 #include <exception>
+#include <cmath>
 
 #define RATE 10
 
@@ -88,22 +89,22 @@ public:
         //############
         // Publishers
         pub_pot_fields_enable_ = this->create_publisher<std_msgs::msg::Bool>(
-            make_name("/potential_fields/enable"), 
+            make_name("/potential_fields/enable"),
             rclcpp::QoS(10).transient_local());
         pub_pot_fields_enable_cloud_ = this->create_publisher<std_msgs::msg::Bool>(
-            make_name("/potential_fields/enable_cloud"), 
+            make_name("/potential_fields/enable_cloud"),
             rclcpp::QoS(10).transient_local());
         pub_goal_path_ = this->create_publisher<nav_msgs::msg::Path>(
-            make_name("/simple_move/goal_path"), 
+            make_name("/simple_move/goal_path"),
             rclcpp::QoS(10).transient_local());
         pub_goal_dist_angle_ = this->create_publisher<std_msgs::msg::Float32MultiArray>(
-            make_name("/simple_move/goal_dist_angle"), 
+            make_name("/simple_move/goal_dist_angle"),
             rclcpp::QoS(10).transient_local());
         pub_status_ = this->create_publisher<actionlib_msgs::msg::GoalStatus>(
-            make_name("/status"), 
+            make_name("/status"),
             rclcpp::QoS(10).transient_local());
         pub_simple_move_stop_ = this->create_publisher<std_msgs::msg::Empty>(
-            make_name("/simple_move/stop"), 
+            make_name("/simple_move/stop"),
             rclcpp::QoS(10).transient_local());
 
         pub_navigation_stop_ = this->create_publisher<std_msgs::msg::Empty>(
@@ -114,38 +115,38 @@ public:
         // Subscribers
         //// stop
         sub_general_stop_ = this->create_subscription<std_msgs::msg::Empty>(
-            make_name("/stop"), 
-            rclcpp::SensorDataQoS(), 
+            make_name("/stop"),
+            rclcpp::SensorDataQoS(),
             std::bind(&MotionPlannerNode::callback_general_stop, this, std::placeholders::_1));
 
         //sub_nav_ctrl_stop_ = this->create_subscription<std_msgs::msg::Empty>(
-        //    make_name("/stop"), 
-        //    rclcpp::SensorDataQoS(), 
+        //    make_name("/stop"),
+        //    rclcpp::SensorDataQoS(),
         //    std::bind(&MotionPlannerNode::callback_navigation_stop, this, std::placeholders::_1));
 
         //// goal
         sub_simple_goal_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-            "/nav_control/goal", 
-            rclcpp::SensorDataQoS(), 
+            "/nav_control/goal",
+            rclcpp::SensorDataQoS(),
             std::bind(&MotionPlannerNode::callback_simple_goal, this, std::placeholders::_1));
-        
+
         sub_move_goal_status_ = this->create_subscription<actionlib_msgs::msg::GoalStatus>(
-            make_name("/simple_move/goal_reached"), 
-            rclcpp::SensorDataQoS(), 
+            make_name("/simple_move/goal_reached"),
+            rclcpp::SensorDataQoS(),
             std::bind(&MotionPlannerNode::callback_simple_move_goal_status, this, std::placeholders::_1));
 
         //// motion
         sub_set_patience_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/set_patience"), 
-            rclcpp::SensorDataQoS(), 
+            make_name("/set_patience"),
+            rclcpp::SensorDataQoS(),
             std::bind(&MotionPlannerNode::callback_set_patience, this, std::placeholders::_1));
 
         sub_collision_risk_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/potential_fields/collision_risk"), 
-            rclcpp::SensorDataQoS(), 
+            make_name("/potential_fields/collision_risk"),
+            rclcpp::SensorDataQoS(),
             std::bind(&MotionPlannerNode::callback_collision_risk, this, std::placeholders::_1));
 
-      
+
         //############
         // Wait for transforms
         wait_for_transforms("map", base_link_name_);
@@ -244,7 +245,7 @@ private:
     rclcpp::Time no_cloud_pot_fields_start_time_;
     rclcpp::Duration no_cloud_pot_fields_duration_{2, 0}; // 2 seconds
     bool is_temporary_no_cloud_pot_fields_ = false;
-    
+
     rclcpp::Time pot_fields_start_time_;
 
     //############
@@ -349,14 +350,14 @@ private:
         return name;
     }
 
-    // Wait for transforms 
+    // Wait for transforms
     void wait_for_transforms(const std::string &target_frame, const std::string &source_frame)
     {
         RCLCPP_INFO(this->get_logger(),
                     "MotionPlanner.-> Waiting for transform from '%s' to '%s'...", source_frame.c_str(), target_frame.c_str());
 
         rclcpp::Time start_time = this->now();
-        rclcpp::Duration timeout = rclcpp::Duration::from_seconds(10.0); 
+        rclcpp::Duration timeout = rclcpp::Duration::from_seconds(10.0);
 
         bool transform_ok = false;
 
@@ -434,12 +435,12 @@ private:
     void callback_general_stop(const std_msgs::msg::Empty::SharedPtr msg)
     {
         (void)msg;
-        try 
+        try
         {
             std::cout << "MotionPlanner.-> General Stop signal received" << std::endl;
             stop_     = true;
-        } 
-        catch (const std::exception &e) 
+        }
+        catch (const std::exception &e)
         {
             RCLCPP_ERROR(this->get_logger(), "MotionPlanner.-> Error processing callback_general_stop: %s", e.what());
         }
@@ -448,42 +449,42 @@ private:
     void callback_navigation_stop(const std_msgs::msg::Empty::SharedPtr msg)
     {
         (void)msg;
-        try 
+        try
         {
             std::cout << "MotionPlanner.-> Navigation Stop signal received" << std::endl;
             stop_     = true;
-        } 
-        catch (const std::exception &e) 
+        }
+        catch (const std::exception &e)
         {
             RCLCPP_ERROR(this->get_logger(), "MotionPlanner.-> Error processing callback_navigation_stop: %s", e.what());
         }
     }
 
-    void callback_simple_goal(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
-    {
-        try 
-        {
-            std::cout << "MotionPlanner.-> New goal received." << std::endl;
-            global_goal_ = msg->pose;
-            new_global_goal_ = true;
-        } 
-        catch (const std::exception &e) 
+	    void callback_simple_goal(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+	    {
+	        try
+	        {
+	            std::cout << "MotionPlanner.-> New goal received." << std::endl;
+	            global_goal_ = msg->pose;
+	            new_global_goal_ = true;
+	        }
+        catch (const std::exception &e)
         {
             RCLCPP_ERROR(this->get_logger(), "MotionPlanner.-> Error processing callback_simple_goal: %s", e.what());
         }
     }
 
-    void callback_simple_move_goal_status(const actionlib_msgs::msg::GoalStatus::SharedPtr msg)
-    {
-        try 
-        {
-            simple_move_goal_status_ = *msg;
+	    void callback_simple_move_goal_status(const actionlib_msgs::msg::GoalStatus::SharedPtr msg)
+	    {
+	        try
+	        {
+	            simple_move_goal_status_ = *msg;
 
-            std::stringstream ss;
-            ss << msg->goal_id.id;
-            ss >> simple_move_status_id_;
-        } 
-        catch (const std::exception &e) 
+	            std::stringstream ss;
+	            ss << msg->goal_id.id;
+	            ss >> simple_move_status_id_;
+	        }
+        catch (const std::exception &e)
         {
             RCLCPP_ERROR(this->get_logger(), "MotionPlanner.-> Error processing callback_simple_move_goal_status: %s", e.what());
         }
@@ -491,12 +492,12 @@ private:
 
     void callback_set_patience(const std_msgs::msg::Bool::SharedPtr msg)
     {
-        try 
+        try
         {
             std::cout << "MvnPln.->Set patience: " << (msg->data ? "True" : "False") << std::endl;
             patience_ = msg->data;
-        } 
-        catch (const std::exception &e) 
+        }
+        catch (const std::exception &e)
         {
             RCLCPP_ERROR(this->get_logger(), "MotionPlanner.-> Error processing callback_set_patience: %s", e.what());
         }
@@ -504,14 +505,14 @@ private:
 
     void callback_collision_risk(const std_msgs::msg::Bool::SharedPtr msg)
     {
-        try 
+        try
         {
             pot_fields_received_ = true;
             is_pot_fields_response_ = true;
 
             collision_risk_ = msg->data;
-        } 
-        catch (const std::exception &e) 
+        }
+        catch (const std::exception &e)
         {
             pot_fields_received_ = false;
             is_pot_fields_response_ = true;
@@ -523,14 +524,14 @@ private:
     //Motion Planner additional functions
     void get_plan_path_from_augmented_map(float robot_x, float robot_y, float goal_x, float goal_y)
     {
-        threads_.push_back(std::thread(std::bind(&MotionPlannerNode::plan_path_from_augmented_map, this, 
+        threads_.push_back(std::thread(std::bind(&MotionPlannerNode::plan_path_from_augmented_map, this,
                            robot_x, robot_y, goal_x, goal_y)));
     }
 
-    void plan_path_from_augmented_map(
-        float robot_x, float robot_y,
-        float goal_x, float goal_y)
-    {
+	    void plan_path_from_augmented_map(
+	        float robot_x, float robot_y,
+	        float goal_x, float goal_y)
+	    {
         is_path_ = false;
         is_path_response_ = false;
         // Wait for service to be available
@@ -544,22 +545,22 @@ private:
         request->start.pose.position.y = robot_y;
         request->start.header.frame_id = "map";
 
-        request->goal.pose.position.x = goal_x;
-        request->goal.pose.position.y = goal_y;
-        request->goal.header.frame_id = "map";
+	        request->goal.pose.position.x = goal_x;
+	        request->goal.pose.position.y = goal_y;
+	        request->goal.header.frame_id = "map";
 
-        auto result_future = clt_plan_path_augmented_->async_send_request(request);
+	        auto result_future = clt_plan_path_augmented_->async_send_request(request);
 
         try
         {
-            this->path_ = result_future.get()->plan;
-            if(path_.poses.size() > 0)
-                this->is_path_ = true;
+	            this->path_ = result_future.get()->plan;
+	            if(path_.poses.size() > 0)
+	                this->is_path_ = true;
 
             this->is_path_response_ = true;
 
-            RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Path received successfully with size: %ld", path_.poses.size());
-        }
+	            RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Path received successfully with size: %ld", path_.poses.size());
+	        }
         catch (const std::exception &e)
         {
             this->is_path_response_ = true;
@@ -589,12 +590,14 @@ private:
 
             return;
         }
-        catch (const tf2::TransformException &ex)
-        {
-            //RCLCPP_WARN(this->get_logger(), "SimpleMove.-> TF Exception: %s", ex.what());
-            robot_x_ = robot_y_ = robot_t_ = 0.0f;
-            return;
-        }
+	        catch (const tf2::TransformException &ex)
+	        {
+	            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                    "MotionPlanner.-> map TF lookup failed (%s -> map): %s",
+                                    base_link_name_.c_str(), ex.what());
+	            robot_x_ = robot_y_ = robot_t_ = 0.0f;
+	            return;
+	        }
     }
 
     int publish_status(
@@ -740,7 +743,7 @@ private:
 
     //############
     //Simple Move main processing
-    void motion_planner_processing() 
+    void motion_planner_processing()
     {
         if (!services_ready_)
         {
@@ -779,8 +782,8 @@ private:
                 state = SM_STATE::WAITING_FOR_TASK;
                 break;
             }
-            
-            
+
+
             case SM_STATE::WAITING_FOR_TASK:
             {
                 if(new_global_goal_)
@@ -790,7 +793,7 @@ private:
                     if(current_status == actionlib_msgs::msg::GoalStatus::ACTIVE)
                         current_status = publish_status(
                             actionlib_msgs::msg::GoalStatus::ABORTED,
-                            goal_id, 
+                            goal_id,
                             "Cancelling current movement."
                         );
                     goal_id++;
@@ -805,7 +808,7 @@ private:
                 break;
             }
 
-            
+
             case SM_STATE::CALCULATE_PATH:
             {
                 get_robot_position();
@@ -862,8 +865,8 @@ private:
 
                 break;
             }
-            
-            
+
+
             case SM_STATE::WAIT_FOR_PATH_RESPONSE:
             {
                 if (!is_path_response_) {
@@ -915,7 +918,7 @@ private:
             case SM_STATE::WAIT_FOR_INSIDE_OBSTACLES_RESPONSE:
             {
                 if (!is_in_obstacles_response_) {
-                    RCLCPP_INFO(this->get_logger(), 
+                    RCLCPP_INFO(this->get_logger(),
                     "MotionPlanner.[WAIT_INSIDE_OBSTACLES_RESPONSE] Waiting for /map_augmenter/is_inside_obstacles response...");
                     break;
                 }
@@ -988,15 +991,15 @@ private:
                 if (!are_there_obs_) {
                     std::cout << "MotionPlanner.->There are no temporal obstacles. Announcing failure." << std::endl;
                     current_status = publish_status(
-                        actionlib_msgs::msg::GoalStatus::ABORTED, 
-                        goal_id, 
+                        actionlib_msgs::msg::GoalStatus::ABORTED,
+                        goal_id,
                         "Cannot calculate path from start to goal point"
                     );
                     state = SM_STATE::INIT;
                 } else {
                     std::cout << "MotionPlanner.->Temporal obstacles detected. Waiting for them to move." << std::endl;
                     current_status = publish_status(
-                        actionlib_msgs::msg::GoalStatus::ACTIVE, 
+                        actionlib_msgs::msg::GoalStatus::ACTIVE,
                         goal_id,
                         "Waiting for temporal obstacles to move"
                     );
@@ -1058,7 +1061,7 @@ private:
                 break;
             }
 
-                
+
             case SM_STATE::ENABLE_POT_FIELDS:
             {
                 msg_bool.data = true;
@@ -1164,11 +1167,11 @@ private:
                     break;
                 }*/
 
-                get_robot_position();
-                error = sqrt(pow(global_goal_.position.x - robot_x_, 2) + pow(global_goal_.position.y - robot_y_, 2));
-                
-                if (is_temporary_no_cloud_pot_fields_ && 
-                    (this->now() - no_cloud_pot_fields_start_time_) > no_cloud_pot_fields_duration_) 
+	                get_robot_position();
+	                error = sqrt(pow(global_goal_.position.x - robot_x_, 2) + pow(global_goal_.position.y - robot_y_, 2));
+
+                if (is_temporary_no_cloud_pot_fields_ &&
+                    (this->now() - no_cloud_pot_fields_start_time_) > no_cloud_pot_fields_duration_)
                 {
                     msg_bool.data = true;
                     pub_pot_fields_enable_cloud_->publish(msg_bool);
@@ -1181,12 +1184,12 @@ private:
                 {
                     near_goal_sent = true;
                     std::cout << "MotionPlanner.->Error less than proximity criterion. Sending near goal point status." << std::endl;
-                    publish_status(actionlib_msgs::msg::GoalStatus::ACTIVE, 
-                        goal_id, 
+                    publish_status(actionlib_msgs::msg::GoalStatus::ACTIVE,
+                        goal_id,
                         "Near goal point"
                     );
                 }
-                if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::SUCCEEDED && 
+                if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::SUCCEEDED &&
                                                       simple_move_status_id_ == simple_move_sequencer)
                 {
                     simple_move_goal_status_.status = 0;
@@ -1290,7 +1293,7 @@ private:
 
             case SM_STATE::WAIT_FOR_ANGLE_CORRECTED:
             {
-                if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::SUCCEEDED && 
+                if(simple_move_goal_status_.status == actionlib_msgs::msg::GoalStatus::SUCCEEDED &&
                                                       simple_move_status_id_ == -1)
                 {
                     simple_move_goal_status_.status = 0;
@@ -1311,8 +1314,8 @@ private:
             {
                 std::cout << "MotionPlanner.-> TASK FINISHED." << std::endl;
                 current_status = publish_status(
-                    actionlib_msgs::msg::GoalStatus::SUCCEEDED, 
-                    goal_id, 
+                    actionlib_msgs::msg::GoalStatus::SUCCEEDED,
+                    goal_id,
                     "Global goal point reached"
                 );
                 state = SM_STATE::INIT;
@@ -1326,8 +1329,8 @@ private:
                 return;
             }
 
-        } 
-        catch (const std::exception& e) 
+        }
+        catch (const std::exception& e)
         {
             RCLCPP_ERROR(this->get_logger(), "MotionPlanner.-> Error in MotionPlanner processing: %s", e.what());
         }
@@ -1343,8 +1346,8 @@ int main(int argc, char **argv)
     rclcpp::executors::MultiThreadedExecutor executor;
     executor.add_node(node);
     executor.spin();
-    
+
     rclcpp::shutdown();
-    
+
     return 0;
 }
