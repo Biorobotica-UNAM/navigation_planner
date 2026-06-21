@@ -66,8 +66,8 @@
   <!-- use_online=False: static map cached at startup; obstacle_detector manages detections -->
   <!-- decay=0 because obstacle_detector handles its own decay independently -->
   <arg name="augmenter_decay_factor"     default="0"/>
-  <arg name="augmenter_inflation_radius" default="0.10"/>
-  <arg name="augmenter_cost_radius"      default="0.25"/>
+  <arg name="augmenter_inflation_radius" default="0.15"/>
+  <arg name="augmenter_cost_radius"      default="0.30"/>
   <arg name="augmenter_use_online"       default="False"/>
   <arg name="robot_radius" default="0.35"/>
   <arg name="static_obstacle_inflation_radius" default="0.05"/>
