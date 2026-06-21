@@ -36,6 +36,9 @@ public:
     // Default false: solo launches SLAM explicitos deben permitir planear sobre desconocido.
     this->declare_parameter("unknown_as_free",        false);
     this->declare_parameter("free_space_padding",     0.0);
+    this->declare_parameter("prefer_known_space",     false);
+    this->declare_parameter("unknown_space_cost",     2);
+    this->declare_parameter("unknown_space_cost_radius", 0.0);
 
     this->declare_parameter("laser_min_x",            -10.0);
     this->declare_parameter("laser_max_x",            10.0);
@@ -77,6 +80,9 @@ public:
     this->get_parameter("use_online", use_online_);
     this->get_parameter("unknown_as_free", unknown_as_free_);
     this->get_parameter("free_space_padding", free_space_padding_);
+    this->get_parameter("prefer_known_space", prefer_known_space_);
+    this->get_parameter("unknown_space_cost", unknown_space_cost_);
+    this->get_parameter("unknown_space_cost_radius", unknown_space_cost_radius_);
     this->get_parameter("decay_factor", decay_factor_);
     this->get_parameter("robot_radius", robot_radius_);
     this->get_parameter("static_obstacle_inflation_radius", static_obstacle_inflation_radius_);
@@ -100,6 +106,8 @@ public:
     robot_radius_ = std::max(0.0, robot_radius_);
     static_obstacle_inflation_radius_ = std::max(0.0, static_obstacle_inflation_radius_);
     dynamic_obstacle_inflation_radius_ = std::max(0.0, dynamic_obstacle_inflation_radius_);
+    unknown_space_cost_ = std::clamp(unknown_space_cost_, 0, 99);
+    unknown_space_cost_radius_ = std::max(0.0, unknown_space_cost_radius_);
 
     // param callback
     param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -178,6 +186,7 @@ private:
   nav_msgs::msg::OccupancyGrid static_obstacle_map_;
   nav_msgs::msg::OccupancyGrid prohibition_map_;
   nav_msgs::msg::OccupancyGrid static_cost_map_;
+  nav_msgs::msg::OccupancyGrid unknown_space_cost_map_;
   nav_msgs::msg::OccupancyGrid persistent_cloud_map_;
 
   nav_msgs::msg::OccupancyGrid obstacles_map_;          // recibido
@@ -195,7 +204,10 @@ private:
   bool use_namespace_{false};
   bool use_online_{false};
   bool unknown_as_free_{false};
+  bool prefer_known_space_{false};
   double free_space_padding_{0.0};
+  int unknown_space_cost_{2};
+  double unknown_space_cost_radius_{0.0};
   std::uint64_t persistent_cloud_signature_{0};
   int decay_factor_{10};
   double robot_radius_{0.35};
@@ -260,7 +272,8 @@ private:
   {
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = true;
-    bool cost_radius_changed = false;
+    bool planning_cost_changed = false;
+    bool unknown_preference_changed = false;
 
     for (const auto &p : params)
     {
@@ -269,6 +282,21 @@ private:
       else if (n == "use_online") use_online_ = p.as_bool();
       else if (n == "unknown_as_free") unknown_as_free_ = p.as_bool();
       else if (n == "free_space_padding") free_space_padding_ = p.as_double();
+      else if (n == "prefer_known_space") {
+        prefer_known_space_ = p.as_bool();
+        planning_cost_changed = true;
+        unknown_preference_changed = true;
+      }
+      else if (n == "unknown_space_cost") {
+        unknown_space_cost_ = std::clamp(static_cast<int>(p.as_int()), 0, 99);
+        planning_cost_changed = true;
+        unknown_preference_changed = true;
+      }
+      else if (n == "unknown_space_cost_radius") {
+        unknown_space_cost_radius_ = std::max(0.0, p.as_double());
+        planning_cost_changed = true;
+        unknown_preference_changed = true;
+      }
       else if (n == "decay_factor") decay_factor_ = p.as_int();
       else if (n == "robot_radius") robot_radius_ = std::max(0.0, p.as_double());
       else if (n == "static_obstacle_inflation_radius") static_obstacle_inflation_radius_ = std::max(0.0, p.as_double());
@@ -281,7 +309,7 @@ private:
       else if (n == "inflation_radius") inflation_radius_ = p.as_double();
       else if (n == "cost_radius") {
         cost_radius_ = std::max(0.0, p.as_double());
-        cost_radius_changed = true;
+        planning_cost_changed = true;
       }
       else if (n == "static_map_server") static_map_server_ = p.as_string();
       else if (n == "prohibition_map_server") prohibition_map_server_ = p.as_string();
@@ -291,8 +319,10 @@ private:
         // Mantén compat: ignora los que no usa este nodo (sensores ahora viven en obstacle_detector)
       }
     }
-    if (cost_radius_changed && static_ready_ && !static_map_.data.empty()) {
-      static_cost_map_ = get_cost_map(static_map_, static_cast<float>(cost_radius_));
+    if (unknown_preference_changed && services_ready_) {
+      get_first_maps();
+    } else if (planning_cost_changed && static_ready_ && !static_map_.data.empty()) {
+      static_cost_map_ = build_planning_cost_map(static_map_);
     }
     return result;
   }
@@ -431,6 +461,44 @@ private:
     return padded;
   }
 
+  nav_msgs::msg::OccupancyGrid pad_cost_map_with_value(
+    const nav_msgs::msg::OccupancyGrid &map,
+    const int8_t padding_value) const
+  {
+    if (!unknown_as_free_ || free_space_padding_ <= 0.0 ||
+        map.info.resolution <= 0.0f || map.info.width == 0 || map.info.height == 0 ||
+        map.data.empty()) {
+      return map;
+    }
+
+    const int old_width = static_cast<int>(map.info.width);
+    const int old_height = static_cast<int>(map.info.height);
+    const int padding_cells = static_cast<int>(std::ceil(free_space_padding_ / map.info.resolution));
+    if (padding_cells <= 0) return map;
+
+    const int new_width = old_width + 2 * padding_cells;
+    const int new_height = old_height + 2 * padding_cells;
+
+    nav_msgs::msg::OccupancyGrid padded = map;
+    padded.info.width = static_cast<uint32_t>(new_width);
+    padded.info.height = static_cast<uint32_t>(new_height);
+    padded.info.origin.position.x -= padding_cells * map.info.resolution;
+    padded.info.origin.position.y -= padding_cells * map.info.resolution;
+    padded.data.assign(
+      static_cast<size_t>(new_width) * static_cast<size_t>(new_height),
+      padding_value);
+
+    for (int y = 0; y < old_height; ++y) {
+      for (int x = 0; x < old_width; ++x) {
+        const int old_idx = y * old_width + x;
+        const int new_idx = (y + padding_cells) * new_width + (x + padding_cells);
+        padded.data[new_idx] = map.data[old_idx];
+      }
+    }
+
+    return padded;
+  }
+
   bool same_geometry(const nav_msgs::msg::OccupancyGrid &a,
                      const nav_msgs::msg::OccupancyGrid &b) const
   {
@@ -478,6 +546,72 @@ private:
       signature *= 1099511628211ULL;
     }
     return has_occupied ? signature : 0;
+  }
+
+  nav_msgs::msg::OccupancyGrid build_unknown_space_cost_map(
+    const nav_msgs::msg::OccupancyGrid &raw_map) const
+  {
+    if (!prefer_known_space_ || unknown_space_cost_ <= 0 ||
+        raw_map.info.resolution <= 0.0f || raw_map.data.empty()) {
+      return nav_msgs::msg::OccupancyGrid();
+    }
+
+    nav_msgs::msg::OccupancyGrid unknown_cost = raw_map;
+    const int8_t unknown_cost_value = static_cast<int8_t>(unknown_space_cost_);
+    for (size_t i = 0; i < unknown_cost.data.size(); ++i) {
+      unknown_cost.data[i] = raw_map.data[i] < 0 ? unknown_cost_value : 0;
+    }
+
+    unknown_cost = pad_cost_map_with_value(unknown_cost, unknown_cost_value);
+    if (unknown_space_cost_radius_ <= 0.0) {
+      return unknown_cost;
+    }
+
+    nav_msgs::msg::OccupancyGrid expanded = unknown_cost;
+    const int steps = static_cast<int>(std::ceil(
+      unknown_space_cost_radius_ / unknown_cost.info.resolution));
+    if (steps <= 0) return unknown_cost;
+
+    const int width = static_cast<int>(unknown_cost.info.width);
+    const int height = static_cast<int>(unknown_cost.info.height);
+    for (int y = 0; y < height; ++y) {
+      for (int x = 0; x < width; ++x) {
+        const int idx = y * width + x;
+        if (unknown_cost.data[idx] <= 0) continue;
+
+        for (int dy = -steps; dy <= steps; ++dy) {
+          for (int dx = -steps; dx <= steps; ++dx) {
+            if (dx * dx + dy * dy > steps * steps) continue;
+            const int nx = x + dx;
+            const int ny = y + dy;
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            const int nidx = ny * width + nx;
+            expanded.data[nidx] = std::max(expanded.data[nidx], unknown_cost_value);
+          }
+        }
+      }
+    }
+
+    return expanded;
+  }
+
+  void apply_unknown_space_cost(nav_msgs::msg::OccupancyGrid &cost_map) const
+  {
+    if (!prefer_known_space_ || unknown_space_cost_map_.data.empty()) return;
+
+    if (!same_geometry(cost_map, unknown_space_cost_map_)) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "MapAugmenter.-> unknown_space_cost_map geometry does not match cost map; known-space preference disabled for this update.");
+      return;
+    }
+
+    for (size_t i = 0; i < cost_map.data.size(); ++i) {
+      if (unknown_space_cost_map_.data[i] <= 0 || cost_map.data[i] >= 100) continue;
+      const int updated = static_cast<int>(cost_map.data[i]) +
+                          static_cast<int>(unknown_space_cost_map_.data[i]);
+      cost_map.data[i] = static_cast<int8_t>(std::min(99, updated));
+    }
   }
 
   nav_msgs::msg::OccupancyGrid project_obstacles_to_static_map(
@@ -596,6 +730,13 @@ private:
     return cost_map;
   }
 
+  nav_msgs::msg::OccupancyGrid build_planning_cost_map(const nav_msgs::msg::OccupancyGrid &planning_map)
+  {
+    auto cost_map = get_cost_map(planning_map, static_cast<float>(cost_radius_));
+    apply_unknown_space_cost(cost_map);
+    return cost_map;
+  }
+
   void get_relative_position(const std::string &target_frame, const std::string &source_frame,
                             float &robot_x, float &robot_y, float &robot_t)
   {
@@ -694,6 +835,7 @@ private:
       return;
     }
 
+    unknown_space_cost_map_ = build_unknown_space_cost_map(static_map_);
     convert_unknown_to_free(static_map_);
     auto base_map = pad_map_with_free_space(static_map_);
     const auto merged_static_map = merge_maps(base_map, prohibition_map_);
@@ -705,7 +847,7 @@ private:
     static_map_ = inflate_map(
       effective_static_map,
       static_cast<float>(static_navigation_clearance_radius()));
-    static_cost_map_ = get_cost_map(static_map_, static_cast<float>(cost_radius_));
+    static_cost_map_ = build_planning_cost_map(static_map_);
 
     // init obstáculos con geometría correcta (si todavía no llega del detector)
     obstacles_map_ = static_map_;
@@ -927,6 +1069,7 @@ private:
             try {
               auto new_map = fut.get()->map;
               if (new_map.info.width == 0) return;
+              unknown_space_cost_map_ = build_unknown_space_cost_map(new_map);
               convert_unknown_to_free(new_map);
               new_map = pad_map_with_free_space(new_map);
 
@@ -940,7 +1083,7 @@ private:
               auto planning_static = inflate_map(
                 effective_static_map,
                 static_cast<float>(static_navigation_clearance_radius()));
-              static_cost_map_ = get_cost_map(planning_static, static_cast<float>(cost_radius_));
+              static_cost_map_ = build_planning_cost_map(planning_static);
 
               // If the SLAM map grew, reset obstacles_map_ to the new size
               if (!same_geometry(planning_static, static_map_)) {

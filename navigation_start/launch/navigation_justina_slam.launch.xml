@@ -86,6 +86,10 @@
   <!-- Solo SLAM: rectangulo libre alrededor del mapa actual, en todas direcciones
        (frente, atras y laterales), para planear mientras SLAM va rellenando el mapa. -->
   <arg name="slam_free_space_padding"     default="10.0"/>
+  <!-- Preferencia suave: lo desconocido sigue siendo navegable, pero cuesta un poco mas. -->
+  <arg name="prefer_known_space"          default="True"/>
+  <arg name="unknown_space_cost"          default="2"/>
+  <arg name="unknown_space_cost_radius"   default="0.0"/>
 
   <!-- ===== Obstacle Detector ===== -->
   <arg name="detector_decay_factor" default="2"/>
@@ -268,6 +272,9 @@
          tratandolas como libres mientras el mapa se construye. No usar en AMCL/mapa fijo. -->
     <param name="unknown_as_free"         value="True"/>
     <param name="free_space_padding"      value="$(var slam_free_space_padding)"/>
+    <param name="prefer_known_space"      value="$(var prefer_known_space)"/>
+    <param name="unknown_space_cost"      value="$(var unknown_space_cost)"/>
+    <param name="unknown_space_cost_radius" value="$(var unknown_space_cost_radius)"/>
   </node>
 
   <node name="cloud_filter"
