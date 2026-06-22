@@ -96,7 +96,7 @@
   <!-- Herramienta experimental: promueve obstaculos Kinect muy confirmados a capa persistente
        y map_augmenter la integra automaticamente al mapa efectivo de navegacion. -->
   <arg name="persistent_cloud_obstacles_enabled" default="True"/>
-  <arg name="persistent_cloud_hits_required" default="4"/>
+  <arg name="persistent_cloud_hits_required" default="2"/>
   <arg name="persistent_cloud_evidence_decay" default="1"/>
   <arg name="persistent_cloud_min_range" default="0.35"/>
   <arg name="persistent_cloud_max_range" default="2.80"/>

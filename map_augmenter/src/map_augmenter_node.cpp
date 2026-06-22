@@ -517,17 +517,20 @@ private:
       return base_map;
     }
 
-    if (!same_geometry(base_map, persistent_cloud_map_)) {
+    nav_msgs::msg::OccupancyGrid persistent_layer;
+    if (same_geometry(base_map, persistent_cloud_map_)) {
+      persistent_layer = persistent_cloud_map_;
+    } else {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000,
-        "MapAugmenter.-> persistent_cloud_map geometry does not match base map; not burning into base.");
-      return base_map;
+        "MapAugmenter.-> persistent_cloud_map geometry does not match base map; reprojecting into base.");
+      persistent_layer = project_grid_to_geometry(persistent_cloud_map_, base_map);
     }
 
     nav_msgs::msg::OccupancyGrid burned = base_map;
     for (size_t i = 0; i < burned.data.size(); ++i) {
-      if (persistent_cloud_map_.data[i] > 0) {
-        burned.data[i] = std::max(burned.data[i], persistent_cloud_map_.data[i]);
+      if (persistent_layer.data[i] > 0) {
+        burned.data[i] = std::max(burned.data[i], persistent_layer.data[i]);
       }
     }
     return burned;
@@ -617,36 +620,43 @@ private:
   nav_msgs::msg::OccupancyGrid project_obstacles_to_static_map(
       const nav_msgs::msg::OccupancyGrid &obstacles) const
   {
-    nav_msgs::msg::OccupancyGrid projected = static_map_;
+    return project_grid_to_geometry(obstacles, static_map_);
+  }
+
+  nav_msgs::msg::OccupancyGrid project_grid_to_geometry(
+      const nav_msgs::msg::OccupancyGrid &source,
+      const nav_msgs::msg::OccupancyGrid &target_geometry) const
+  {
+    nav_msgs::msg::OccupancyGrid projected = target_geometry;
     for (auto &cell : projected.data) cell = 0;
 
-    if (obstacles.info.resolution <= 0.0f || obstacles.data.empty() ||
-        static_map_.info.resolution <= 0.0f || static_map_.data.empty()) {
+    if (source.info.resolution <= 0.0f || source.data.empty() ||
+        target_geometry.info.resolution <= 0.0f || target_geometry.data.empty()) {
       return projected;
     }
 
-    const int src_width = static_cast<int>(obstacles.info.width);
-    const int src_height = static_cast<int>(obstacles.info.height);
+    const int src_width = static_cast<int>(source.info.width);
+    const int src_height = static_cast<int>(source.info.height);
     const int dst_width = static_cast<int>(projected.info.width);
     const int dst_height = static_cast<int>(projected.info.height);
-    const double src_res = obstacles.info.resolution;
+    const double src_res = source.info.resolution;
     const double dst_res = projected.info.resolution;
 
     for (int y = 0; y < src_height; ++y) {
       for (int x = 0; x < src_width; ++x) {
         const int src_idx = y * src_width + x;
-        if (src_idx < 0 || static_cast<size_t>(src_idx) >= obstacles.data.size() ||
-            obstacles.data[src_idx] <= 0) {
+        if (src_idx < 0 || static_cast<size_t>(src_idx) >= source.data.size() ||
+            source.data[src_idx] <= 0) {
           continue;
         }
 
-        const double world_x = obstacles.info.origin.position.x + (x + 0.5) * src_res;
-        const double world_y = obstacles.info.origin.position.y + (y + 0.5) * src_res;
+        const double world_x = source.info.origin.position.x + (x + 0.5) * src_res;
+        const double world_y = source.info.origin.position.y + (y + 0.5) * src_res;
         const int dst_x = static_cast<int>((world_x - projected.info.origin.position.x) / dst_res);
         const int dst_y = static_cast<int>((world_y - projected.info.origin.position.y) / dst_res);
 
         if (dst_x >= 0 && dst_x < dst_width && dst_y >= 0 && dst_y < dst_height) {
-          projected.data[dst_y * dst_width + dst_x] = obstacles.data[src_idx];
+          projected.data[dst_y * dst_width + dst_x] = source.data[src_idx];
         }
       }
     }
