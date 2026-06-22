@@ -61,6 +61,7 @@ public:
     this->declare_parameter("cloud_min_neighbor_cells",  1);
     this->declare_parameter("tf_fallback_warn_threshold_sec", 0.20);
     this->declare_parameter("static_obstacle_ignore_radius", 0.10);
+    this->declare_parameter("self_obstacle_ignore_radius", 0.0);
     this->declare_parameter("persistent_cloud_obstacles_enabled", false);
     this->declare_parameter("persistent_cloud_hits_required", 6);
     this->declare_parameter("persistent_cloud_evidence_decay", 1);
@@ -111,6 +112,7 @@ public:
     this->get_parameter("cloud_min_neighbor_cells", cloud_min_neighbor_cells_);
     this->get_parameter("tf_fallback_warn_threshold_sec", tf_fallback_warn_threshold_sec_);
     this->get_parameter("static_obstacle_ignore_radius", static_obstacle_ignore_radius_);
+    this->get_parameter("self_obstacle_ignore_radius", self_obstacle_ignore_radius_);
     this->get_parameter("persistent_cloud_obstacles_enabled", persistent_cloud_obstacles_enabled_);
     this->get_parameter("persistent_cloud_hits_required", persistent_cloud_hits_required_);
     this->get_parameter("persistent_cloud_evidence_decay", persistent_cloud_evidence_decay_);
@@ -206,6 +208,7 @@ private:
   int cloud_min_neighbor_cells_{1};
   double tf_fallback_warn_threshold_sec_{0.20};
   double static_obstacle_ignore_radius_{0.10};
+  double self_obstacle_ignore_radius_{0.0};
   bool persistent_cloud_obstacles_enabled_{false};
   int persistent_cloud_hits_required_{6};
   int persistent_cloud_evidence_decay_{1};
@@ -286,6 +289,9 @@ private:
       }
       else if (n == "static_obstacle_ignore_radius") {
         static_obstacle_ignore_radius_ = std::max(0.0, p.as_double());
+      }
+      else if (n == "self_obstacle_ignore_radius") {
+        self_obstacle_ignore_radius_ = std::max(0.0, p.as_double());
       }
       else if (n == "persistent_cloud_obstacles_enabled") {
         persistent_cloud_obstacles_enabled_ = p.as_bool();
@@ -530,6 +536,58 @@ private:
 	    return false;
 	  }
 
+  bool is_inside_self_obstacle_filter(const double robot_x, const double robot_y) const
+  {
+    return self_obstacle_ignore_radius_ > 0.0 &&
+           std::hypot(robot_x, robot_y) <= self_obstacle_ignore_radius_;
+  }
+
+  void clear_robot_footprint()
+  {
+    if (self_obstacle_ignore_radius_ <= 0.0 ||
+        obstacles_map_.info.resolution <= 0.0f ||
+        obstacles_map_.data.empty()) {
+      return;
+    }
+
+    Eigen::Affine3d robot_to_map;
+    if (!lookup_transform_with_latest_fallback(
+        "map", base_link_name_, this->now(), robot_to_map)) {
+      return;
+    }
+
+    const double res = obstacles_map_.info.resolution;
+    const double origin_x = obstacles_map_.info.origin.position.x;
+    const double origin_y = obstacles_map_.info.origin.position.y;
+    const int width = static_cast<int>(obstacles_map_.info.width);
+    const int height = static_cast<int>(obstacles_map_.info.height);
+    const int cx = static_cast<int>((robot_to_map.translation().x() - origin_x) / res);
+    const int cy = static_cast<int>((robot_to_map.translation().y() - origin_y) / res);
+    const int radius_cells = std::max(
+      1, static_cast<int>(std::ceil(self_obstacle_ignore_radius_ / res)));
+
+    for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
+      for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
+        if (dx * dx + dy * dy > radius_cells * radius_cells) continue;
+
+        const int x = cx + dx;
+        const int y = cy + dy;
+        if (x < 0 || x >= width || y < 0 || y >= height) continue;
+
+        const int idx = y * width + x;
+        if (idx < 0 || static_cast<size_t>(idx) >= obstacles_map_.data.size()) continue;
+        obstacles_map_.data[idx] = 0;
+
+        if (static_cast<size_t>(idx) < persistent_cloud_map_.data.size()) {
+          persistent_cloud_map_.data[idx] = 0;
+        }
+        if (static_cast<size_t>(idx) < persistent_cloud_evidence_.size()) {
+          persistent_cloud_evidence_[idx] = 0;
+        }
+      }
+    }
+  }
+
   void init_persistent_cloud_layer()
   {
     persistent_cloud_map_ = obstacles_map_;
@@ -755,6 +813,7 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
     size_t rejected_nonfinite = 0;
     size_t rejected_box = 0;
     size_t rejected_map_bounds = 0;
+    size_t rejected_self = 0;
 
     for (size_t i = 0; i < total; i += static_cast<size_t>(downsample))
     {
@@ -772,6 +831,11 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
       }
 
       Eigen::Vector3d v_robot = cam_to_robot * v_cam;
+      if (is_inside_self_obstacle_filter(v_robot.x(), v_robot.y())) {
+        ++rejected_self;
+        p += skip;
+        continue;
+      }
 
       if (v_robot.x() > cloud_min_x_ && v_robot.x() < cloud_max_x_ &&
           v_robot.y() > cloud_min_y_ && v_robot.y() < cloud_max_y_ &&
@@ -896,7 +960,7 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 2000,
         "ObstacleDetector.-> cloud debug frame=%s points=%zu cells=%zu marked=%zu "
-        "input(processed=%zu nonfinite=%zu box=%zu map_bounds=%zu) "
+        "input(processed=%zu nonfinite=%zu self=%zu box=%zu map_bounds=%zu) "
         "reject(points=%zu neighbors=%zu static=%zu) "
         "persistent(enabled=%s checked=%zu no_range=%zu promoted=%zu already=%zu) "
         "params(min_points=%d min_neighbors=%d hits=%d range=%.2f..%.2f downsample=%d)",
@@ -906,6 +970,7 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
         marked_dynamic,
         processed_points,
         rejected_nonfinite,
+        rejected_self,
         rejected_box,
         rejected_map_bounds,
         rejected_low_points,
@@ -967,6 +1032,9 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
 
       // PASO A: Transformar a coordenadas del ROBOT
       Eigen::Vector3d v_robot = lidar_to_robot * v_lidar;
+      if (is_inside_self_obstacle_filter(v_robot.x(), v_robot.y())) {
+        continue;
+      }
 
       if (v_robot.x() > laser_min_x_ && v_robot.x() < laser_max_x_ &&
           v_robot.y() > laser_min_y_ && v_robot.y() < laser_max_y_ &&
@@ -1002,6 +1070,7 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
 	    if (use_cloud2_ && cloud2_received_) { add_obstacles_from_cloud(latest_cloud2_, std::max(1, cloud_downsampling2_)); cloud2_received_ = false; }
 	    if (use_lidar_  && scan_received_)   { add_obstacles_from_scan (latest_scan_,   std::max(1, lidar_downsampling_));  scan_received_ = false; }
 	    merge_persistent_cloud_obstacles();
+	    clear_robot_footprint();
 	    publish_persistent_cloud_map();
 	
 	    obstacles_map_.header.stamp = this->now();

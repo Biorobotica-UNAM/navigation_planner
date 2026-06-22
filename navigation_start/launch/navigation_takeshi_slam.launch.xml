@@ -34,6 +34,8 @@
   <arg name="cloud_filter_min_neighbor_voxels" default="2"/>
   <arg name="lidar_downsampling"     default="1"/>
   <arg name="static_obstacle_ignore_radius" default="0.10"/>
+  <!-- Mantiene libre la huella del robot para no dibujar obstaculos sobre si mismo. -->
+  <arg name="self_obstacle_ignore_radius" default="0.30"/>
   <arg name="obstacle_cloud_min_points_per_cell" default="2"/>
   <arg name="obstacle_cloud_min_neighbor_cells" default="2"/>
   <arg name="cloud_points_threshold" default="100"/>
@@ -242,6 +244,7 @@
     <param name="decay_factor"       value="$(var detector_decay_factor)"/>
     <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
     <param name="static_obstacle_ignore_radius" value="$(var static_obstacle_ignore_radius)"/>
+    <param name="self_obstacle_ignore_radius" value="$(var self_obstacle_ignore_radius)"/>
     <param name="cloud_min_points_per_cell" value="$(var obstacle_cloud_min_points_per_cell)"/>
     <param name="cloud_min_neighbor_cells" value="$(var obstacle_cloud_min_neighbor_cells)"/>
     <param name="laser_min_x"        value="$(var laser_min_x)"/>
