@@ -561,17 +561,26 @@ private:
            persistent_cloud_evidence_.size() == obstacles_map_.data.size();
   }
 
-  void promote_persistent_cloud_cell(const int idx, const int cell_x, const int cell_y)
+  bool promote_persistent_cloud_cell(const int idx, const int cell_x, const int cell_y)
   {
-    if (!persistent_cloud_obstacles_enabled_ || !persistent_cloud_layer_ready()) return;
-    if (idx < 0 || idx >= static_cast<int>(persistent_cloud_evidence_.size())) return;
-    if (is_near_static_obstacle(cell_x, cell_y)) return;
+    if (!persistent_cloud_obstacles_enabled_ || !persistent_cloud_layer_ready()) return false;
+    if (idx < 0 || idx >= static_cast<int>(persistent_cloud_evidence_.size())) return false;
+    if (is_near_static_obstacle(cell_x, cell_y)) return false;
 
     auto &evidence = persistent_cloud_evidence_[idx];
+    const bool was_persistent = persistent_cloud_map_.data[idx] > 0;
     evidence = std::min(persistent_cloud_hits_required_, evidence + 1);
     if (evidence >= persistent_cloud_hits_required_) {
       persistent_cloud_map_.data[idx] = 100;
+      if (persistent_cloud_debug_ && !was_persistent) {
+        RCLCPP_INFO_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "ObstacleDetector.-> promoted persistent Kinect obstacle cell=(%d,%d) idx=%d evidence=%d/%d",
+          cell_x, cell_y, idx, evidence, persistent_cloud_hits_required_);
+      }
+      return !was_persistent;
     }
+    return false;
   }
 
   void merge_persistent_cloud_obstacles()
@@ -791,13 +800,24 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
     // se considera ruido y no se manda al mapa de obstaculos.
     const int min_points = std::max(1, cloud_min_points_per_cell_);
     const int min_neighbors = std::max(0, cloud_min_neighbor_cells_);
+    size_t marked_dynamic = 0;
+    size_t rejected_low_points = 0;
+    size_t rejected_neighbors = 0;
+    size_t rejected_static = 0;
+    size_t persistent_checked = 0;
+    size_t persistent_no_range = 0;
+    size_t persistent_promoted = 0;
+    size_t persistent_already = 0;
 
     for (const auto &entry : cell_hits)
     {
       const int idx = entry.first;
       const CellEvidence &hit = entry.second;
 
-      if (hit.count < min_points) continue;
+      if (hit.count < min_points) {
+        ++rejected_low_points;
+        continue;
+      }
 
       if (min_neighbors > 0) {
         int neighbors = 0;
@@ -816,19 +836,64 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
             }
           }
         }
-        if (neighbors < min_neighbors) continue;
+        if (neighbors < min_neighbors) {
+          ++rejected_neighbors;
+          continue;
+        }
       }
 
       if (idx >= 0 && idx < map_size) {
 	        if (is_near_static_obstacle(hit.cell_x, hit.cell_y)) {
+	          ++rejected_static;
 	          continue;
 	        }
 	        obstacles_map_.data[idx] = 100;
-	        if (hit.persistent_count >= min_points) {
-	          promote_persistent_cloud_cell(idx, hit.cell_x, hit.cell_y);
+	        ++marked_dynamic;
+	        if (persistent_cloud_obstacles_enabled_) {
+	          ++persistent_checked;
+	          if (hit.persistent_count >= min_points) {
+	            if (persistent_cloud_layer_ready() &&
+	                idx >= 0 &&
+	                idx < static_cast<int>(persistent_cloud_map_.data.size()) &&
+	                persistent_cloud_map_.data[idx] > 0) {
+	              ++persistent_already;
+	            }
+	            if (promote_persistent_cloud_cell(idx, hit.cell_x, hit.cell_y)) {
+	              ++persistent_promoted;
+	            }
+	          } else {
+	            ++persistent_no_range;
+	          }
 	        }
 	      }
 	    }
+
+    if (persistent_cloud_debug_) {
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "ObstacleDetector.-> cloud debug frame=%s points=%zu cells=%zu marked=%zu "
+        "reject(points=%zu neighbors=%zu static=%zu) "
+        "persistent(enabled=%s checked=%zu no_range=%zu promoted=%zu already=%zu) "
+        "params(min_points=%d min_neighbors=%d hits=%d range=%.2f..%.2f downsample=%d)",
+        cloud->header.frame_id.c_str(),
+        total,
+        cell_hits.size(),
+        marked_dynamic,
+        rejected_low_points,
+        rejected_neighbors,
+        rejected_static,
+        persistent_cloud_obstacles_enabled_ ? "true" : "false",
+        persistent_checked,
+        persistent_no_range,
+        persistent_promoted,
+        persistent_already,
+        min_points,
+        min_neighbors,
+        persistent_cloud_hits_required_,
+        persistent_cloud_min_range_,
+        persistent_cloud_max_range_,
+        downsample);
+    }
 	  }
 
   void add_obstacles_from_scan(const sensor_msgs::msg::LaserScan::SharedPtr &scan, int downsample)

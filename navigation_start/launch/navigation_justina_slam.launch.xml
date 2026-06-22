@@ -38,7 +38,7 @@
   <arg name="lidar_downsampling"     default="1"/>
   <arg name="static_obstacle_ignore_radius" default="0.10"/>
   <arg name="obstacle_cloud_min_points_per_cell" default="2"/>
-  <arg name="obstacle_cloud_min_neighbor_cells" default="2"/>
+  <arg name="obstacle_cloud_min_neighbor_cells" default="1"/>
   <arg name="cloud_points_threshold" default="100"/>
   <arg name="lidar_points_threshold" default="20"/>
   <arg name="mvn_pln_patience"       default="True"/>
@@ -95,13 +95,13 @@
   <arg name="detector_decay_factor" default="2"/>
   <!-- Herramienta experimental: promueve obstaculos Kinect muy confirmados a capa persistente
        y map_augmenter la integra automaticamente al mapa efectivo de navegacion. -->
-  <arg name="persistent_cloud_obstacles_enabled" default="False"/>
-  <arg name="persistent_cloud_hits_required" default="6"/>
+  <arg name="persistent_cloud_obstacles_enabled" default="True"/>
+  <arg name="persistent_cloud_hits_required" default="4"/>
   <arg name="persistent_cloud_evidence_decay" default="1"/>
-  <arg name="persistent_cloud_min_range" default="0.40"/>
-  <arg name="persistent_cloud_max_range" default="2.50"/>
+  <arg name="persistent_cloud_min_range" default="0.35"/>
+  <arg name="persistent_cloud_max_range" default="2.80"/>
   <arg name="persistent_cloud_clear_on_disable" default="True"/>
-  <arg name="persistent_cloud_debug" default="false"/>
+  <arg name="persistent_cloud_debug" default="true"/>
 
   <!-- ===== Path Planner ===== -->
   <!-- Diagonal paths disabled while SLAM is still building the map -->
