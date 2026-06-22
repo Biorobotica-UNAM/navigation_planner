@@ -545,11 +545,13 @@ private:
     std::fill(persistent_cloud_evidence_.begin(), persistent_cloud_evidence_.end(), 0);
   }
 
-  void decay_persistent_cloud_evidence()
+  void decay_persistent_cloud_evidence(const std::vector<unsigned char> &seen_this_cloud)
   {
     if (!persistent_cloud_obstacles_enabled_ || persistent_cloud_evidence_decay_ <= 0) return;
 
-    for (auto &value : persistent_cloud_evidence_) {
+    for (size_t i = 0; i < persistent_cloud_evidence_.size(); ++i) {
+      if (i < seen_this_cloud.size() && seen_this_cloud[i] != 0) continue;
+      auto &value = persistent_cloud_evidence_[i];
       value = std::max(0, value - persistent_cloud_evidence_decay_);
     }
   }
@@ -749,9 +751,14 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
     const size_t point_step = cloud->point_step;
     const size_t total = static_cast<size_t>(cloud->width) * static_cast<size_t>(cloud->height);
     const size_t skip = static_cast<size_t>(std::max(1, downsample)) * point_step;
+    size_t processed_points = 0;
+    size_t rejected_nonfinite = 0;
+    size_t rejected_box = 0;
+    size_t rejected_map_bounds = 0;
 
     for (size_t i = 0; i < total; i += static_cast<size_t>(downsample))
     {
+      ++processed_points;
       // Punto en coordenadas de cámara
       Eigen::Vector3d v_cam(
         *reinterpret_cast<const float*>(p + 0),
@@ -759,6 +766,7 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
         *reinterpret_cast<const float*>(p + 8)
       );
       if (!std::isfinite(v_cam.x()) || !std::isfinite(v_cam.y()) || !std::isfinite(v_cam.z())) {
+        ++rejected_nonfinite;
         p += skip;
         continue;
       }
@@ -778,6 +786,7 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
 	        int cell_x = static_cast<int>((v_map.x() - origin_x) * inv_res);
 	        int cell_y = static_cast<int>((v_map.y() - origin_y) * inv_res);
 	        if (cell_x < 0 || cell_x >= width || cell_y < 0 || cell_y >= height) {
+          ++rejected_map_bounds;
           p += skip;
           continue;
         }
@@ -790,6 +799,8 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
 	        }
 	        hit.cell_x = cell_x;
 	        hit.cell_y = cell_y;
+      } else {
+        ++rejected_box;
       }
       p += skip;
     }
@@ -808,6 +819,10 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
     size_t persistent_no_range = 0;
     size_t persistent_promoted = 0;
     size_t persistent_already = 0;
+    std::vector<unsigned char> persistent_seen_this_cloud;
+    if (persistent_cloud_obstacles_enabled_ && persistent_cloud_layer_ready()) {
+      persistent_seen_this_cloud.assign(persistent_cloud_evidence_.size(), 0);
+    }
 
     for (const auto &entry : cell_hits)
     {
@@ -852,6 +867,11 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
 	        if (persistent_cloud_obstacles_enabled_) {
 	          ++persistent_checked;
 	          if (hit.persistent_count >= min_points) {
+	            if (!persistent_seen_this_cloud.empty() &&
+	                idx >= 0 &&
+	                idx < static_cast<int>(persistent_seen_this_cloud.size())) {
+	              persistent_seen_this_cloud[idx] = 1;
+	            }
 	            if (persistent_cloud_layer_ready() &&
 	                idx >= 0 &&
 	                idx < static_cast<int>(persistent_cloud_map_.data.size()) &&
@@ -868,10 +888,15 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
 	      }
 	    }
 
+    if (!persistent_seen_this_cloud.empty()) {
+      decay_persistent_cloud_evidence(persistent_seen_this_cloud);
+    }
+
     if (persistent_cloud_debug_) {
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 2000,
         "ObstacleDetector.-> cloud debug frame=%s points=%zu cells=%zu marked=%zu "
+        "input(processed=%zu nonfinite=%zu box=%zu map_bounds=%zu) "
         "reject(points=%zu neighbors=%zu static=%zu) "
         "persistent(enabled=%s checked=%zu no_range=%zu promoted=%zu already=%zu) "
         "params(min_points=%d min_neighbors=%d hits=%d range=%.2f..%.2f downsample=%d)",
@@ -879,6 +904,10 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
         total,
         cell_hits.size(),
         marked_dynamic,
+        processed_points,
+        rejected_nonfinite,
+        rejected_box,
+        rejected_map_bounds,
         rejected_low_points,
         rejected_neighbors,
         rejected_static,
@@ -967,7 +996,6 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
 
 	    // decay rápido (esto te quita “ghost obstacles” sin depender del merger)
 	    decay_map(obstacles_map_, decay_factor_);
-	    decay_persistent_cloud_evidence();
 	
 	    // integra sensores “lo más rápido posible”
 	    if (use_cloud_  && cloud1_received_) { add_obstacles_from_cloud(latest_cloud1_,  std::max(1, cloud_downsampling_));  cloud1_received_ = false; }

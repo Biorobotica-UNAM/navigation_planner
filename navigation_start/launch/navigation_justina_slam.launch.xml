@@ -30,11 +30,11 @@
   <arg name="use_pot_fields"   default="True"/>
 
   <!-- ===== Tuning / thresholds ===== -->
-  <arg name="cloud_downsampling"     default="5"/>
+  <arg name="cloud_downsampling"     default="1"/>
   <arg name="cloud_filter_input_qos_mode" default="dual"/>
-  <arg name="cloud_filter_debug" default="false"/>
-  <arg name="cloud_filter_min_points_per_voxel" default="2"/>
-  <arg name="cloud_filter_min_neighbor_voxels" default="2"/>
+  <arg name="cloud_filter_debug" default="true"/>
+  <arg name="cloud_filter_min_points_per_voxel" default="1"/>
+  <arg name="cloud_filter_min_neighbor_voxels" default="1"/>
   <arg name="lidar_downsampling"     default="1"/>
   <arg name="static_obstacle_ignore_radius" default="0.10"/>
   <arg name="obstacle_cloud_min_points_per_cell" default="2"/>
@@ -63,11 +63,11 @@
 
   <!-- ===== Point cloud detection window ===== -->
   <arg name="cloud_min_x" default="0.30"/>
-  <arg name="cloud_max_x" default="0.80"/>
-  <arg name="cloud_min_y" default="-0.30"/>
-  <arg name="cloud_max_y" default="0.30"/>
-  <arg name="cloud_min_z" default="0.01"/>
-  <arg name="cloud_max_z" default="1.0"/>
+  <arg name="cloud_max_x" default="1.20"/>
+  <arg name="cloud_min_y" default="-0.45"/>
+  <arg name="cloud_max_y" default="0.45"/>
+  <arg name="cloud_min_z" default="0.03"/>
+  <arg name="cloud_max_z" default="1.20"/>
 
   <!-- ===== Map Enhancer ===== -->
   <arg name="map_enhancer_obstacle_radius" default="0.05"/>

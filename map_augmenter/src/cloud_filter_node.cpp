@@ -788,7 +788,7 @@ private:
     publish_filtered_cloud(*msg, accepted_voxels);
 
     if (debug_) {
-      RCLCPP_DEBUG_THROTTLE(
+      RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 1000,
         "CloudFilter.-> raw=%zu skip=%d finite=%zu in_box=%zu voxels=%zu published=%zu box=[%.2f %.2f] [%.2f %.2f] [%.2f %.2f]",
         total_points,
