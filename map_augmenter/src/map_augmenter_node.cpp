@@ -510,7 +510,7 @@ private:
   }
 
   nav_msgs::msg::OccupancyGrid burn_persistent_cloud_into_base(
-    const nav_msgs::msg::OccupancyGrid &base_map) const
+    const nav_msgs::msg::OccupancyGrid &base_map)
   {
     if (base_map.data.empty() ||
         persistent_cloud_map_.data.empty()) {
@@ -598,7 +598,7 @@ private:
     return expanded;
   }
 
-  void apply_unknown_space_cost(nav_msgs::msg::OccupancyGrid &cost_map) const
+  void apply_unknown_space_cost(nav_msgs::msg::OccupancyGrid &cost_map)
   {
     if (!prefer_known_space_ || unknown_space_cost_map_.data.empty()) return;
 
