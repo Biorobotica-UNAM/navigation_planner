@@ -78,6 +78,12 @@ public:
         this->declare_parameter<std::string>("mapped_area_map_topic", "map");
 
         this->declare_parameter<bool>("move_head", true);
+        this->declare_parameter<bool>("head_unknown_scan_enabled", false);
+        this->declare_parameter<float>("head_unknown_scan_min_known_ratio", 0.85f);
+        this->declare_parameter<float>("head_unknown_scan_amplitude", 0.75f);
+        this->declare_parameter<float>("head_unknown_scan_period", 3.0f);
+        this->declare_parameter<float>("head_pan_limit", 1.2f);
+        this->declare_parameter<float>("head_tilt", -1.0f);
         this->declare_parameter<bool>("use_pot_fields", false);
         // Disabled by default: immediate abort/replan is smoother than
         // rotating in place when collision_risk flickers near obstacles.
@@ -106,6 +112,16 @@ public:
         this->get_parameter("mapped_area_map_topic", mapped_area_map_topic_);
 
         this->get_parameter("move_head",             move_head_);
+        this->get_parameter("head_unknown_scan_enabled", head_unknown_scan_enabled_);
+        this->get_parameter("head_unknown_scan_min_known_ratio", head_unknown_scan_min_known_ratio_);
+        this->get_parameter("head_unknown_scan_amplitude", head_unknown_scan_amplitude_);
+        this->get_parameter("head_unknown_scan_period", head_unknown_scan_period_);
+        this->get_parameter("head_pan_limit", head_pan_limit_);
+        this->get_parameter("head_tilt", head_tilt_);
+        head_unknown_scan_min_known_ratio_ = std::clamp(head_unknown_scan_min_known_ratio_, 0.0f, 1.0f);
+        head_unknown_scan_amplitude_ = std::max(0.0f, head_unknown_scan_amplitude_);
+        head_unknown_scan_period_ = std::max(0.5f, head_unknown_scan_period_);
+        head_pan_limit_ = std::max(0.0f, head_pan_limit_);
         this->get_parameter("use_pot_fields",        use_pot_fields_);
         this->get_parameter("allow_rotation_on_collision", allow_rotation_on_collision_);
         this->get_parameter("rotation_collision_angle_threshold", rotation_collision_angle_threshold_);
@@ -247,6 +263,12 @@ private:
     std::string mapped_area_map_topic_;
 
     bool move_head_;
+    bool head_unknown_scan_enabled_;
+    float head_unknown_scan_min_known_ratio_;
+    float head_unknown_scan_amplitude_;
+    float head_unknown_scan_period_;
+    float head_pan_limit_;
+    float head_tilt_;
     bool use_pot_fields_;
     bool allow_rotation_on_collision_;
     float rotation_collision_angle_threshold_;
@@ -331,6 +353,12 @@ private:
             }
 
             else if (param.get_name() == "move_head")             move_head_               = param.as_bool();
+            else if (param.get_name() == "head_unknown_scan_enabled") head_unknown_scan_enabled_ = param.as_bool();
+            else if (param.get_name() == "head_unknown_scan_min_known_ratio") head_unknown_scan_min_known_ratio_ = std::clamp(param.as_double(), 0.0, 1.0);
+            else if (param.get_name() == "head_unknown_scan_amplitude") head_unknown_scan_amplitude_ = std::max(0.0, param.as_double());
+            else if (param.get_name() == "head_unknown_scan_period") head_unknown_scan_period_ = std::max(0.5, param.as_double());
+            else if (param.get_name() == "head_pan_limit") head_pan_limit_ = std::max(0.0, param.as_double());
+            else if (param.get_name() == "head_tilt") head_tilt_ = param.as_double();
             else if (param.get_name() == "use_pot_fields")        use_pot_fields_          = param.as_bool();
             else if (param.get_name() == "allow_rotation_on_collision") allow_rotation_on_collision_ = param.as_bool();
             else if (param.get_name() == "rotation_collision_angle_threshold") rotation_collision_angle_threshold_ = param.as_double();
@@ -678,6 +706,16 @@ private:
         return max_linear_speed_;
     }
 
+    bool should_scan_head_for_unknown_space() const
+    {
+        if (!head_unknown_scan_enabled_ || !is_slam_map_) {
+            return false;
+        }
+
+        const float known_ratio = get_mapped_area_known_ratio(robot_x_, robot_y_);
+        return known_ratio < head_unknown_scan_min_known_ratio_;
+    }
+
     void clamp_current_linear_speed_to(const float speed_cap)
     {
         if (current_linear_speed > speed_cap) {
@@ -901,8 +939,20 @@ private:
         float angle = atan2(goal_y - robot_y_, goal_x - robot_x_) - robot_t_;
         if(angle >   M_PI) angle -= 2*M_PI;
         if(angle <= -M_PI) angle += 2*M_PI;
+
+        if (should_scan_head_for_unknown_space()) {
+            constexpr double TWO_PI = 6.28318530717958647692;
+            const double period = std::max(0.5f, head_unknown_scan_period_);
+            const double phase = std::fmod(this->now().seconds(), period) / period;
+            const double scan_offset =
+                head_unknown_scan_amplitude_ * std::sin(TWO_PI * phase);
+            angle += static_cast<float>(scan_offset);
+        }
+
+        const float pan_limit = std::max(0.0f, head_pan_limit_);
+        angle = std::clamp(angle, -pan_limit, pan_limit);
         msg.data.push_back(angle);
-        msg.data.push_back(-1.0);
+        msg.data.push_back(head_tilt_);
         return msg;
     }
 

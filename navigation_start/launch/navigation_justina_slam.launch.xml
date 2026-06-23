@@ -118,6 +118,14 @@
   <arg name="control_alpha"     default="0.08"/>
   <arg name="control_beta"      default="0.4"/>
   <arg name="move_head"         default="True"/>
+  <!-- En SLAM, si el mapa local aun es desconocido, barre la cabeza a los lados
+       para que el Kinect observe mas superficie lateral mientras navega. -->
+  <arg name="head_unknown_scan_enabled" default="True"/>
+  <arg name="head_unknown_scan_min_known_ratio" default="0.85"/>
+  <arg name="head_unknown_scan_amplitude" default="0.85"/>
+  <arg name="head_unknown_scan_period" default="3.2"/>
+  <arg name="head_pan_limit" default="1.20"/>
+  <arg name="head_tilt" default="-1.0"/>
   <!-- Permite subir un poco la velocidad solo cuando el mapa SLAM ya conoce la zona local. -->
   <arg name="mapped_area_speed_enabled" default="True"/>
   <arg name="mapped_area_max_linear_speed" default="0.55"/>
@@ -376,6 +384,12 @@
     <param name="control_alpha"     value="$(var control_alpha)"/>
     <param name="control_beta"      value="$(var control_beta)"/>
     <param name="move_head"         value="$(var move_head)"/>
+    <param name="head_unknown_scan_enabled" value="$(var head_unknown_scan_enabled)"/>
+    <param name="head_unknown_scan_min_known_ratio" value="$(var head_unknown_scan_min_known_ratio)"/>
+    <param name="head_unknown_scan_amplitude" value="$(var head_unknown_scan_amplitude)"/>
+    <param name="head_unknown_scan_period" value="$(var head_unknown_scan_period)"/>
+    <param name="head_pan_limit" value="$(var head_pan_limit)"/>
+    <param name="head_tilt" value="$(var head_tilt)"/>
     <param name="use_pot_fields"    value="$(var use_pot_fields)"/>
     <param name="base_link_name"    value="$(var base_link_name)"/>
     <param name="mapped_area_speed_enabled" value="$(var mapped_area_speed_enabled)"/>
