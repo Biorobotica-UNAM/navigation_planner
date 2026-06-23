@@ -121,6 +121,8 @@
   <!-- En SLAM, si el mapa local aun es desconocido, barre la cabeza a los lados
        para que el Kinect observe mas superficie lateral mientras navega. -->
   <arg name="head_unknown_scan_enabled" default="True"/>
+  <!-- El barrido se activa debajo de este porcentaje de celdas conocidas en el radio local.
+       amplitude/limit estan en radianes; period es el tiempo de un ciclo completo. -->
   <arg name="head_unknown_scan_min_known_ratio" default="0.85"/>
   <arg name="head_unknown_scan_amplitude" default="0.85"/>
   <arg name="head_unknown_scan_period" default="3.2"/>

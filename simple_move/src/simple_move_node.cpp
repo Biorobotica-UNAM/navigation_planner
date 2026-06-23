@@ -78,6 +78,8 @@ public:
         this->declare_parameter<std::string>("mapped_area_map_topic", "map");
 
         this->declare_parameter<bool>("move_head", true);
+        // Optional SLAM exploration mode: while the local map is still sparse,
+        // add a slow lateral pan sweep to the normal path-following head angle.
         this->declare_parameter<bool>("head_unknown_scan_enabled", false);
         this->declare_parameter<float>("head_unknown_scan_min_known_ratio", 0.85f);
         this->declare_parameter<float>("head_unknown_scan_amplitude", 0.75f);
@@ -712,6 +714,8 @@ private:
             return false;
         }
 
+        // Reuse the same local known-cell ratio used for speed limiting: below
+        // this threshold, Kinect coverage is improved by looking to the sides.
         const float known_ratio = get_mapped_area_known_ratio(robot_x_, robot_y_);
         return known_ratio < head_unknown_scan_min_known_ratio_;
     }
@@ -941,6 +945,8 @@ private:
         if(angle <= -M_PI) angle += 2*M_PI;
 
         if (should_scan_head_for_unknown_space()) {
+            // Keep the path direction as the center of attention and sweep pan
+            // around it, so the robot still looks generally where it is going.
             constexpr double TWO_PI = 6.28318530717958647692;
             const double period = std::max(0.5f, head_unknown_scan_period_);
             const double phase = std::fmod(this->now().seconds(), period) / period;
