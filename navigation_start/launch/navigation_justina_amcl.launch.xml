@@ -93,7 +93,7 @@
   <arg name="diagonal_paths" default="True"/>
 
   <!-- ===== Simple Move ===== -->
-  <arg name="max_linear_speed"  default="0.8"/>
+  <arg name="max_linear_speed"  default="0.6"/>
   <arg name="max_angular_speed" default="0.6"/>
   <arg name="control_alpha"     default="0.08"/>
   <arg name="control_beta"      default="0.4"/>
