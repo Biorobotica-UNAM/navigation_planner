@@ -108,7 +108,7 @@ public:
             rclcpp::QoS(10).transient_local());
 
         pub_navigation_stop_ = this->create_publisher<std_msgs::msg::Empty>(
-            make_name("/navigation/stop"),
+            make_name("/stop"),
             rclcpp::QoS(10).transient_local());
 
         //############
@@ -848,7 +848,7 @@ private:
                 last_replan_x_ = start_x;
                 last_replan_y_ = start_y;
 
-                if (replan_count_ > 9) {
+                if (replan_count_ > 20) {
                     RCLCPP_WARN(this->get_logger(), "MotionPlanner.-> Repeated replans from same start (count=%d). Requesting stop.", replan_count_);
                     publish_status(actionlib_msgs::msg::GoalStatus::ABORTED, goal_id, "repeated_replans_same_start");
                     std_msgs::msg::Empty stop_msg;

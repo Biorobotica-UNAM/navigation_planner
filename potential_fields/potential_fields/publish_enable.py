@@ -13,7 +13,7 @@ class EnablePublisher(Node):
         self.declare_parameter("use_namespace", False)
         use_namespace = self.get_parameter("use_namespace").get_parameter_value().bool_value
 
-        suffix = "/navigation/potential_fields/enable"
+        suffix = "/potential_fields/enable"
 
         if use_namespace:
             prefix = self.get_namespace()
@@ -26,10 +26,17 @@ class EnablePublisher(Node):
             topic = suffix
 
         self.pub = self.create_publisher(Bool, topic, 10)
+
+        # Publish immediately, then retry every second.
+        # The first message may be lost if DDS discovery has not yet matched
+        # the subscriber in potential_fields_node; subsequent ticks guarantee
+        # delivery once the connection is established.
+        self.create_timer(1.0, self.publish_enable)
+        self.publish_enable()
+
+    def publish_enable(self):
         msg = Bool(data=True)
         self.pub.publish(msg)
-
-        self.get_logger().info('Published enable message')
 
 
 def main(args=None):

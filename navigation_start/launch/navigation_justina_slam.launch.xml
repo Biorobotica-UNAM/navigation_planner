@@ -30,20 +30,20 @@
   <arg name="use_pot_fields"   default="True"/>
 
   <!-- ===== Tuning / thresholds ===== -->
-  <arg name="cloud_downsampling"     default="1"/>
-  <arg name="cloud_filter_input_qos_mode" default="dual"/>
-  <arg name="cloud_filter_debug" default="true"/>
-  <arg name="cloud_filter_min_points_per_voxel" default="1"/>
-  <arg name="cloud_filter_min_neighbor_voxels" default="1"/>
-  <arg name="lidar_downsampling"     default="1"/>
-  <arg name="static_obstacle_ignore_radius" default="0.10"/>
+  <arg name="cloud_downsampling"                      default="1"/>
+  <arg name="cloud_filter_input_qos_mode"             default="dual"/>
+  <arg name="cloud_filter_debug"                      default="false"/>
+  <arg name="cloud_filter_min_points_per_voxel"       default="2"/>
+  <arg name="cloud_filter_min_neighbor_voxels"        default="2"/>
+  <arg name="lidar_downsampling"                      default="1"/>
+  <arg name="static_obstacle_ignore_radius"           default="0.10"/>
   <!-- Mantiene libre la huella del robot para no dibujar obstaculos sobre si mismo. -->
-  <arg name="self_obstacle_ignore_radius" default="0.30"/>
-  <arg name="obstacle_cloud_min_points_per_cell" default="2"/>
-  <arg name="obstacle_cloud_min_neighbor_cells" default="1"/>
-  <arg name="cloud_points_threshold" default="100"/>
-  <arg name="lidar_points_threshold" default="20"/>
-  <arg name="mvn_pln_patience"       default="True"/>
+  <arg name="self_obstacle_ignore_radius"             default="0.30"/>
+  <arg name="obstacle_cloud_min_points_per_cell"      default="2"/>
+  <arg name="obstacle_cloud_min_neighbor_cells"       default="2"/>
+  <arg name="cloud_points_threshold"                  default="15"/>
+  <arg name="lidar_points_threshold"                  default="20"/>
+  <arg name="mvn_pln_patience"                        default="True"/>
 
   <!-- ===== Laser scan filter ===== -->
   <!-- Limpia lecturas aisladas antes de SLAM para reducir manchas permanentes en el mapa. -->
@@ -137,10 +137,14 @@
   <!-- ===== Potential Fields ===== -->
   <arg name="pot_fields_debug"       default="False"/>
   <arg name="show_image"             default="False"/>
-  <arg name="laser_pot_fields_d0"    default="0.50"/>
+  <arg name="laser_pot_fields_d0"    default="0.35"/>
   <arg name="laser_pot_fields_k_rej" default="0.40"/>
   <arg name="cloud_pot_fields_d0"    default="0.80"/>
   <arg name="cloud_pot_fields_k_rej" default="0.20"/>
+  <arg name="cloud_collision_min_y"  default="-0.30"/>
+  <arg name="cloud_collision_max_y"  default="0.30"/>
+  <arg name="laser_collision_min_y"  default="-0.25"/>
+  <arg name="laser_collision_max_y"  default="0.25"/>
 
   <!-- ===== SLAM Toolbox ===== -->
   <arg name="slam_map_frame"           default="map"/>
@@ -433,6 +437,10 @@
     <param name="cloud_downsampling"     value="$(var cloud_downsampling)"/>
     <param name="cloud_points_threshold" value="$(var cloud_points_threshold)"/>
     <param name="lidar_points_threshold" value="$(var lidar_points_threshold)"/>
+    <param name="laser_collision_min_y"  value="$(var laser_collision_min_y)"/>
+    <param name="laser_collision_max_y"  value="$(var laser_collision_max_y)"/>
+    <param name="cloud_collision_min_y"  value="$(var cloud_collision_min_y)"/>
+    <param name="cloud_collision_max_y"  value="$(var cloud_collision_max_y)"/>
     <param name="point_cloud_topic"      value="$(var point_cloud_topic)"/>
     <param name="laser_scan_topic"       value="$(var laser_scan_topic)"/>
     <remap from="/cmd_vel" to="$(var cmd_vel_topic)"/>

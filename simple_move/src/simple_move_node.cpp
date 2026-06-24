@@ -648,7 +648,11 @@ private:
 
     bool should_apply_potential_fields() const
     {
-        return use_pot_fields_ && collision_risk_;
+        // Apply the rejection force whenever it has meaningful magnitude —
+        // not just when collision_risk fires — so the robot starts deflecting
+        // as soon as an obstacle enters the influence zone (d0), before the
+        // hard-stop threshold is reached.
+        return use_pot_fields_ && (std::fabs(rejection_force_.y) > 0.005f);
     }
 
     float get_mapped_area_known_ratio(const float x, const float y) const
