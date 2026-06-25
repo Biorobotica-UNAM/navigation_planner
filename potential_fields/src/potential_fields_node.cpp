@@ -399,8 +399,11 @@ private:
 
     void callback_enable(const std_msgs::msg::Bool::SharedPtr msg)
     {
-        try 
+        try
         {
+            if (msg->data == enable_)
+                return;
+
             enable_ = msg->data;
 
             if (enable_) {
