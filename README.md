@@ -114,6 +114,22 @@ ros2 launch navigation_start navigation_namespace.launch.xml namespace:=my_robot
 
 Relevant parameters can be found in the navigation launch files in ```~/pumas_nav2_ws/src/pumas_nav2/navigation_start/launch```. In specific: 
 
+**Save map**
+
+To save a new map you need to launch Justina with the following command:
+
+```bash
+ros2 launch surge_et_ambula justina.launch.xml mapless:=true
+```
+
+Once the arena is mapped, to save the map is important to run the following node:
+
+```bash
+ros2 run nav2_map_server map_saver_cli \
+-f ~/biorobotics_ws/Robots/Justina/src/Navigation/navigation_planner/navigation_start/maps/maps/[map_name]/map \
+-t /navigation/map
+```
+
 **Update your map names**
 
 ```xml
