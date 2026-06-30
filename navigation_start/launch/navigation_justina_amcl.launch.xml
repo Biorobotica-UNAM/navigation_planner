@@ -11,8 +11,9 @@
   <arg name="base_link_name"     default="base_link"/>
 
   <!-- ===== Map files ===== -->
-  <arg name="static_map_file"      default="$(find-pkg-share navigation_start)/maps/maps/lab2025/map.yaml"/>
-  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/maps/lab2025/map.yaml"/>
+  <arg name="static_map_file"      default="$(find-pkg-share navigation_start)/maps/maps/robocup_test/map.yaml"/>
+  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/maps/robocup_test/map.yaml"/>
+
 
   <!-- ===== Sensor topics ===== -->
   <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
