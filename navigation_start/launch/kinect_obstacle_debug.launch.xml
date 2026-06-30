@@ -11,7 +11,7 @@
   <arg name="use_kinect" default="true"/>
   <!-- El motor del Kinect comparte el dispositivo USB y puede inestabilizar
        la profundidad en algunas pruebas; se prende solo cuando haga falta. -->
-  <arg name="use_kinect_motor" default="true"/>
+  <arg name="use_kinect_motor" default="false"/>
   <arg name="publish_static_map_to_odom" default="true"/>
   <arg name="rviz_config" default="$(find-pkg-share navigation_start)/rviz/kinect_obstacle_debug.rviz"/>
 
@@ -80,9 +80,57 @@
   </node>
 
   <!-- Kinect real bajo /hardware/camera. Publica imagen, profundidad y nube. -->
-  <group if="$(var use_kinect)">
+  <!-- <group if="$(var use_kinect)">
     <push_ros_namespace namespace="$(var namespace_hardware)"/>
     <include file="$(find-pkg-share kinect_ros2)/launch/kinect.launch.xml"/>
+  </group> -->
+
+  <group>
+    <push_ros_namespace namespace="$(var namespace_hardware)"/>
+
+    <node pkg="rclcpp_components"
+          exec="component_container"
+          name="container"
+          output="screen"/>
+
+    <load_composable_node target="/hardware/container">
+      <composable_node
+          pkg="openni2_camera"
+          plugin="openni2_wrapper::OpenNI2Driver"
+          name="driver">
+
+        <param name="depth_registration" value="true"/>
+        <param name="use_device_time" value="true"/>
+
+        <param name="rgb_frame_id" value="camera_color_optical_frame"/>
+        <param name="depth_frame_id" value="camera_depth_optical_frame"/>
+        <param name="ir_frame_id" value="camera_depth_optical_frame"/>
+
+        <remap from="rgb/image_raw" to="camera/image_raw"/>
+        <remap from="rgb/camera_info" to="camera/camera_info"/>
+        
+        <remap from="depth/image" to="camera/depth_registered/image_raw"/>
+        
+      </composable_node>
+    </load_composable_node>
+
+    <load_composable_node target="/hardware/container">
+      <composable_node
+          pkg="depth_image_proc"
+          plugin="depth_image_proc::PointCloudXyzrgbNode"
+          name="points_xyzrgb">
+
+        <param name="queue_size" value="10"/>
+
+        <remap from="rgb/image_rect_color" to="camera/image_raw"/>
+        <remap from="rgb/camera_info" to="camera/camera_info"/>
+
+        <remap from="depth_registered/image_rect" to="camera/depth_registered/image_raw"/>
+
+        <remap from="points" to="camera/points"/>
+
+      </composable_node>
+    </load_composable_node>
   </group>
 
   <!-- Opcional: mueve fisicamente el tilt del Kinect si estas probando con motor. -->
