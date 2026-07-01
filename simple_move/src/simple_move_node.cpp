@@ -88,7 +88,6 @@ public:
         this->declare_parameter<float>("head_unknown_scan_period", 3.0f);
         this->declare_parameter<float>("head_pan_limit", 1.2f);
         this->declare_parameter<float>("head_tilt", -1.0f);
-        this->declare_parameter<float>("head_start_delay_sec", 1.5f);
         this->declare_parameter<bool>("use_pot_fields", false);
         // Disabled by default: immediate abort/replan is smoother than
         // rotating in place when collision_risk flickers near obstacles.
@@ -125,12 +124,10 @@ public:
         this->get_parameter("head_unknown_scan_period", head_unknown_scan_period_);
         this->get_parameter("head_pan_limit", head_pan_limit_);
         this->get_parameter("head_tilt", head_tilt_);
-        this->get_parameter("head_start_delay_sec", head_start_delay_sec_);
         head_unknown_scan_min_known_ratio_ = std::clamp(head_unknown_scan_min_known_ratio_, 0.0f, 1.0f);
         head_unknown_scan_amplitude_ = std::max(0.0f, head_unknown_scan_amplitude_);
         head_unknown_scan_period_ = std::max(0.5f, head_unknown_scan_period_);
         head_pan_limit_ = std::max(0.0f, head_pan_limit_);
-        head_start_delay_sec_ = std::max(0.0f, head_start_delay_sec_);
         this->get_parameter("use_pot_fields",        use_pot_fields_);
         this->get_parameter("allow_rotation_on_collision", allow_rotation_on_collision_);
         this->get_parameter("rotation_collision_angle_threshold", rotation_collision_angle_threshold_);
@@ -284,7 +281,6 @@ private:
     float head_unknown_scan_period_;
     float head_pan_limit_;
     float head_tilt_;
-    float head_start_delay_sec_;
     bool use_pot_fields_;
     bool allow_rotation_on_collision_;
     float rotation_collision_angle_threshold_;
@@ -344,6 +340,8 @@ private:
     double current_head_pan_ = 0.0;
     double current_head_tilt_ = 0.0;
     bool head_start_delay_armed_ = true;
+    static constexpr bool kHeadStartDelayEnabled = false;
+    static constexpr double kHeadStartDelaySec = 1.5;
 
     //############
     // Runtime parameter update callback
@@ -383,7 +381,6 @@ private:
             else if (param.get_name() == "head_unknown_scan_period") head_unknown_scan_period_ = std::max(0.5, param.as_double());
             else if (param.get_name() == "head_pan_limit") head_pan_limit_ = std::max(0.0, param.as_double());
             else if (param.get_name() == "head_tilt") head_tilt_ = param.as_double();
-            else if (param.get_name() == "head_start_delay_sec") head_start_delay_sec_ = std::max(0.0, param.as_double());
             else if (param.get_name() == "use_pot_fields")        use_pot_fields_          = param.as_bool();
             else if (param.get_name() == "allow_rotation_on_collision") allow_rotation_on_collision_ = param.as_bool();
             else if (param.get_name() == "rotation_collision_angle_threshold") rotation_collision_angle_threshold_ = param.as_double();
@@ -943,7 +940,8 @@ private:
     {
         return move_head_ &&
                !camera_bypass_ &&
-               head_start_delay_sec_ > 0.0f &&
+               kHeadStartDelayEnabled &&
+               kHeadStartDelaySec > 0.0 &&
                head_start_delay_armed_ &&
                is_current_head_straight();
     }
@@ -1099,13 +1097,13 @@ private:
                         RCLCPP_INFO(
                             this->get_logger(),
                             "SimpleMove.-> Head was straight. Waiting %.2f sec after initial head command before moving.",
-                            head_start_delay_sec_);
+                            kHeadStartDelaySec);
                     }
                 }
                 break;
 
             case SM_STATE::WAIT_FOR_HEAD_START_DELAY:
-                if ((this->now() - head_start_delay_start_).seconds() >= head_start_delay_sec_)
+                if ((this->now() - head_start_delay_start_).seconds() >= kHeadStartDelaySec)
                 {
                     state = SM_STATE::GOAL_PATH_ACCEL;
                 }
