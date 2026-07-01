@@ -39,6 +39,7 @@
 enum class SM_STATE{
     INIT,
     WAITING_FOR_TASK,
+    WAIT_FOR_HEAD_START_DELAY,
     GOAL_POSE_ACCEL,
     GOAL_POSE_CRUISE,
     GOAL_POSE_DECCEL,
@@ -86,6 +87,7 @@ public:
         this->declare_parameter<float>("head_unknown_scan_period", 3.0f);
         this->declare_parameter<float>("head_pan_limit", 1.2f);
         this->declare_parameter<float>("head_tilt", -1.0f);
+        this->declare_parameter<float>("head_start_delay_sec", 1.5f);
         this->declare_parameter<bool>("use_pot_fields", false);
         // Disabled by default: immediate abort/replan is smoother than
         // rotating in place when collision_risk flickers near obstacles.
@@ -120,10 +122,12 @@ public:
         this->get_parameter("head_unknown_scan_period", head_unknown_scan_period_);
         this->get_parameter("head_pan_limit", head_pan_limit_);
         this->get_parameter("head_tilt", head_tilt_);
+        this->get_parameter("head_start_delay_sec", head_start_delay_sec_);
         head_unknown_scan_min_known_ratio_ = std::clamp(head_unknown_scan_min_known_ratio_, 0.0f, 1.0f);
         head_unknown_scan_amplitude_ = std::max(0.0f, head_unknown_scan_amplitude_);
         head_unknown_scan_period_ = std::max(0.5f, head_unknown_scan_period_);
         head_pan_limit_ = std::max(0.0f, head_pan_limit_);
+        head_start_delay_sec_ = std::max(0.0f, head_start_delay_sec_);
         this->get_parameter("use_pot_fields",        use_pot_fields_);
         this->get_parameter("allow_rotation_on_collision", allow_rotation_on_collision_);
         this->get_parameter("rotation_collision_angle_threshold", rotation_collision_angle_threshold_);
@@ -185,6 +189,11 @@ public:
             resolve_topic_name(mapped_area_map_topic_),
             rclcpp::QoS(1).transient_local(),
             std::bind(&SimpleMoveNode::callback_slam_map, this, std::placeholders::_1));
+
+        sub_headCurrentPose_ = this->create_subscription<std_msgs::msg::Float64MultiArray>(
+            "/hardware/head/current_pose",
+            rclcpp::SensorDataQoS(),
+            std::bind(&SimpleMoveNode::callback_head_current_pose, this, std::placeholders::_1));
 
         //// motion
         sub_moveLateral_ = this->create_subscription<std_msgs::msg::Float32>(
@@ -271,6 +280,7 @@ private:
     float head_unknown_scan_period_;
     float head_pan_limit_;
     float head_tilt_;
+    float head_start_delay_sec_;
     bool use_pot_fields_;
     bool allow_rotation_on_collision_;
     float rotation_collision_angle_threshold_;
@@ -288,6 +298,7 @@ private:
     float temp_k = 0;
     int attempts = 0;
     float global_error = 0;
+    rclcpp::Time head_start_delay_start_;
 
     bool camera_bypass_ = false;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_bypass_;
@@ -311,6 +322,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr sub_goalDistAngle_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr sub_goalPath_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr sub_slam_map_;
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_headCurrentPose_;
 
     //// motion
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sub_moveLateral_;
@@ -323,6 +335,10 @@ private:
 
     // Main processing loop
     rclcpp::TimerBase::SharedPtr processing_timer_;
+
+    bool current_head_pose_received_ = false;
+    double current_head_pan_ = 0.0;
+    double current_head_tilt_ = 0.0;
 
     //############
     // Runtime parameter update callback
@@ -361,6 +377,7 @@ private:
             else if (param.get_name() == "head_unknown_scan_period") head_unknown_scan_period_ = std::max(0.5, param.as_double());
             else if (param.get_name() == "head_pan_limit") head_pan_limit_ = std::max(0.0, param.as_double());
             else if (param.get_name() == "head_tilt") head_tilt_ = param.as_double();
+            else if (param.get_name() == "head_start_delay_sec") head_start_delay_sec_ = std::max(0.0, param.as_double());
             else if (param.get_name() == "use_pot_fields")        use_pot_fields_          = param.as_bool();
             else if (param.get_name() == "allow_rotation_on_collision") allow_rotation_on_collision_ = param.as_bool();
             else if (param.get_name() == "rotation_collision_angle_threshold") rotation_collision_angle_threshold_ = param.as_double();
@@ -569,6 +586,16 @@ private:
                        slam_map_.info.width > 0 &&
                        slam_map_.info.height > 0 &&
                        slam_map_.info.resolution > 0.0f;
+    }
+
+    void callback_head_current_pose(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
+    {
+        if (msg->data.size() < 2) {
+            return;
+        }
+        current_head_pan_ = msg->data[0];
+        current_head_tilt_ = msg->data[1];
+        current_head_pose_received_ = true;
     }
 
     void callback_move_lateral(const std_msgs::msg::Float32::SharedPtr msg) 
@@ -892,6 +919,17 @@ private:
         return dist;
     }
 
+    bool should_wait_for_initial_head_motion() const
+    {
+        if (!move_head_ || camera_bypass_ || head_start_delay_sec_ <= 0.0f || !current_head_pose_received_) {
+            return false;
+        }
+
+        constexpr double kHeadStraightToleranceRad = 0.12;
+        return std::fabs(current_head_pan_) <= kHeadStraightToleranceRad &&
+               std::fabs(current_head_tilt_) <= kHeadStraightToleranceRad;
+    }
+
     void fail_path(const std::string & reason)
     {
         // Keep the failure reason in GoalStatus.text so mvn_pln can distinguish
@@ -1028,6 +1066,33 @@ private:
                         max_linear_speed_,
                         attempts,
                         static_cast<double>(attempts) / RATE);
+
+                    if (should_wait_for_initial_head_motion())
+                    {
+                        if (!get_robot_position_wrt_map()) {
+                            break;
+                        }
+                        get_next_goal_from_path(prev_pose_idx, next_pose_idx);
+                        pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+                        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
+                        head_start_delay_start_ = this->now();
+                        state = SM_STATE::WAIT_FOR_HEAD_START_DELAY;
+                        RCLCPP_INFO(
+                            this->get_logger(),
+                            "SimpleMove.-> Head was straight. Waiting %.2f sec after initial head command before moving.",
+                            head_start_delay_sec_);
+                    }
+                }
+                break;
+
+            case SM_STATE::WAIT_FOR_HEAD_START_DELAY:
+                if ((this->now() - head_start_delay_start_).seconds() >= head_start_delay_sec_)
+                {
+                    state = SM_STATE::GOAL_PATH_ACCEL;
+                }
+                else
+                {
+                    pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                 }
                 break;
 
