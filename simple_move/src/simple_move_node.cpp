@@ -343,6 +343,7 @@ private:
     bool current_head_pose_received_ = false;
     double current_head_pan_ = 0.0;
     double current_head_tilt_ = 0.0;
+    bool head_start_delay_armed_ = true;
 
     //############
     // Runtime parameter update callback
@@ -601,6 +602,9 @@ private:
         current_head_pan_ = msg->data[0];
         current_head_tilt_ = msg->data[1];
         current_head_pose_received_ = true;
+        if (!is_current_head_straight()) {
+            head_start_delay_armed_ = true;
+        }
     }
 
     void callback_move_lateral(const std_msgs::msg::Float32::SharedPtr msg) 
@@ -924,15 +928,24 @@ private:
         return dist;
     }
 
-    bool should_wait_for_initial_head_motion() const
+    bool is_current_head_straight() const
     {
-        if (!move_head_ || camera_bypass_ || head_start_delay_sec_ <= 0.0f || !current_head_pose_received_) {
+        if (!current_head_pose_received_) {
             return false;
         }
 
         constexpr double kHeadStraightToleranceRad = 0.12;
         return std::fabs(current_head_pan_) <= kHeadStraightToleranceRad &&
                std::fabs(current_head_tilt_) <= kHeadStraightToleranceRad;
+    }
+
+    bool should_wait_for_initial_head_motion() const
+    {
+        return move_head_ &&
+               !camera_bypass_ &&
+               head_start_delay_sec_ > 0.0f &&
+               head_start_delay_armed_ &&
+               is_current_head_straight();
     }
 
     void fail_path(const std::string & reason)
@@ -1081,6 +1094,7 @@ private:
                         pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
                         pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
                         head_start_delay_start_ = this->now();
+                        head_start_delay_armed_ = false;
                         state = SM_STATE::WAIT_FOR_HEAD_START_DELAY;
                         RCLCPP_INFO(
                             this->get_logger(),
