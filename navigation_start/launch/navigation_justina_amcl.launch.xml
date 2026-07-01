@@ -12,7 +12,7 @@
 
   <!-- ===== Map files ===== -->
   <arg name="static_map_file"      default="$(find-pkg-share navigation_start)/maps/maps/robocup_26_a/map.yaml"/>
-  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/maps/robocup_26_a/map.yaml"/>
+  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/prohibition_maps/robocup_26_a/map.yaml"/>
 
 
   <!-- ===== Sensor topics ===== -->
