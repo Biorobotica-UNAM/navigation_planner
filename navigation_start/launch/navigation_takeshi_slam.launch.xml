@@ -1,0 +1,381 @@
+<launch>
+
+  <!-- ================================================================== -->
+  <!--                         Global Arguments                           -->
+  <!-- ================================================================== -->
+
+  <arg name="use_sim_time"       default="false"/>
+  <arg name="namespace_hardware" default="hardware"/>
+  <arg name="namespace_nav"      default="navigation"/>
+  <arg name="use_namespace"      default="true"/>
+  <arg name="base_link_name"     default="base_link"/>
+
+  <!-- ===== Map files ===== -->
+  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/prohibition_maps/blank/map.yaml"/>
+
+  <!-- ===== Sensor topics ===== -->
+  <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
+  <arg name="point_cloud_topic"  default="/$(var namespace_nav)/camera/points_filtered"/>
+  <arg name="point_cloud_topic2" default="/$(var namespace_hardware)/camera/points"/>
+  <arg name="laser_scan_topic"   default="/$(var namespace_hardware)/base/scan"/>
+  <arg name="cmd_vel_topic"      default="/$(var namespace_hardware)/base/cmd_vel"/>
+
+  <!-- ===== Sensor toggles ===== -->
+  <arg name="use_lidar"        default="True"/>
+  <arg name="use_point_cloud"  default="True"/>
+  <arg name="use_point_cloud2" default="False"/>
+  <arg name="use_pot_fields"   default="True"/>
+
+  <!-- ===== Tuning / thresholds ===== -->
+  <arg name="cloud_downsampling"                      default="1"/>
+  <arg name="cloud_filter_input_qos_mode"             default="dual"/>
+  <arg name="cloud_filter_debug"                      default="false"/>
+  <arg name="cloud_filter_min_points_per_voxel"       default="2"/>
+  <arg name="cloud_filter_min_neighbor_voxels"        default="2"/>
+  <arg name="lidar_downsampling"                      default="1"/>
+  <arg name="static_obstacle_ignore_radius"           default="0.10"/>
+  <!-- Mantiene libre la huella del robot para no dibujar obstaculos sobre si mismo. -->
+  <arg name="self_obstacle_ignore_radius"             default="0.30"/>
+  <arg name="obstacle_cloud_min_points_per_cell"      default="2"/>
+  <arg name="obstacle_cloud_min_neighbor_cells"       default="2"/>
+  <arg name="cloud_points_threshold"                  default="15"/>
+  <arg name="lidar_points_threshold"                  default="20"/>
+  <arg name="mvn_pln_patience"                        default="True"/>
+
+  <!-- ===== Laser detection window ===== -->
+  <arg name="laser_min_x" default="0.17"/>
+  <arg name="laser_max_x" default="0.55"/>
+  <arg name="laser_min_y" default="-0.25"/>
+  <arg name="laser_max_y" default="0.25"/>
+  <arg name="laser_min_z" default="0.05"/>
+  <arg name="laser_max_z" default="1.20"/>
+
+  <!-- ===== Point cloud detection window ===== -->
+  <arg name="cloud_min_x" default="0.30"/>
+  <arg name="cloud_max_x" default="0.80"/>
+  <arg name="cloud_min_y" default="-0.30"/>
+  <arg name="cloud_max_y" default="0.30"/>
+  <arg name="cloud_min_z" default="0.15"/>
+  <arg name="cloud_max_z" default="1.20"/>
+
+  <!-- ===== Map Enhancer ===== -->
+  <arg name="map_enhancer_obstacle_radius" default="0.05"/>
+  <arg name="map_enhancer_debug"           default="True"/>
+
+  <!-- ===== Map Augmenter ===== -->
+  <!-- use_online=True: re-fetches the SLAM map on every request (map changes continuously) -->
+  <!-- Higher decay/inflation because the SLAM map can have momentary noise -->
+  <arg name="augmenter_decay_factor"     default="18"/>
+  <arg name="augmenter_inflation_radius" default="0.18"/>
+  <arg name="augmenter_cost_radius"      default="0.20"/>
+  <arg name="robot_radius" default="0.35"/>
+  <arg name="static_obstacle_inflation_radius" default="0.05"/>
+  <arg name="dynamic_obstacle_inflation_radius" default="0.12"/>
+  <arg name="map_augmenter_debug" default="false"/>
+
+  <!-- ===== Obstacle Detector ===== -->
+  <arg name="detector_decay_factor" default="4"/>
+
+  <!-- ===== Path Planner ===== -->
+  <!-- Diagonal paths disabled while SLAM is still building the map -->
+  <arg name="diagonal_paths" default="False"/>
+
+  <!-- ===== Simple Move ===== -->
+  <!-- More conservative speeds while exploring an unknown map -->
+  <arg name="max_linear_speed"  default="0.8"/>
+  <arg name="max_angular_speed" default="1.25"/>
+  <arg name="control_alpha"     default="0.2"/>
+  <arg name="control_beta"      default="0.8"/>
+  <arg name="move_head"         default="True"/>
+
+  <!-- ===== Potential Fields ===== -->
+  <arg name="pot_fields_debug"       default="False"/>
+  <arg name="show_image"             default="False"/>
+  <arg name="laser_pot_fields_d0"    default="0.35"/>
+  <arg name="laser_pot_fields_k_rej" default="0.40"/>
+  <arg name="cloud_pot_fields_d0"    default="0.80"/>
+  <arg name="cloud_pot_fields_k_rej" default="0.20"/>
+  <arg name="cloud_collision_min_y"  default="-0.30"/>
+  <arg name="cloud_collision_max_y"  default="0.30"/>
+  <arg name="laser_collision_min_y"  default="-0.25"/>
+  <arg name="laser_collision_max_y"  default="0.25"/>
+
+  <!-- ===== SLAM Toolbox ===== -->
+  <arg name="slam_map_frame"              default="map"/>
+  <arg name="slam_odom_frame"             default="odom"/>
+  <arg name="slam_base_frame"             default="base_footprint"/>
+  <arg name="slam_resolution"             default="0.05"/>
+  <arg name="slam_max_laser_range"        default="20.0"/>
+  <arg name="slam_map_update_interval"    default="1.0"/>
+  <arg name="slam_min_travel_distance"    default="0.1"/>
+  <arg name="slam_min_travel_heading"     default="0.2"/>
+
+
+  <!-- ================================================================== -->
+  <!--               Map Server (prohibition only; SLAM builds live map)  -->
+  <!-- ================================================================== -->
+
+  <node name="prohibition_map_server"
+        pkg="nav2_map_server"
+        exec="map_server"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="yaml_filename" value="$(var prohibition_map_file)"/>
+    <remap from="map" to="fixed_prohibition_layer_map"/>
+  </node>
+
+  <node name="lifecycle_manager_map"
+        pkg="nav2_lifecycle_manager"
+        exec="lifecycle_manager"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="autostart"    value="true"/>
+    <param name="node_names"   value="['prohibition_map_server']"/>
+  </node>
+
+
+  <!-- ================================================================== -->
+  <!--                   Localization (SLAM Toolbox)                      -->
+  <!-- ================================================================== -->
+
+  <node name="slam_toolbox"
+        pkg="slam_toolbox"
+        exec="async_slam_toolbox_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_sim_time"        value="$(var use_sim_time)"/>
+    <param name="scan_topic"          value="$(var laser_scan_topic)"/>
+    <param name="map_frame"           value="$(var slam_map_frame)"/>
+    <param name="odom_frame"          value="$(var slam_odom_frame)"/>
+    <param name="base_frame"          value="$(var slam_base_frame)"/>
+    <param name="mode"                value="mapping"/>
+    <param name="map_update_interval"    value="$(var slam_map_update_interval)"/>
+    <param name="resolution"             value="$(var slam_resolution)"/>
+    <param name="max_laser_range"        value="$(var slam_max_laser_range)"/>
+    <param name="minimum_travel_distance" value="$(var slam_min_travel_distance)"/>
+    <param name="minimum_travel_heading"  value="$(var slam_min_travel_heading)"/>
+    <remap from="/map"          to="map"/>
+    <remap from="/map_metadata" to="map_metadata"/>
+  </node>
+
+
+  <!-- ================================================================== -->
+  <!--                        Map Augmentation                            -->
+  <!-- ================================================================== -->
+
+  <node name="map_enhancer"
+        pkg="augment_gridmap_online"
+        exec="augment_gridmap_online_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <remap from="point_obstacle"             to="clicked_point"/>
+    <remap from="grid_map/get_augmented_map" to="prohibition_map"/>
+    <remap from="grid_map/augmented_map"     to="prohibition_layer_map"/>
+    <param name="use_namespace"   value="$(var use_namespace)"/>
+    <param name="obstacle_radius" value="$(var map_enhancer_obstacle_radius)"/>
+    <param name="debug"           value="$(var map_enhancer_debug)"/>
+    <param name="input_map"       value="fixed_prohibition_layer_map"/>
+  </node>
+
+  <node name="map_augmenter"
+        pkg="map_augmenter"
+        exec="map_augmenter_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <remap from="point_obstacle"         to="clicked_point"/>
+    <param name="use_namespace"          value="$(var use_namespace)"/>
+    <param name="static_map_server"      value="slam_toolbox/dynamic_map"/>
+    <param name="prohibition_map_server" value="prohibition_map"/>
+    <param name="base_link_name"         value="$(var base_link_name)"/>
+    <param name="decay_factor"           value="$(var augmenter_decay_factor)"/>
+    <param name="inflation_radius"       value="$(var augmenter_inflation_radius)"/>
+    <param name="cost_radius"            value="$(var augmenter_cost_radius)"/>
+    <param name="robot_radius"           value="$(var robot_radius)"/>
+    <param name="static_obstacle_inflation_radius" value="$(var static_obstacle_inflation_radius)"/>
+    <param name="dynamic_obstacle_inflation_radius" value="$(var dynamic_obstacle_inflation_radius)"/>
+    <param name="debug_maps"             value="$(var map_augmenter_debug)"/>
+    <param name="use_online"             value="True"/>
+  </node>
+
+  <node name="cloud_filter"
+        pkg="map_augmenter"
+        exec="cloud_filter_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="input_topic" value="$(var raw_point_cloud_topic)"/>
+    <param name="output_topic" value="$(var point_cloud_topic)"/>
+    <param name="input_qos_mode" value="$(var cloud_filter_input_qos_mode)"/>
+    <param name="base_link_name" value="$(var base_link_name)"/>
+    <param name="min_x" value="$(var cloud_min_x)"/>
+    <param name="max_x" value="$(var cloud_max_x)"/>
+    <param name="min_y" value="$(var cloud_min_y)"/>
+    <param name="max_y" value="$(var cloud_max_y)"/>
+    <param name="min_z" value="$(var cloud_min_z)"/>
+    <param name="max_z" value="$(var cloud_max_z)"/>
+    <param name="voxel_leaf_size" value="0.03"/>
+    <param name="input_downsampling" value="4"/>
+    <param name="processing_rate_hz" value="20.0"/>
+    <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
+    <param name="min_points_per_voxel" value="$(var cloud_filter_min_points_per_voxel)"/>
+    <param name="min_neighbor_voxels" value="$(var cloud_filter_min_neighbor_voxels)"/>
+    <param name="debug" value="$(var cloud_filter_debug)"/>
+  </node>
+
+  <node name="obstacle_detector"
+        pkg="map_augmenter"
+        exec="obstacle_detector_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_namespace"      value="$(var use_namespace)"/>
+    <param name="laser_scan_topic"   value="$(var laser_scan_topic)"/>
+    <param name="point_cloud_topic"  value="$(var point_cloud_topic)"/>
+    <param name="static_map_server"  value="slam_toolbox/dynamic_map"/>
+    <param name="base_link_name"     value="$(var base_link_name)"/>
+    <param name="use_lidar"          value="$(var use_lidar)"/>
+    <param name="use_point_cloud"    value="$(var use_point_cloud)"/>
+    <param name="use_point_cloud2"   value="$(var use_point_cloud2)"/>
+    <param name="cloud_downsampling" value="$(var cloud_downsampling)"/>
+    <param name="lidar_downsampling" value="$(var lidar_downsampling)"/>
+    <param name="decay_factor"       value="$(var detector_decay_factor)"/>
+    <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
+    <param name="static_obstacle_ignore_radius" value="$(var static_obstacle_ignore_radius)"/>
+    <param name="self_obstacle_ignore_radius" value="$(var self_obstacle_ignore_radius)"/>
+    <param name="cloud_min_points_per_cell" value="$(var obstacle_cloud_min_points_per_cell)"/>
+    <param name="cloud_min_neighbor_cells" value="$(var obstacle_cloud_min_neighbor_cells)"/>
+    <param name="laser_min_x"        value="$(var laser_min_x)"/>
+    <param name="laser_max_x"        value="$(var laser_max_x)"/>
+    <param name="laser_min_y"        value="$(var laser_min_y)"/>
+    <param name="laser_max_y"        value="$(var laser_max_y)"/>
+    <param name="laser_min_z"        value="$(var laser_min_z)"/>
+    <param name="laser_max_z"        value="$(var laser_max_z)"/>
+    <param name="cloud_min_x"        value="$(var cloud_min_x)"/>
+    <param name="cloud_max_x"        value="$(var cloud_max_x)"/>
+    <param name="cloud_min_y"        value="$(var cloud_min_y)"/>
+    <param name="cloud_max_y"        value="$(var cloud_max_y)"/>
+    <param name="cloud_min_z"        value="$(var cloud_min_z)"/>
+    <param name="cloud_max_z"        value="$(var cloud_max_z)"/>
+  </node>
+
+
+  <!-- ================================================================== -->
+  <!--                         Path Planning                              -->
+  <!-- ================================================================== -->
+
+  <node name="path_planner"
+        pkg="path_planner"
+        exec="path_planner_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_namespace"  value="$(var use_namespace)"/>
+    <param name="diagonal_paths" value="$(var diagonal_paths)"/>
+  </node>
+
+  <node name="simple_move"
+        pkg="simple_move"
+        exec="simple_move_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_namespace"     value="$(var use_namespace)"/>
+    <param name="max_linear_speed"  value="$(var max_linear_speed)"/>
+    <param name="max_angular_speed" value="$(var max_angular_speed)"/>
+    <param name="control_alpha"     value="$(var control_alpha)"/>
+    <param name="control_beta"      value="$(var control_beta)"/>
+    <param name="move_head"         value="$(var move_head)"/>
+    <param name="use_pot_fields"    value="$(var use_pot_fields)"/>
+    <param name="base_link_name"    value="$(var base_link_name)"/>
+    <remap from="/cmd_vel" to="$(var cmd_vel_topic)"/>
+  </node>
+
+  <node name="potential_fields"
+        pkg="potential_fields"
+        exec="potential_fields_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_namespace"          value="$(var use_namespace)"/>
+    <param name="debug"                  value="$(var pot_fields_debug)"/>
+    <param name="show_image"             value="$(var show_image)"/>
+    <param name="use_pot_fields"         value="$(var use_pot_fields)"/>
+    <param name="use_lidar"              value="$(var use_lidar)"/>
+    <param name="use_point_cloud"        value="$(var use_point_cloud)"/>
+    <param name="laser_min_x"            value="$(var laser_min_x)"/>
+    <param name="laser_max_x"            value="$(var laser_max_x)"/>
+    <param name="laser_min_y"            value="$(var laser_min_y)"/>
+    <param name="laser_max_y"            value="$(var laser_max_y)"/>
+    <param name="laser_min_z"            value="$(var laser_min_z)"/>
+    <param name="laser_max_z"            value="$(var laser_max_z)"/>
+    <param name="cloud_min_x"            value="$(var cloud_min_x)"/>
+    <param name="cloud_max_x"            value="$(var cloud_max_x)"/>
+    <param name="cloud_min_y"            value="$(var cloud_min_y)"/>
+    <param name="cloud_max_y"            value="$(var cloud_max_y)"/>
+    <param name="cloud_min_z"            value="$(var cloud_min_z)"/>
+    <param name="cloud_max_z"            value="$(var cloud_max_z)"/>
+    <param name="laser_pot_fields_d0"    value="$(var laser_pot_fields_d0)"/>
+    <param name="laser_pot_fields_k_rej" value="$(var laser_pot_fields_k_rej)"/>
+    <param name="cloud_pot_fields_d0"    value="$(var cloud_pot_fields_d0)"/>
+    <param name="cloud_pot_fields_k_rej" value="$(var cloud_pot_fields_k_rej)"/>
+    <param name="cloud_downsampling"     value="$(var cloud_downsampling)"/>
+    <param name="cloud_points_threshold" value="$(var cloud_points_threshold)"/>
+    <param name="lidar_points_threshold" value="$(var lidar_points_threshold)"/>
+    <param name="laser_collision_min_y"  value="$(var laser_collision_min_y)"/>
+    <param name="laser_collision_max_y"  value="$(var laser_collision_max_y)"/>
+    <param name="cloud_collision_min_y"  value="$(var cloud_collision_min_y)"/>
+    <param name="cloud_collision_max_y"  value="$(var cloud_collision_max_y)"/>
+    <param name="point_cloud_topic"      value="$(var point_cloud_topic)"/>
+    <param name="laser_scan_topic"       value="$(var laser_scan_topic)"/>
+    <remap from="/cmd_vel" to="$(var cmd_vel_topic)"/>
+  </node>
+
+  <node name="publish_enable"
+        pkg="potential_fields"
+        exec="publish_enable.py"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <param name="use_namespace" value="$(var use_namespace)"/>
+  </node>
+
+
+  <!-- ================================================================== -->
+  <!--                         Motion Planner                             -->
+  <!-- ================================================================== -->
+
+  <node name="mvn_pln"
+        pkg="mvn_pln"
+        exec="mvn_pln_node"
+        output="screen"
+        respawn="true"
+        namespace="$(var namespace_nav)">
+    <remap from="nav_control/goal" to="move_base_simple/goal"/>
+    <param name="use_namespace"  value="$(var use_namespace)"/>
+    <param name="patience"       value="$(var mvn_pln_patience)"/>
+    <param name="base_link_name" value="$(var base_link_name)"/>
+  </node>
+
+
+  <!-- ================================================================== -->
+  <!--           Navigation Interface Nodes  (no namespace)               -->
+  <!-- ================================================================== -->
+
+  <node pkg="locations_manager"
+        exec="locations_manager_node"
+        name="locations_manager_node"
+        output="screen"/>
+
+  <node pkg="nav_controller"
+        exec="nav_controller_node"
+        name="nav_controller_node"
+        output="screen"/>
+
+</launch>
