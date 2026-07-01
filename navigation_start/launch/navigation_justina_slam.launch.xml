@@ -57,9 +57,9 @@
 
   <!-- ===== Laser detection window ===== -->
   <arg name="laser_min_x" default="0.17"/>
-  <arg name="laser_max_x" default="0.55"/>
-  <arg name="laser_min_y" default="-0.35"/>
-  <arg name="laser_max_y" default="0.35"/>
+  <arg name="laser_max_x" default="0.60"/>
+  <arg name="laser_min_y" default="-0.45"/>
+  <arg name="laser_max_y" default="0.45"/>
   <arg name="laser_min_z" default="0.05"/>
   <arg name="laser_max_z" default="1.20"/>
 
@@ -94,7 +94,7 @@
   <arg name="unknown_space_cost_radius"   default="0.0"/>
 
   <!-- ===== Obstacle Detector ===== -->
-  <arg name="detector_decay_factor" default="4"/>
+  <arg name="detector_decay_factor" default="15"/>
   <!-- Herramienta experimental: promueve obstaculos Kinect muy confirmados a capa persistente
        y map_augmenter la integra automaticamente al mapa efectivo de navegacion. -->
   <arg name="persistent_cloud_obstacles_enabled" default="True"/>
@@ -112,7 +112,7 @@
   <!-- ===== Simple Move ===== -->
   <!-- More conservative speeds while exploring an unknown map -->
   <!-- Velocidad lineal maxima del robot; se mantiene baja para no rebasar al SLAM. -->
-  <arg name="max_linear_speed"  default="0.8"/>
+  <arg name="max_linear_speed"  default="0.6"/>
   <!-- Velocidad angular maxima; ayuda a explorar sin giros demasiado lentos. -->
   <arg name="max_angular_speed" default="1.25"/>
   <arg name="control_alpha"     default="0.2"/>
@@ -137,7 +137,7 @@
   <!-- ===== Potential Fields ===== -->
   <arg name="pot_fields_debug"       default="False"/>
   <arg name="show_image"             default="False"/>
-  <arg name="laser_pot_fields_d0"    default="0.35"/>
+  <arg name="laser_pot_fields_d0"    default="0.55"/>
   <arg name="laser_pot_fields_k_rej" default="0.40"/>
   <arg name="cloud_pot_fields_d0"    default="0.80"/>
   <arg name="cloud_pot_fields_k_rej" default="0.20"/>
