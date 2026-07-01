@@ -66,6 +66,7 @@ public:
         this->declare_parameter<float>("max_linear_speed",      0.3f);
         this->declare_parameter<float>("min_linear_speed",      0.05f);
         this->declare_parameter<float>("max_angular_speed",     1.0f);
+        this->declare_parameter<float>("final_angle_max_angular_speed", 0.35f);
         this->declare_parameter<float>("control_alpha",         0.6548f);
         this->declare_parameter<float>("control_beta",          0.2f);
         this->declare_parameter<float>("linear_acceleration",   0.1f);
@@ -102,6 +103,8 @@ public:
         this->get_parameter("max_linear_speed",      max_linear_speed_);
         this->get_parameter("min_linear_speed",      min_linear_speed_);
         this->get_parameter("max_angular_speed",     max_angular_speed_);
+        this->get_parameter("final_angle_max_angular_speed", final_angle_max_angular_speed_);
+        final_angle_max_angular_speed_ = std::max(0.05f, final_angle_max_angular_speed_);
         this->get_parameter("control_alpha",         alpha_);
         this->get_parameter("control_beta",          beta_);
         this->get_parameter("linear_acceleration",   linear_acceleration_);
@@ -261,6 +264,7 @@ private:
     float max_linear_speed_;
     float min_linear_speed_;
     float max_angular_speed_;
+    float final_angle_max_angular_speed_;
     float alpha_;
     float beta_;
     float linear_acceleration_;
@@ -354,6 +358,7 @@ private:
             else if (param.get_name() == "max_linear_speed")      max_linear_speed_        = param.as_double();
             else if (param.get_name() == "min_linear_speed")      min_linear_speed_        = param.as_double();
             else if (param.get_name() == "max_angular_speed")     max_angular_speed_       = param.as_double();
+            else if (param.get_name() == "final_angle_max_angular_speed") final_angle_max_angular_speed_ = std::max(0.05, param.as_double());
             else if (param.get_name() == "control_alpha")         alpha_                   = param.as_double();
             else if (param.get_name() == "control_beta")          beta_                    = param.as_double();
             else if (param.get_name() == "linear_acceleration")   linear_acceleration_     = std::max(0.01, param.as_double());
@@ -1181,7 +1186,7 @@ private:
                 if(global_error < angle_tolerance_)
                     state = SM_STATE::GOAL_POSE_FINISH;
 	                {
-                        auto cmd = calculate_speeds(robot_t_, goal_t_, max_angular_speed_, beta_/4);
+                        auto cmd = calculate_speeds(robot_t_, goal_t_, final_angle_max_angular_speed_, beta_/4);
 	                    pub_cmd_vel_->publish(cmd);
                     }
                 if(--attempts <= 0)
