@@ -33,6 +33,7 @@
 #include <vector>
 #include <chrono>
 #include <exception>
+#include <cmath>
 
 #define RATE 10
 
@@ -431,30 +432,30 @@ private:
         }
     }
 
-    void callback_simple_goal(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
-    {
-        try 
-        {
-            std::cout << "MotionPlanner.-> New goal received." << std::endl;
-            global_goal_ = msg->pose;
-            new_global_goal_ = true;
-        } 
+	    void callback_simple_goal(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+	    {
+	        try 
+	        {
+	            std::cout << "MotionPlanner.-> New goal received." << std::endl;
+	            global_goal_ = msg->pose;
+	            new_global_goal_ = true;
+	        } 
         catch (const std::exception &e) 
         {
             RCLCPP_ERROR(this->get_logger(), "MotionPlanner.-> Error processing callback_simple_goal: %s", e.what());
         }
     }
 
-    void callback_simple_move_goal_status(const actionlib_msgs::msg::GoalStatus::SharedPtr msg)
-    {
-        try 
-        {
-            simple_move_goal_status_ = *msg;
+	    void callback_simple_move_goal_status(const actionlib_msgs::msg::GoalStatus::SharedPtr msg)
+	    {
+	        try 
+	        {
+	            simple_move_goal_status_ = *msg;
 
-            std::stringstream ss;
-            ss << msg->goal_id.id;
-            ss >> simple_move_status_id_;
-        } 
+	            std::stringstream ss;
+	            ss << msg->goal_id.id;
+	            ss >> simple_move_status_id_;
+	        } 
         catch (const std::exception &e) 
         {
             RCLCPP_ERROR(this->get_logger(), "MotionPlanner.-> Error processing callback_simple_move_goal_status: %s", e.what());
@@ -499,10 +500,10 @@ private:
                            robot_x, robot_y, goal_x, goal_y)));
     }
 
-    void plan_path_from_augmented_map(
-        float robot_x, float robot_y,
-        float goal_x, float goal_y)
-    {
+	    void plan_path_from_augmented_map(
+	        float robot_x, float robot_y,
+	        float goal_x, float goal_y)
+	    {
         is_path_ = false;
         is_path_response_ = false;
         // Wait for service to be available
@@ -516,22 +517,22 @@ private:
         request->start.pose.position.y = robot_y;
         request->start.header.frame_id = "map";
 
-        request->goal.pose.position.x = goal_x;
-        request->goal.pose.position.y = goal_y;
-        request->goal.header.frame_id = "map";
+	        request->goal.pose.position.x = goal_x;
+	        request->goal.pose.position.y = goal_y;
+	        request->goal.header.frame_id = "map";
 
-        auto result_future = clt_plan_path_augmented_->async_send_request(request);
+	        auto result_future = clt_plan_path_augmented_->async_send_request(request);
 
         try
         {
-            this->path_ = result_future.get()->plan;
-            if(path_.poses.size() > 0)
-                this->is_path_ = true;
+	            this->path_ = result_future.get()->plan;
+	            if(path_.poses.size() > 0)
+	                this->is_path_ = true;
 
             this->is_path_response_ = true;
 
-            RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Path received successfully with size: %ld", path_.poses.size());
-        }
+	            RCLCPP_INFO(this->get_logger(), "MotionPlanner.-> Path received successfully with size: %ld", path_.poses.size());
+	        }
         catch (const std::exception &e)
         {
             this->is_path_response_ = true;
@@ -561,12 +562,14 @@ private:
 
             return;
         }
-        catch (const tf2::TransformException &ex)
-        {
-            //RCLCPP_WARN(this->get_logger(), "SimpleMove.-> TF Exception: %s", ex.what());
-            robot_x_ = robot_y_ = robot_t_ = 0.0f;
-            return;
-        }
+	        catch (const tf2::TransformException &ex)
+	        {
+	            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                    "MotionPlanner.-> map TF lookup failed (%s -> map): %s",
+                                    base_link_name_.c_str(), ex.what());
+	            robot_x_ = robot_y_ = robot_t_ = 0.0f;
+	            return;
+	        }
     }
 
     int publish_status(
@@ -657,11 +660,11 @@ private:
             }
 
             
-            case SM_STATE::CALCULATE_PATH:
-            {
-                get_robot_position();
-                //plan_path_from_augmented_map(robot_x_, robot_y_, global_goal_.position.x, global_goal_.position.y);
-                get_plan_path_from_augmented_map(robot_x_, robot_y_, global_goal_.position.x, global_goal_.position.y);
+	            case SM_STATE::CALCULATE_PATH:
+	            {
+	                get_robot_position();
+	                //plan_path_from_augmented_map(robot_x_, robot_y_, global_goal_.position.x, global_goal_.position.y);
+	                get_plan_path_from_augmented_map(robot_x_, robot_y_, global_goal_.position.x, global_goal_.position.y);
 
                 state = SM_STATE::WAIT_FOR_PATH_RESPONSE;
 
@@ -967,8 +970,8 @@ private:
                     break;
                 }*/
 
-                get_robot_position();
-                error = sqrt(pow(global_goal_.position.x - robot_x_, 2) + pow(global_goal_.position.y - robot_y_, 2));
+	                get_robot_position();
+	                error = sqrt(pow(global_goal_.position.x - robot_x_, 2) + pow(global_goal_.position.y - robot_y_, 2));
                 
                 if (is_temporary_no_cloud_pot_fields_ && 
                     (this->now() - no_cloud_pot_fields_start_time_) > no_cloud_pot_fields_duration_) 
