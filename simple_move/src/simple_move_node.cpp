@@ -62,6 +62,7 @@ public:
         this->declare_parameter<float>("max_linear_speed",      0.3f);
         this->declare_parameter<float>("min_linear_speed",      0.05f);
         this->declare_parameter<float>("max_angular_speed",     1.0f);
+        this->declare_parameter<float>("final_angle_max_angular_speed", 0.35f);
         this->declare_parameter<float>("control_alpha",         0.6548f);
         this->declare_parameter<float>("control_beta",          0.2f);
         this->declare_parameter<float>("linear_acceleration",   0.1f);
@@ -84,6 +85,8 @@ public:
         this->get_parameter("max_linear_speed",      max_linear_speed_);
         this->get_parameter("min_linear_speed",      min_linear_speed_);
         this->get_parameter("max_angular_speed",     max_angular_speed_);
+        this->get_parameter("final_angle_max_angular_speed", final_angle_max_angular_speed_);
+        final_angle_max_angular_speed_ = std::max(0.05f, final_angle_max_angular_speed_);
         this->get_parameter("control_alpha",         alpha_);
         this->get_parameter("control_beta",          beta_);
         this->get_parameter("linear_acceleration",   linear_acceleration_);
@@ -160,6 +163,11 @@ public:
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_collision_risk, this, std::placeholders::_1));
 
+        sub_moveHeadBypass_ = this->create_subscription<std_msgs::msg::Bool>(
+            make_name("/camera_obstacles/bypass"),
+            rclcpp::SensorDataQoS(),
+            std::bind(&SimpleMoveNode::callback_move_head_bypass, this, std::placeholders::_1));
+
         sub_rejectionForce_ = this->create_subscription<geometry_msgs::msg::Vector3>(
             make_name("/navigation/potential_fields/pf_rejection_force"), 
             rclcpp::SensorDataQoS(), 
@@ -209,6 +217,7 @@ private:
     float max_linear_speed_;
     float min_linear_speed_;
     float max_angular_speed_;
+    float final_angle_max_angular_speed_;
     float alpha_;
     float beta_;
     float linear_acceleration_;
@@ -257,6 +266,7 @@ private:
     //// motion
     rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sub_moveLateral_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_collisionRisk_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_moveHeadBypass_;
     rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr sub_rejectionForce_;
 
     //############
@@ -280,6 +290,7 @@ private:
             else if (param.get_name() == "max_linear_speed")      max_linear_speed_        = param.as_double();
             else if (param.get_name() == "min_linear_speed")      min_linear_speed_        = param.as_double();
             else if (param.get_name() == "max_angular_speed")     max_angular_speed_       = param.as_double();
+            else if (param.get_name() == "final_angle_max_angular_speed") final_angle_max_angular_speed_ = std::max(0.05, param.as_double());
             else if (param.get_name() == "control_alpha")         alpha_                   = param.as_double();
             else if (param.get_name() == "control_beta")          beta_                    = param.as_double();
             else if (param.get_name() == "linear_acceleration")   linear_acceleration_     = param.as_double();
@@ -507,6 +518,21 @@ private:
         catch (const std::exception &e) 
         {
             RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_collision_risk: %s", e.what());
+        }
+    }
+
+    void callback_move_head_bypass(const std_msgs::msg::Bool::SharedPtr msg)
+    {
+        try
+        {
+            move_head_ = !msg->data;
+            RCLCPP_INFO(this->get_logger(),
+                        "SimpleMove.-> Move head %s by camera obstacles bypass.",
+                        move_head_ ? "enabled" : "disabled");
+        }
+        catch (const std::exception &e)
+        {
+            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_move_head_bypass: %s", e.what());
         }
     }
 
@@ -903,7 +929,7 @@ private:
                 global_error = fabs(global_error);
                 if(global_error < angle_tolerance_)
                     state = SM_STATE::GOAL_POSE_FINISH;
-                pub_cmd_vel_->publish(calculate_speeds(robot_t_, goal_t_, max_angular_speed_, beta_/4));
+                pub_cmd_vel_->publish(calculate_speeds(robot_t_, goal_t_, final_angle_max_angular_speed_, beta_/4));
                 if(--attempts <= 0)
                 {
                     state = SM_STATE::GOAL_POSE_FAILED;

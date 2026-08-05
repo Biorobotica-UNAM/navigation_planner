@@ -17,7 +17,7 @@
 
   <!-- ===== Sensor topics ===== -->
   <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
-  <arg name="point_cloud_topic"  default="/$(var namespace_nav)/camera/points_filtered"/>
+  <arg name="point_cloud_topic"  default="/$(var namespace_hardware)/camera/points"/>
   <arg name="point_cloud_topic2" default="/$(var namespace_hardware)/camera/points"/>
   <arg name="laser_scan_topic"   default="/$(var namespace_hardware)/base/scan"/>
   <arg name="odom_topic"         default="/$(var namespace_hardware)/base/odom"/>
@@ -100,13 +100,13 @@
   <arg name="max_angular_speed" default="1.1"/>
   <arg name="final_angle_max_angular_speed" default="0.40"/>
   <arg name="control_alpha"     default="0.2"/>
-  <arg name="control_beta"      default="0.6"/>
+  <arg name="control_beta"      default="0.8"/>
   <arg name="move_head"         default="True"/>
 
   <!-- ===== Potential Fields ===== -->
   <arg name="pot_fields_debug"            default="False"/>
   <arg name="show_image"                  default="False"/>
-  <arg name="laser_pot_fields_d0"         default="0.55"/>
+  <arg name="laser_pot_fields_d0"         default="0.35"/>
   <arg name="laser_pot_fields_k_rej"      default="0.40"/>
   <arg name="cloud_pot_fields_d0"         default="0.80"/>
   <arg name="cloud_pot_fields_k_rej"      default="0.20"/>
@@ -244,7 +244,7 @@
     <param name="use_online"             value="$(var augmenter_use_online)"/>
   </node>
 
-  <node name="cloud_filter"
+  <!--<node name="cloud_filter"
         pkg="map_augmenter"
         exec="cloud_filter_node"
         output="screen"
@@ -268,7 +268,7 @@
     <param name="min_points_per_voxel" value="$(var cloud_filter_min_points_per_voxel)"/>
     <param name="min_neighbor_voxels" value="$(var cloud_filter_min_neighbor_voxels)"/>
     <param name="debug" value="$(var cloud_filter_debug)"/>
-  </node>
+  </node>-->
 
   <node name="obstacle_detector"
         pkg="map_augmenter"

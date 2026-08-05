@@ -16,10 +16,10 @@
 
   <!-- ===== Sensor topics ===== -->
   <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
-  <arg name="point_cloud_topic"  default="/$(var namespace_nav)/camera/points_filtered"/>
+  <arg name="point_cloud_topic"  default="/$(var namespace_nav)/camera/points"/>
   <arg name="point_cloud_topic2" default="/$(var namespace_hardware)/camera/points"/>
   <arg name="raw_laser_scan_topic" default="/$(var namespace_hardware)/base/scan"/>
-  <arg name="laser_scan_topic"   default="/$(var namespace_nav)/base/scan_filtered"/>
+  <arg name="laser_scan_topic"   default="/$(var namespace_nav)/base/scan"/>
   <arg name="cmd_vel_topic"      default="/$(var namespace_hardware)/base/cmd_vel"/>
 
   <!-- ===== Sensor toggles ===== -->
@@ -192,7 +192,7 @@
   <!--                         Laser Scan Filter                          -->
   <!-- ================================================================== -->
 
-  <node name="laser_scan_filter"
+  <!--node name="laser_scan_filter"
         pkg="map_augmenter"
         exec="laser_scan_filter_node"
         output="screen"
@@ -207,7 +207,7 @@
     <param name="neighbor_window" value="$(var laser_filter_neighbor_window)"/>
     <param name="min_similar_neighbors" value="$(var laser_filter_min_similar_neighbors)"/>
     <param name="similar_range_tolerance" value="$(var laser_filter_similar_range_tolerance)"/>
-  </node>
+  </node-->
 
 
   <!-- ================================================================== -->
@@ -293,7 +293,7 @@
     <param name="unknown_space_cost_radius" value="$(var unknown_space_cost_radius)"/>
   </node>
 
-  <node name="cloud_filter"
+  <!--node name="cloud_filter"
         pkg="map_augmenter"
         exec="cloud_filter_node"
         output="screen"
@@ -317,7 +317,7 @@
     <param name="min_points_per_voxel" value="$(var cloud_filter_min_points_per_voxel)"/>
     <param name="min_neighbor_voxels" value="$(var cloud_filter_min_neighbor_voxels)"/>
     <param name="debug" value="$(var cloud_filter_debug)"/>
-  </node>
+  </node-->
 
   <node name="obstacle_detector"
         pkg="map_augmenter"
