@@ -11,12 +11,13 @@
   <arg name="base_link_name"     default="base_link"/>
 
   <!-- ===== Map files ===== -->
-  <arg name="static_map_file"      default="$(find-pkg-share navigation_start)/maps/maps/hotel_corea/map.yaml"/>
-  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/maps/hotel_corea/map.yaml"/>
+  <arg name="static_map_file"      default="$(find-pkg-share navigation_start)/maps/maps/robocup_26_a1/map.yaml"/>
+  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/prohibition_maps/robocup_26_a1/map.yaml"/>
+
 
   <!-- ===== Sensor topics ===== -->
   <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
-  <arg name="point_cloud_topic"  default="/$(var namespace_nav)/camera/points_filtered"/>
+  <arg name="point_cloud_topic"  default="/$(var namespace_hardware)/camera/points"/>
   <arg name="point_cloud_topic2" default="/$(var namespace_hardware)/camera/points"/>
   <arg name="laser_scan_topic"   default="/$(var namespace_hardware)/base/scan"/>
   <arg name="odom_topic"         default="/$(var namespace_hardware)/base/odom"/>
@@ -26,10 +27,10 @@
   <arg name="use_lidar"        default="True"/>
   <arg name="use_point_cloud"  default="True"/>
   <arg name="use_point_cloud2" default="false"/>
-  <arg name="use_pot_fields"   default="False"/>
+  <arg name="use_pot_fields"   default="True"/>
 
   <!-- ===== Tuning / thresholds ===== -->
-  <arg name="cloud_downsampling"                      default="1"/>
+  <arg name="cloud_downsampling"                      default="5"/>
   <arg name="cloud_filter_input_qos_mode"             default="dual"/>
   <arg name="cloud_filter_debug"                      default="false"/>
   <arg name="cloud_filter_min_points_per_voxel"       default="2"/>
@@ -38,26 +39,26 @@
   <arg name="static_obstacle_ignore_radius"           default="0.001"/>
   <arg name="obstacle_cloud_min_points_per_cell"      default="2"/>
   <arg name="obstacle_cloud_min_neighbor_cells"       default="2"/>
-  <arg name="cloud_points_threshold"                  default="15"/>
+  <arg name="cloud_points_threshold"                  default="100"/>
   <arg name="lidar_points_threshold"                  default="20"/>
   <arg name="mvn_pln_patience"                        default="True"/>
 
 
   <!-- ===== Laser detection window ===== -->
   <arg name="laser_min_x" default="0.17"/>
-  <arg name="laser_max_x" default="0.55"/>
+  <arg name="laser_max_x" default="0.60"/>
   <arg name="laser_min_y" default="-0.35"/>
   <arg name="laser_max_y" default="0.35"/>
-  <arg name="laser_min_z" default="0.025"/>
-  <arg name="laser_max_z" default="1.00"/>
+  <arg name="laser_min_z" default="0.05"/>
+  <arg name="laser_max_z" default="1.20"/>
 
   <!-- ===== Point cloud detection window ===== -->
   <arg name="cloud_min_x" default="0.30"/>
   <arg name="cloud_max_x" default="0.80"/>
   <arg name="cloud_min_y" default="-0.30"/>
   <arg name="cloud_max_y" default="0.30"/>
-  <arg name="cloud_min_z" default="0.01"/>
-  <arg name="cloud_max_z" default="1.0"/>
+  <arg name="cloud_min_z" default="0.15"/>
+  <arg name="cloud_max_z" default="1.20"/>
 
   <!-- ===== Map Enhancer ===== -->
   <arg name="map_enhancer_obstacle_radius" default="0.05"/>
@@ -68,7 +69,7 @@
   <!-- decay=0 because obstacle_detector handles its own decay independently -->
   <arg name="augmenter_decay_factor"     default="0"/>
   <arg name="augmenter_inflation_radius" default="0.15"/>
-  <arg name="augmenter_cost_radius"      default="0.30"/>
+  <arg name="augmenter_cost_radius"      default="0.25"/>
   <arg name="augmenter_use_online"       default="False"/>
   <arg name="robot_radius" default="0.35"/>
   <arg name="static_obstacle_inflation_radius" default="0.05"/>
@@ -76,7 +77,7 @@
   <arg name="map_augmenter_debug" default="false"/>
 
   <!-- ===== Obstacle Detector ===== -->
-  <arg name="detector_decay_factor" default="2"/>
+  <arg name="detector_decay_factor" default="4"/>
 
   <!-- ===== AMCL ===== -->
   <arg name="pose_topic"               default="pose"/>
@@ -94,10 +95,12 @@
   <arg name="diagonal_paths" default="True"/>
 
   <!-- ===== Simple Move ===== -->
-  <arg name="max_linear_speed"  default="0.6"/>
-  <arg name="max_angular_speed" default="0.6"/>
-  <arg name="control_alpha"     default="0.08"/>
-  <arg name="control_beta"      default="0.4"/>
+  <arg name="max_linear_speed"  default="0.55"/>
+  <!--arg name="max_angular_speed" default="1.30"/-->
+  <arg name="max_angular_speed" default="1.1"/>
+  <arg name="final_angle_max_angular_speed" default="0.40"/>
+  <arg name="control_alpha"     default="0.2"/>
+  <arg name="control_beta"      default="0.8"/>
   <arg name="move_head"         default="True"/>
 
   <!-- ===== Potential Fields ===== -->
@@ -241,7 +244,7 @@
     <param name="use_online"             value="$(var augmenter_use_online)"/>
   </node>
 
-  <node name="cloud_filter"
+  <!--<node name="cloud_filter"
         pkg="map_augmenter"
         exec="cloud_filter_node"
         output="screen"
@@ -265,7 +268,7 @@
     <param name="min_points_per_voxel" value="$(var cloud_filter_min_points_per_voxel)"/>
     <param name="min_neighbor_voxels" value="$(var cloud_filter_min_neighbor_voxels)"/>
     <param name="debug" value="$(var cloud_filter_debug)"/>
-  </node>
+  </node>-->
 
   <node name="obstacle_detector"
         pkg="map_augmenter"
@@ -326,6 +329,7 @@
     <param name="use_namespace"     value="$(var use_namespace)"/>
     <param name="max_linear_speed"  value="$(var max_linear_speed)"/>
     <param name="max_angular_speed" value="$(var max_angular_speed)"/>
+    <param name="final_angle_max_angular_speed" value="$(var final_angle_max_angular_speed)"/>
     <param name="control_alpha"     value="$(var control_alpha)"/>
     <param name="control_beta"      value="$(var control_beta)"/>
     <param name="move_head"         value="$(var move_head)"/>
