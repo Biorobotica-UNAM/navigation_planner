@@ -11,8 +11,8 @@
   <arg name="base_link_name"     default="base_link"/>
 
   <!-- ===== Map files ===== -->
-  <arg name="static_map_file"      default="$(find-pkg-share navigation_start)/maps/maps/tidbots/map.yaml"/>
-  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/prohibition_maps/tidbots/map.yaml"/>
+  <arg name="static_map_file"      default="$(find-pkg-share navigation_start)/maps/maps/lab_2026/map.yaml"/>
+  <arg name="prohibition_map_file" default="$(find-pkg-share navigation_start)/maps/prohibition_maps/lab_2026/map.yaml"/>
 
   <!-- ===== Sensor topics ===== -->
   <arg name="raw_point_cloud_topic" default="/$(var namespace_hardware)/camera/points"/>
