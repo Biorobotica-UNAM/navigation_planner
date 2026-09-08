@@ -43,6 +43,7 @@ ament_target_dependencies(map_augmenter_node
   tf2_ros
   tf2_geometry_msgs
   tf2_eigen
+  sensor_msgs
 )
 target_link_libraries(map_augmenter_node Eigen3::Eigen)
 
