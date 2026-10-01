@@ -535,7 +535,7 @@ private:
         for (size_t i = 0; i < msg->ranges.size(); i += lidar_downsampling_) {
             float angle = msg->angle_min + i * msg->angle_increment;
             float range = msg->ranges[i];
-            if (!std::isfinite(range)) continue;
+            if (!std::isfinite(range) || range < 0.10f || range < msg->range_min || range > msg->range_max) continue;
 
             Eigen::Vector3d v(range * cos(angle), range * sin(angle), 0);
             v = tf * v;

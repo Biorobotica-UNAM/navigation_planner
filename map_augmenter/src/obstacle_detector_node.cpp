@@ -681,8 +681,8 @@ void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cl
     {
       float range = scan->ranges[i];
       
-      // Filtro básico de hardware/ruido
-      if (range < scan->range_min || range > scan->range_max || std::isnan(range)) {
+      // Filtro básico de hardware/ruido (descarta códigos de error del Hokuyo < 0.10m)
+      if (range < scan->range_min || range < 0.10f || range > scan->range_max || std::isnan(range) || std::isinf(range)) {
           continue;
       }
 
