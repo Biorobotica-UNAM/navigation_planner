@@ -68,11 +68,11 @@
   <!-- use_online=False: static map cached at startup; obstacle_detector manages detections -->
   <!-- decay=0 because obstacle_detector handles its own decay independently -->
   <arg name="augmenter_decay_factor"     default="0"/>
-  <arg name="augmenter_inflation_radius" default="0.15"/>
-  <arg name="augmenter_cost_radius"      default="0.25"/>
+  <arg name="augmenter_inflation_radius" default="0.18"/>
+  <arg name="augmenter_cost_radius"      default="0.30"/>
   <arg name="augmenter_use_online"       default="False"/>
   <arg name="robot_radius" default="0.30"/>
-  <arg name="static_obstacle_inflation_radius" default="0.15"/>
+  <arg name="static_obstacle_inflation_radius" default="0.18"/>
   <arg name="dynamic_obstacle_inflation_radius" default="0.25"/>
   <arg name="map_augmenter_debug" default="false"/>
 
@@ -93,6 +93,8 @@
 
   <!-- ===== Path Planner ===== -->
   <arg name="diagonal_paths" default="True"/>
+  <arg name="smooth_alpha"   default="0.1"/>
+  <arg name="smooth_beta"    default="0.9"/>
 
   <!-- ===== Simple Move ===== -->
   <arg name="max_linear_speed"  default="0.55"/>
@@ -318,6 +320,8 @@
         namespace="$(var namespace_nav)">
     <param name="use_namespace"  value="$(var use_namespace)"/>
     <param name="diagonal_paths" value="$(var diagonal_paths)"/>
+    <param name="smooth_alpha"   value="$(var smooth_alpha)"/>
+    <param name="smooth_beta"    value="$(var smooth_beta)"/>
   </node>
 
   <node name="simple_move"

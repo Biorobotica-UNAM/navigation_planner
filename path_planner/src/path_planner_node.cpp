@@ -260,7 +260,7 @@ private:
             diagonal_paths_, path);
 
         if (success) {
-            nav_msgs::msg::Path smoothed = PathPlanner::SmoothPath(path, smooth_alpha_, smooth_beta_);
+            nav_msgs::msg::Path smoothed = PathPlanner::SmoothPath(path, smooth_alpha_, smooth_beta_, 0.00001f, &map_);
             smoothed.header.stamp = this->get_clock()->now();
             smoothed.header.frame_id = "map";  // or your global frame
 
@@ -302,7 +302,7 @@ private:
             diagonal_paths_, path);
 
         if (success) {
-            nav_msgs::msg::Path smoothed = PathPlanner::SmoothPath(path, smooth_alpha_, smooth_beta_);
+            nav_msgs::msg::Path smoothed = PathPlanner::SmoothPath(path, smooth_alpha_, smooth_beta_, 0.00001f, &augmented_map_);
             smoothed.header.stamp = this->get_clock()->now();
             smoothed.header.frame_id = "map";  // or your global frame
 

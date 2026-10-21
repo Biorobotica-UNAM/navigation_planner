@@ -587,7 +587,10 @@ private:
         if(fabs(result.linear.y) < min_linear_speed)
             result.linear.y = 0;
         
-        if(use_pot_fields && !move_lat) result.linear.y = rejection_force_y;
+        if(use_pot_fields && !move_lat) {
+            const float max_pf_lat_speed = std::min(0.25f, std::fabs(max_linear_speed_));
+            result.linear.y = std::clamp(static_cast<float>(rejection_force_y), -max_pf_lat_speed, max_pf_lat_speed);
+        }
         
 	        return result;
 	    }
@@ -791,6 +794,13 @@ private:
             float scalar_projection = robot_error_x*path_vector_x + robot_error_y*path_vector_y;
             //Error is not euclidean distance, but it is measured projected on the current path segment
             error = path_vector_mag - scalar_projection;
+            // Si el robot aún no ha llegado a prev_goal (scalar_projection <= 0) y el camino tiene una curva,
+            // scalar_projection puede subestimar la distancia al siguiente punto. Usar la distancia euclidiana
+            // evita que el robot se salte puntos al girar, sin afectar el seguimiento en línea recta.
+            if (scalar_projection <= 0.0f) {
+                const float euclid_error = std::hypot(goal_x_ - robot_x_, goal_y_ - robot_y_);
+                if (euclid_error > error) error = euclid_error;
+            }
             if(error < 0.25)
                 last_pose_idx = next_pose_idx;
         }while(error < 0.25 && ++next_pose_idx < goal_path_.poses.size());

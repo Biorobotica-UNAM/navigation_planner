@@ -103,6 +103,8 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
            
             for(size_t i=0; i < node_neighbors.size(); i++)
             {
+                if(node_neighbors[i] < 0 || static_cast<size_t>(node_neighbors[i]) >= map.data.size())
+                    continue;
                 if(map.data[node_neighbors[i]] != 0 || nodes[node_neighbors[i]].in_closed_list)
                     continue;
            
@@ -160,7 +162,8 @@ nav_msgs::msg::Path PathPlanner::SmoothPath(
                         const nav_msgs::msg::Path& path, 
                         float weight_data, 
                         float weight_smooth, 
-                        float tolerance)
+                        float tolerance,
+                        const nav_msgs::msg::OccupancyGrid* map)
 {
     nav_msgs::msg::Path newPath;
     for(size_t i=0; i< path.poses.size(); i++)
@@ -170,6 +173,18 @@ nav_msgs::msg::Path PathPlanner::SmoothPath(
     int attempts = 0;
     tolerance *= path.poses.size();
     float change = tolerance + 1;
+
+    const bool has_map = (map != nullptr && !map->data.empty() && map->info.resolution > 0.0f && map->info.width > 0);
+
+    auto is_point_free = [&](float x, float y) -> bool {
+        if (!has_map) return true;
+        int cx = static_cast<int>((x - map->info.origin.position.x) / map->info.resolution);
+        int cy = static_cast<int>((y - map->info.origin.position.y) / map->info.resolution);
+        if (cx < 0 || cy < 0 || cx >= static_cast<int>(map->info.width) || cy >= static_cast<int>(map->info.height))
+            return false;
+        int idx = cy * static_cast<int>(map->info.width) + cx;
+        return map->data[idx] == 0;
+    };
 
     while(change >= tolerance && ++attempts < 1000)
     {
@@ -182,8 +197,18 @@ nav_msgs::msg::Path PathPlanner::SmoothPath(
             geometry_msgs::msg::Point new_p_prev = newPath.poses[i-1].pose.position;
             float last_x = newPath.poses[i].pose.position.x;
             float last_y = newPath.poses[i].pose.position.y;
-            new_p.x += weight_data*(old_p.x - new_p.x) + weight_smooth*(new_p_next.x + new_p_prev.x - 2.0*new_p.x);
-            new_p.y += weight_data*(old_p.y - new_p.y) + weight_smooth*(new_p_next.y + new_p_prev.y - 2.0*new_p.y);
+            float cand_x = new_p.x + weight_data*(old_p.x - new_p.x) + weight_smooth*(new_p_next.x + new_p_prev.x - 2.0*new_p.x);
+            float cand_y = new_p.y + weight_data*(old_p.y - new_p.y) + weight_smooth*(new_p_next.y + new_p_prev.y - 2.0*new_p.y);
+
+            if (is_point_free(cand_x, cand_y)) {
+                new_p.x = cand_x;
+                new_p.y = cand_y;
+            } else if (is_point_free(cand_x, last_y)) {
+                new_p.x = cand_x;
+            } else if (is_point_free(last_x, cand_y)) {
+                new_p.y = cand_y;
+            }
+
             change += fabs(new_p.x - last_x) + fabs(new_p.y - last_y);
             newPath.poses[i].pose.position = new_p;
         }

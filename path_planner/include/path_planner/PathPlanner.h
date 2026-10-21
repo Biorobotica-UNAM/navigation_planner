@@ -22,7 +22,8 @@ public:
                       const nav_msgs::msg::Path& path, 
                       float weight_data = 0.1, 
                       float weight_smooth = 0.9, 
-                      float tolerance = 0.00001);
+                      float tolerance = 0.00001,
+                      const nav_msgs::msg::OccupancyGrid* map = nullptr);
 };
 
 class Node

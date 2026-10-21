@@ -428,11 +428,15 @@ private:
                 if (sub_cloud_) {
                     sub_cloud_.reset();
                     collision_risk_cloud_ = false;
+                    rejection_force_cloud_.x = 0.0;
+                    rejection_force_cloud_.y = 0.0;
                 }
 
                 if (sub_lidar_) {
                     sub_lidar_.reset();
                     collision_risk_lidar_ = false;
+                    rejection_force_lidar_.x = 0.0;
+                    rejection_force_lidar_.y = 0.0;
                 }
             }
         } 
@@ -464,6 +468,8 @@ private:
                 if (sub_cloud_) {
                     sub_cloud_.reset();
                     collision_risk_cloud_ = false;
+                    rejection_force_cloud_.x = 0.0;
+                    rejection_force_cloud_.y = 0.0;
                 }
             }
         } 
@@ -509,6 +515,8 @@ private:
         double &rejection_force_x,
         double &rejection_force_y)
     {
+        rejection_force_x = 0.0;
+        rejection_force_y = 0.0;
         if (current_speed_linear_ <= 0.0 && !debug_) {
             return false;
         }
@@ -516,8 +524,6 @@ private:
         float optimal_x = get_search_distance(laser_max_x_); 
         int obstacle_count = 0;
         int force_count = 0;
-        rejection_force_x = 0.0;
-        rejection_force_y = 0.0;
 
         // Get transform to base_link
         geometry_msgs::msg::TransformStamped transform_stamped;
@@ -548,7 +554,7 @@ private:
             }
 
             double distance = v.norm();
-            if (distance < laser_pot_fields_d0_) {
+            if (v.x() > 0.0 && distance > laser_min_x_ && distance < laser_pot_fields_d0_) {
                 double force_mag = laser_pot_fields_k_rej_ * std::sqrt(1.0 / distance - 1.0 / laser_pot_fields_d0_);
                 rejection_force_x -= force_mag * v.x() / distance;
                 rejection_force_y -= force_mag * v.y() / distance;
@@ -572,6 +578,8 @@ private:
         double& rejection_force_x,
         double& rejection_force_y)
     {
+        rejection_force_x = 0.0;
+        rejection_force_y = 0.0;
         if (current_speed_linear_ <= 0.0 && !(debug_||show_img_)) {
             return false;
         }
@@ -579,8 +587,6 @@ private:
         float optimal_x = get_search_distance(cloud_max_x_);
         int obstacle_count = 0;
         int force_count = 0;
-        rejection_force_x = 0;
-        rejection_force_y = 0;
 
         // Setup OpenCV mask
         int w = msg->width;
@@ -771,7 +777,7 @@ private:
                 msg_rejection_force.x = rejection_force_lidar_.x + rejection_force_cloud_.x;
                 msg_rejection_force.y = rejection_force_lidar_.y + rejection_force_cloud_.y;
 
-                if (rejection_force_lidar_.y > 0 && rejection_force_cloud_.y > 0) {
+                if (rejection_force_lidar_.y * rejection_force_cloud_.y > 0.0) {
                     msg_rejection_force.x = (rejection_force_lidar_.x + rejection_force_cloud_.x) / 2.0;
                     msg_rejection_force.y = (rejection_force_lidar_.y + rejection_force_cloud_.y) / 2.0;
                 }
