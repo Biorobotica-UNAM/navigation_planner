@@ -71,7 +71,7 @@
   <arg name="augmenter_inflation_radius" default="0.15"/>
   <arg name="augmenter_cost_radius"      default="0.25"/>
   <arg name="augmenter_use_online"       default="False"/>
-  <arg name="robot_radius" default="0.30"/>
+  <arg name="robot_radius" default="0.32"/>
   <arg name="static_obstacle_inflation_radius" default="0.15"/>
   <arg name="dynamic_obstacle_inflation_radius" default="0.25"/>
   <arg name="map_augmenter_debug" default="false"/>
