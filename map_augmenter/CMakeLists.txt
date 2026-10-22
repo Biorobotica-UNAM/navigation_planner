@@ -45,6 +45,8 @@ ament_target_dependencies(map_augmenter_node
   tf2_eigen
 )
 target_link_libraries(map_augmenter_node Eigen3::Eigen)
+target_include_directories(map_augmenter_node PRIVATE include)
+target_compile_features(map_augmenter_node PRIVATE cxx_std_17)
 
 # 2) Obstacle detector
 add_executable(obstacle_detector_node
@@ -61,6 +63,8 @@ ament_target_dependencies(obstacle_detector_node
   tf2_eigen
 )
 target_link_libraries(obstacle_detector_node Eigen3::Eigen)
+target_include_directories(obstacle_detector_node PRIVATE include)
+target_compile_features(obstacle_detector_node PRIVATE cxx_std_17)
 
 
 # 3) Point cloud filter

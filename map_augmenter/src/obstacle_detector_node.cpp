@@ -1,757 +1,500 @@
-#include "rclcpp/rclcpp.hpp"
-#include "rcl_interfaces/msg/set_parameters_result.hpp"
+#include "map_augmenter/grid_utils.hpp"
 
-#include "nav_msgs/msg/occupancy_grid.hpp"
-#include "sensor_msgs/msg/point_cloud2.hpp"
-#include "sensor_msgs/msg/laser_scan.hpp"
-#include "nav_msgs/srv/get_map.hpp"
-
-#include "tf2_ros/transform_listener.h"
-#include "tf2_ros/buffer.h"
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#include "tf2_eigen/tf2_eigen.hpp"
-#include "tf2/utils.h"
-#include "Eigen/Geometry"
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/point_field.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <Eigen/Geometry>
 
 #include <algorithm>
-#include <atomic>
+#include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 class ObstacleDetectorNode : public rclcpp::Node
 {
+  using Grid = map_augmenter::Grid;
+  using Cloud = sensor_msgs::msg::PointCloud2;
+  using Scan = sensor_msgs::msg::LaserScan;
+  using Field = sensor_msgs::msg::PointField;
+  static constexpr int64_t never_observed = std::numeric_limits<int64_t>::min();
+
 public:
   ObstacleDetectorNode()
-  : Node("obstacle_detector_node"),
-    tf_buffer_(this->get_clock()),
-    tf_listener_(tf_buffer_)
+  : Node("obstacle_detector_node"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
   {
-    // === MISMA lista de params (para compatibilidad con tu YAML) ===
-    this->declare_parameter("use_namespace",          false);
-    this->declare_parameter("use_lidar",              false);
-    this->declare_parameter("use_point_cloud",        false);
-    this->declare_parameter("use_point_cloud2",       false);
-    this->declare_parameter("use_online",             false); // no se usa aquí, pero se mantiene
+    use_namespace_ = parameter("use_namespace", false, "Namespace the default internal endpoints.");
+    use_lidar_ = parameter("use_lidar", false, "Enable the LaserScan input.");
+    use_cloud_ = parameter("use_point_cloud", false, "Enable camera input 1 (PointCloud2).");
+    use_cloud2_ = parameter("use_point_cloud2", false, "Enable optional camera input 2 (also PointCloud2).");
+    laser_box_ = declare_box("laser");
+    cloud_box_ = declare_box("cloud");
+    base_link_ = parameter("base_link_name", std::string("base_footprint"), "Robot base TF frame.");
+    map_frame_ = parameter("map_frame", std::string("map"), "Required map TF frame.");
+    odom_frame_ = parameter("odom_frame", std::string("odom"), "Odometry TF frame.");
+    const double period = parameter("processing_period_sec", 0.075, "Integration and publication interval.");
+    obstacle_timeout_ = parameter("obstacle_timeout_sec", 0.75, "Lifetime since the last sensor observation.");
+    sensor_max_age_ = parameter("sensor_max_age_sec", 0.5, "Maximum accepted sensor-message age.");
+    future_tolerance_ = parameter("sensor_future_tolerance_sec", 0.05, "Maximum sensor timestamp lead.");
+    allow_zero_stamp_ = parameter("allow_zero_sensor_stamp", false,
+      "Interpret a zero sensor stamp as reception/processing time; false rejects it.");
+    tf_timeout_ = parameter("tf_timeout_sec", 0.03, "Per-transform lookup timeout.");
+    allow_tf_fallback_ = parameter("tf_allow_latest_fallback", true, "Allow a recent latest TF fallback.");
+    const double legacy_tf_warning = parameter("tf_fallback_warn_threshold_sec", 0.20,
+      "Compatibility default for tf_fallback_max_age_sec; stale fallback transforms are now rejected.");
+    tf_max_age_ = parameter("tf_fallback_max_age_sec", legacy_tf_warning, "Maximum fallback TF time difference.");
+    static_ignore_radius_ = parameter("static_obstacle_ignore_radius", 0.10,
+      "Suppress detections near raw static obstacles, in metres.");
+    ignore_static_ = parameter("ignore_static_obstacles", true, "Suppress detections already represented by the base map.");
+    self_ignore_radius_ = parameter("self_obstacle_ignore_radius", 0.0,
+      "Ignore sensor points within this horizontal distance of the robot base.");
+    laser_min_range_ = parameter("laser_min_range", 0.10, "Additional minimum laser range.");
+    cloud_downsampling_ = parameter("cloud_downsampling", 1, "Camera input 1 sample stride.");
+    cloud_downsampling2_ = parameter("cloud_downsampling2", 1, "Camera input 2 sample stride.");
+    lidar_downsampling_ = parameter("lidar_downsampling", 1, "LaserScan sample stride.");
+    cloud_min_points_ = parameter("cloud_min_points_per_cell", 2, "Minimum per-frame cloud evidence per cell.");
+    cloud_min_neighbors_ = parameter("cloud_min_neighbor_cells", 1,
+      "Minimum neighboring cells with sufficient evidence in the surrounding 3x3 cells.");
+    clear_on_pose_jump_ = parameter("clear_on_pose_jump", true, "Clear transient evidence after large map-to-odom corrections.");
+    pose_jump_translation_ = parameter("pose_jump_translation_m", 0.5, "Translation change that clears transient evidence.");
+    pose_jump_rotation_ = parameter("pose_jump_rotation_rad", 0.35, "Rotation change that clears transient evidence.");
+    log_throttle_ms_ = parameter("log_throttle_ms", 2000, "Repeated warning interval in milliseconds.");
+    const int grid_depth = parameter("map_qos_depth", 1, "Grid history depth.");
+    const int sensor_depth = parameter("sensor_qos_depth", 5, "Sensor subscription history depth.");
+    const bool map_latched = parameter("map_input_transient_local", true, "Receive the retained base map.");
+    const bool map_reliable = parameter("map_input_reliable", true, "Request reliable base maps.");
+    const bool output_latched = parameter("map_output_transient_local", true, "Retain the obstacle grid.");
+    const bool output_reliable = parameter("map_output_reliable", true, "Publish reliable obstacle grids.");
+    const bool sensor_reliable = parameter("sensor_input_reliable", false, "Request reliable sensor data instead of best effort.");
+    if (!positive(period) || !positive(obstacle_timeout_) || !nonnegative(sensor_max_age_) ||
+      !nonnegative(future_tolerance_) || !nonnegative(tf_timeout_) || !nonnegative(tf_max_age_) ||
+      !nonnegative(static_ignore_radius_) || !nonnegative(self_ignore_radius_) ||
+      !nonnegative(laser_min_range_) || !positive(pose_jump_translation_) || !positive(pose_jump_rotation_) ||
+      cloud_downsampling_ < 1 || cloud_downsampling2_ < 1 || lidar_downsampling_ < 1 ||
+      cloud_min_points_ < 1 || cloud_min_neighbors_ < 0 || cloud_min_neighbors_ > 8 ||
+      log_throttle_ms_ < 1 || grid_depth < 1 || sensor_depth < 1 ||
+      map_frame_.empty() || base_link_.empty() || odom_frame_.empty())
+    {
+      throw std::invalid_argument("Invalid obstacle detector parameter range");
+    }
 
-    this->declare_parameter("laser_min_x",            -10.0);
-    this->declare_parameter("laser_max_x",             10.0);
-    this->declare_parameter("laser_min_y",            -10.0);
-    this->declare_parameter("laser_max_y",             10.0);
-    this->declare_parameter("laser_min_z",             -1.0);
-    this->declare_parameter("laser_max_z",              2.0);
+    // Existing launch files still pass these. They no longer control this node.
+    parameter("decay_factor", 10, "Deprecated; use obstacle_timeout_sec instead of per-cycle decay.");
+    parameter("use_online", false, "Compatibility only; the augmenter relays all base-map updates.");
+    parameter("static_map_server", std::string("/static_map_server/map"),
+      "Compatibility only; map acquisition now belongs to map_augmenter.");
+    parameter("prohibition_map_server", std::string("/prohibition_map_server/map"),
+      "Compatibility only; prohibition overlay belongs to map_augmenter.");
+    parameter("inflation_radius", 0.25, "Compatibility only; inflation belongs to map_augmenter.");
+    parameter("cost_radius", 0.25, "Compatibility only; soft costs belong to map_augmenter.");
+    parameter("use_ground_filter", false, "Legacy unused option; sensor crop limits control accepted heights.");
+    parameter("use_ransac", true, "Legacy unused option; no plane fitting is performed here.");
+    parameter("ground_height_threshold", 0.05, "Legacy unused ground-filter setting.");
+    parameter("ransac_distance_threshold", 0.03, "Legacy unused ground-filter setting.");
 
-    this->declare_parameter("cloud_min_x",            -10.0);
-    this->declare_parameter("cloud_max_x",             10.0);
-    this->declare_parameter("cloud_min_y",            -10.0);
-    this->declare_parameter("cloud_max_y",             10.0);
-    this->declare_parameter("cloud_min_z",             -1.0);
-    this->declare_parameter("cloud_max_z",              2.0);
+    auto map_qos = rclcpp::QoS(grid_depth);
+    if (map_latched) {map_qos.transient_local();}
+    if (map_reliable) {map_qos.reliable();} else {map_qos.best_effort();}
+    auto output_qos = rclcpp::QoS(grid_depth);
+    if (output_latched) {output_qos.transient_local();}
+    if (output_reliable) {output_qos.reliable();} else {output_qos.best_effort();}
+    auto sensor_qos = rclcpp::QoS(sensor_depth);
+    if (sensor_reliable) {sensor_qos.reliable();} else {sensor_qos.best_effort();}
 
-    this->declare_parameter("decay_factor",           10);
-    this->declare_parameter("inflation_radius",       0.25); // se mantiene por compatibilidad
-    this->declare_parameter("cost_radius",            0.25);  // se mantiene por compatibilidad
+    pub_obstacles_ = create_publisher<Grid>(endpoint("obstacles_map_topic", "/obstacles_map"), output_qos);
+    sub_base_ = create_subscription<Grid>(
+      endpoint("base_map_topic", "/map_augmenter/base_map"), map_qos,
+      [this](Grid::ConstSharedPtr msg) {on_base_map(*msg);});
+    const auto topic1 = parameter("point_cloud_topic", std::string("/point_cloud"), "Camera input 1 PointCloud2 topic.");
+    const auto topic2 = parameter("point_cloud_topic2", std::string("/point_cloud2"), "Optional camera input 2 PointCloud2 topic.");
+    const auto laser_topic = parameter("laser_scan_topic", std::string("/scan"), "Hokuyo or other LaserScan topic.");
+    if (use_cloud_) {
+      sub_cloud1_ = create_subscription<Cloud>(topic1, sensor_qos,
+        [this](Cloud::ConstSharedPtr msg) {latest_cloud1_ = std::move(msg);});
+    }
+    if (use_cloud2_) {
+      sub_cloud2_ = create_subscription<Cloud>(topic2, sensor_qos,
+        [this](Cloud::ConstSharedPtr msg) {latest_cloud2_ = std::move(msg);});
+    }
+    if (use_lidar_) {
+      sub_scan_ = create_subscription<Scan>(laser_topic, sensor_qos,
+        [this](Scan::ConstSharedPtr msg) {latest_scan_ = std::move(msg);});
+    }
 
-    this->declare_parameter("cloud_downsampling",     1);
-    this->declare_parameter("cloud_downsampling2",    1);
-    this->declare_parameter("lidar_downsampling",     1);
-    this->declare_parameter("cloud_min_points_per_cell", 2);
-    this->declare_parameter("cloud_min_neighbor_cells",  1);
-    this->declare_parameter("tf_fallback_warn_threshold_sec", 0.20);
-    this->declare_parameter("static_obstacle_ignore_radius", 0.10);
-
-    this->declare_parameter("point_cloud_topic",      "/point_cloud");
-    this->declare_parameter("point_cloud_topic2",     "/point_cloud2");
-    this->declare_parameter("laser_scan_topic",       "/scan");
-
-    this->declare_parameter("static_map_server",      "/static_map_server/map");
-    this->declare_parameter("prohibition_map_server", "/prohibition_map_server/map"); // no se usa aquí
-    this->declare_parameter("base_link_name",         "base_footprint");
-
-    this->declare_parameter("use_ground_filter", false);
-    this->declare_parameter("use_ransac", true);
-    this->declare_parameter("ground_height_threshold", 0.05);
-    this->declare_parameter("ransac_distance_threshold", 0.03);
-
-    // === load params ===
-    this->get_parameter("use_namespace", use_namespace_);
-    this->get_parameter("use_lidar", use_lidar_);
-    this->get_parameter("use_point_cloud", use_cloud_);
-    this->get_parameter("use_point_cloud2", use_cloud2_);
-
-    this->get_parameter("laser_min_x", laser_min_x_);
-    this->get_parameter("laser_max_x", laser_max_x_);
-    this->get_parameter("laser_min_y", laser_min_y_);
-    this->get_parameter("laser_max_y", laser_max_y_);
-    this->get_parameter("laser_min_z", laser_min_z_);
-    this->get_parameter("laser_max_z", laser_max_z_);
-
-    this->get_parameter("cloud_min_x", cloud_min_x_);
-    this->get_parameter("cloud_max_x", cloud_max_x_);
-    this->get_parameter("cloud_min_y", cloud_min_y_);
-    this->get_parameter("cloud_max_y", cloud_max_y_);
-    this->get_parameter("cloud_min_z", cloud_min_z_);
-    this->get_parameter("cloud_max_z", cloud_max_z_);
-
-    this->get_parameter("decay_factor", decay_factor_);
-    this->get_parameter("cloud_downsampling", cloud_downsampling_);
-    this->get_parameter("cloud_downsampling2", cloud_downsampling2_);
-    this->get_parameter("lidar_downsampling", lidar_downsampling_);
-    this->get_parameter("cloud_min_points_per_cell", cloud_min_points_per_cell_);
-    this->get_parameter("cloud_min_neighbor_cells", cloud_min_neighbor_cells_);
-    this->get_parameter("tf_fallback_warn_threshold_sec", tf_fallback_warn_threshold_sec_);
-    this->get_parameter("static_obstacle_ignore_radius", static_obstacle_ignore_radius_);
-
-    this->get_parameter("point_cloud_topic", point_cloud_topic_);
-    this->get_parameter("point_cloud_topic2", point_cloud_topic2_);
-    this->get_parameter("laser_scan_topic", laser_scan_topic_);
-    this->get_parameter("static_map_server", static_map_server_);
-    this->get_parameter("base_link_name", base_link_name_);
-
-    // param callback (opcional pero útil si afinas rápido)
-    param_callback_handle_ = this->add_on_set_parameters_callback(
-      std::bind(&ObstacleDetectorNode::on_parameter_change, this, std::placeholders::_1));
-
-    // Publisher: mapa de obstáculos (interno)
-    pub_obstacles_map_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
-      make_name("/obstacles_map"),
-      rclcpp::QoS(1).transient_local()); // latched para que el merger tenga algo inmediato
-
-    // Subs sensores
-    sub_point_cloud_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      point_cloud_topic_, rclcpp::SensorDataQoS(),
-      std::bind(&ObstacleDetectorNode::cb_cloud1, this, std::placeholders::_1));
-
-    sub_point_cloud2_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      point_cloud_topic2_, rclcpp::SensorDataQoS(),
-      std::bind(&ObstacleDetectorNode::cb_cloud2, this, std::placeholders::_1));;
-
-    sub_laser_scan_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-      laser_scan_topic_, rclcpp::SensorDataQoS(),
-      std::bind(&ObstacleDetectorNode::cb_scan, this, std::placeholders::_1));
-
-    // Cliente: static map (solo para geometry del grid)
-    clt_get_static_map_ = this->create_client<nav_msgs::srv::GetMap>(static_map_server_);
-
-    // Espera servicio + pide mapa una vez
-    wait_map_timer_ = this->create_wall_timer(
-      std::chrono::milliseconds(500),
-      std::bind(&ObstacleDetectorNode::try_get_static_map_once, this));
-
-    // Loop rápido: decay + integración + publish
-    // (aquí es donde lo haces “rápido”)
-    processing_timer_ = this->create_wall_timer(
-      std::chrono::milliseconds(75), // 20 Hz
-      std::bind(&ObstacleDetectorNode::processing, this));
-
-    RCLCPP_INFO(this->get_logger(), "ObstacleDetector.-> obstacle_detector_node ready.");
+    // Sensor, map and timer callbacks share the default mutually-exclusive group.
+    // A frame is consumed once, including when it is rejected for age or bad TF.
+    processing_timer_ = create_wall_timer(std::chrono::duration<double>(period), [this]() {processing();});
+    RCLCPP_INFO(get_logger(), "Obstacle detector ready; configuration parameters are startup-only");
   }
 
 private:
-  // ====== state ======
-  tf2_ros::Buffer tf_buffer_;
-  tf2_ros::TransformListener tf_listener_;
-
-  nav_msgs::msg::OccupancyGrid obstacles_map_;
-  nav_msgs::msg::OccupancyGrid static_reference_map_;
-  std::atomic<bool> have_grid_{false};
-
-  // latest sensors
-  sensor_msgs::msg::PointCloud2::SharedPtr latest_cloud1_;
-  sensor_msgs::msg::PointCloud2::SharedPtr latest_cloud2_;
-  sensor_msgs::msg::LaserScan::SharedPtr latest_scan_;
-
-  std::atomic<bool> cloud1_received_{false};
-  std::atomic<bool> cloud2_received_{false};
-  std::atomic<bool> scan_received_{false};
-
-  // params
-  bool use_namespace_{false};
-  bool use_lidar_{false};
-  bool use_cloud_{false};
-  bool use_cloud2_{false};
-
-  float laser_min_x_, laser_max_x_, laser_min_y_, laser_max_y_, laser_min_z_, laser_max_z_;
-  float cloud_min_x_, cloud_max_x_, cloud_min_y_, cloud_max_y_, cloud_min_z_, cloud_max_z_;
-  int decay_factor_{10};
-  int cloud_downsampling_{1}, cloud_downsampling2_{1}, lidar_downsampling_{1};
-  int cloud_min_points_per_cell_{2};
-  int cloud_min_neighbor_cells_{1};
-  double tf_fallback_warn_threshold_sec_{0.20};
-  double static_obstacle_ignore_radius_{0.10};
-
-  std::string point_cloud_topic_, point_cloud_topic2_, laser_scan_topic_;
-  std::string static_map_server_;
-  std::string base_link_name_;
-
-  // comms
-  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr pub_obstacles_map_;
-
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_point_cloud_;
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_point_cloud2_;
-  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr sub_laser_scan_;
-
-  rclcpp::Client<nav_msgs::srv::GetMap>::SharedPtr clt_get_static_map_;
-
-  rclcpp::TimerBase::SharedPtr wait_map_timer_;
-  rclcpp::TimerBase::SharedPtr processing_timer_;
-
-  OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
-
-  // ===== utils =====
-  std::string make_name(const std::string &suffix) const
+  struct Box
   {
-    std::string sfx = suffix;
-    if (!sfx.empty() && sfx.front() != '/') sfx = "/" + sfx;
-
-    if (!use_namespace_) return sfx;
-
-    std::string name = this->get_namespace() + sfx;
-    if (name.size() > 1 && name[0] == '/' && name[1] == '/') name.erase(0, 1);
-    return name;
-  }
-
-  rcl_interfaces::msg::SetParametersResult on_parameter_change(
-    const std::vector<rclcpp::Parameter> &params)
-  {
-    rcl_interfaces::msg::SetParametersResult result;
-    result.successful = true;
-
-    for (const auto &p : params)
+    double min_x, max_x, min_y, max_y, min_z, max_z;
+    bool contains(const Eigen::Vector3d & p) const
     {
-      const auto &n = p.get_name();
-      if      (n == "use_namespace")    use_namespace_ = p.as_bool();
-      else if (n == "use_lidar")        use_lidar_     = p.as_bool();
-      else if (n == "use_point_cloud")  use_cloud_     = p.as_bool();
-      else if (n == "use_point_cloud2") use_cloud2_    = p.as_bool();
-
-      else if (n == "laser_min_x") laser_min_x_ = p.as_double();
-      else if (n == "laser_max_x") laser_max_x_ = p.as_double();
-      else if (n == "laser_min_y") laser_min_y_ = p.as_double();
-      else if (n == "laser_max_y") laser_max_y_ = p.as_double();
-      else if (n == "laser_min_z") laser_min_z_ = p.as_double();
-      else if (n == "laser_max_z") laser_max_z_ = p.as_double();
-
-      else if (n == "cloud_min_x") cloud_min_x_ = p.as_double();
-      else if (n == "cloud_max_x") cloud_max_x_ = p.as_double();
-      else if (n == "cloud_min_y") cloud_min_y_ = p.as_double();
-      else if (n == "cloud_max_y") cloud_max_y_ = p.as_double();
-      else if (n == "cloud_min_z") cloud_min_z_ = p.as_double();
-      else if (n == "cloud_max_z") cloud_max_z_ = p.as_double();
-
-      else if (n == "decay_factor") decay_factor_ = p.as_int();
-      else if (n == "cloud_downsampling")  cloud_downsampling_  = p.as_int();
-      else if (n == "cloud_downsampling2") cloud_downsampling2_ = p.as_int();
-      else if (n == "lidar_downsampling")  lidar_downsampling_  = p.as_int();
-      else if (n == "cloud_min_points_per_cell") cloud_min_points_per_cell_ = p.as_int();
-      else if (n == "cloud_min_neighbor_cells")  cloud_min_neighbor_cells_  = p.as_int();
-      else if (n == "tf_fallback_warn_threshold_sec") {
-        tf_fallback_warn_threshold_sec_ = std::max(0.0, p.as_double());
-      }
-      else if (n == "static_obstacle_ignore_radius") {
-        static_obstacle_ignore_radius_ = std::max(0.0, p.as_double());
-      }
-
-      else if (n == "point_cloud_topic")  point_cloud_topic_  = p.as_string();
-      else if (n == "point_cloud_topic2") point_cloud_topic2_ = p.as_string();
-      else if (n == "laser_scan_topic")   laser_scan_topic_   = p.as_string();
-      else if (n == "static_map_server")  static_map_server_  = p.as_string();
-      else if (n == "base_link_name")     base_link_name_     = p.as_string();
-      else {
-        // Para no romper, aquí NO marcamos fail (tu YAML tiene más params que este nodo mantiene).
-        // Solo ignoramos lo que no usa el detector.
-      }
+      return p.allFinite() && p.x() > min_x && p.x() < max_x &&
+             p.y() > min_y && p.y() < max_y && p.z() > min_z && p.z() < max_z;
     }
-    return result;
+  };
+
+  template<typename T>
+  T parameter(const std::string & name, const T & value, const std::string & description)
+  {
+    rcl_interfaces::msg::ParameterDescriptor descriptor;
+    descriptor.read_only = true;
+    descriptor.description = description;
+    return declare_parameter<T>(name, value, descriptor);
   }
 
-  Eigen::Affine3d get_relative_position(const std::string &target_frame, const std::string &source_frame)
+  std::string endpoint(const std::string & name, const std::string & old_default)
   {
-    try {
-      auto tf = tf_buffer_.lookupTransform(target_frame, source_frame, tf2::TimePointZero);
-      return tf2::transformToEigen(tf.transform);
-    } catch (...) {
-      return Eigen::Affine3d::Identity();
-    }
+    std::string value = use_namespace_ ? std::string(get_namespace()) + old_default : old_default;
+    if (value.compare(0, 2, "//") == 0) {value.erase(0, 1);}
+    return parameter(name, value, "ROS endpoint; explicit relative values use the node namespace.");
   }
 
-  bool lookup_transform_with_latest_fallback(
-    const std::string &target_frame,
-    const std::string &source_frame,
-    const rclcpp::Time &stamp,
-    Eigen::Affine3d &transform)
+  Box declare_box(const std::string & prefix)
   {
+    Box box{
+      parameter(prefix + "_min_x", -10.0, "Minimum sensor X in the robot base frame, metres."),
+      parameter(prefix + "_max_x", 10.0, "Maximum sensor X in the robot base frame, metres."),
+      parameter(prefix + "_min_y", -10.0, "Minimum sensor Y in the robot base frame, metres."),
+      parameter(prefix + "_max_y", 10.0, "Maximum sensor Y in the robot base frame, metres."),
+      parameter(prefix + "_min_z", -1.0, "Minimum sensor Z in the robot base frame, metres."),
+      parameter(prefix + "_max_z", 2.0, "Maximum sensor Z in the robot base frame, metres.")};
+    if (!std::isfinite(box.min_x) || !std::isfinite(box.max_x) ||
+      !std::isfinite(box.min_y) || !std::isfinite(box.max_y) ||
+      !std::isfinite(box.min_z) || !std::isfinite(box.max_z) ||
+      box.min_x >= box.max_x || box.min_y >= box.max_y || box.min_z >= box.max_z)
+    {
+      throw std::invalid_argument("Invalid " + prefix + " crop box");
+    }
+    return box;
+  }
+
+  static bool positive(double value) {return std::isfinite(value) && value > 0.0;}
+  static bool nonnegative(double value) {return std::isfinite(value) && value >= 0.0;}
+
+  void on_base_map(const Grid & map)
+  {
+    std::string reason;
+    if (!map_augmenter::validate_grid(map, &reason)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_, "Rejected base map: %s", reason.c_str());
+      return;
+    }
+    if (map.header.frame_id != map_frame_) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
+        "Rejected base-map frame '%s'; expected '%s'", map.header.frame_id.c_str(), map_frame_.c_str());
+      return;
+    }
+    const bool changed = !have_grid_ || !map_augmenter::same_geometry(obstacles_map_, map);
+    const bool reference_changed = changed || static_reference_.data != map.data;
+    if (changed) {
+      Grid resized = map_augmenter::empty_obstacle_grid(map);
+      std::vector<int64_t> times(resized.data.size(), never_observed);
+      if (have_grid_) {
+        map_augmenter::for_each_projected_obstacle(obstacles_map_, resized, [&](size_t from, size_t to) {
+          resized.data[to] = std::max(resized.data[to], obstacles_map_.data[from]);
+          times[to] = std::max(times[to], last_observed_ns_[from]);
+        });
+      }
+      obstacles_map_ = std::move(resized);
+      last_observed_ns_ = std::move(times);
+    }
+    static_reference_ = map;
+    if (reference_changed && ignore_static_) {
+      static_ignore_mask_ = map_augmenter::inflate_obstacles(map, static_ignore_radius_, true);
+    }
+    have_grid_ = true;
+  }
+
+  bool sensor_stamp(const builtin_interfaces::msg::Time & header, rclcpp::Time & stamp)
+  {
+    stamp = rclcpp::Time(header, get_clock()->get_clock_type());
+    if (stamp.nanoseconds() == 0) {
+      if (!allow_zero_stamp_) {return false;}
+      stamp = now();
+    }
+    if (stamp.nanoseconds() <= reset_before_ns_) {return false;}
+    const double age = (now() - stamp).seconds();
+    return age <= sensor_max_age_ && age >= -future_tolerance_;
+  }
+
+  bool lookup_transform(const std::string & target, const std::string & source,
+    const rclcpp::Time & stamp, Eigen::Affine3d & result)
+  {
+    if (source.empty()) {return false;}
     try {
-      auto tf = tf_buffer_.lookupTransform(
-        target_frame,
-        source_frame,
-        stamp,
-        rclcpp::Duration::from_seconds(0.03));
-      transform = tf2::transformToEigen(tf.transform);
+      const auto tf = tf_buffer_.lookupTransform(target, source, stamp,
+        rclcpp::Duration::from_seconds(tf_timeout_));
+      result = tf2::transformToEigen(tf.transform);
       return true;
-    } catch (const std::exception &exact_error) {
-      try {
-        // Los sensores pueden llegar unos milisegundos por delante del ultimo
-        // TF publicado. Usar la TF mas reciente como respaldo evita perder
-        // frames completos y mantiene estable /navigation/obstacles_map.
-        auto tf = tf_buffer_.lookupTransform(
-          target_frame,
-          source_frame,
-          rclcpp::Time(0),
-          rclcpp::Duration::from_seconds(0.03));
-        transform = tf2::transformToEigen(tf.transform);
-        const double tf_delta_sec =
-          std::fabs((stamp - rclcpp::Time(tf.header.stamp)).seconds());
-        if (tf_delta_sec > tf_fallback_warn_threshold_sec_) {
-          RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 3000,
-            "ObstacleDetector.-> Exact TF failed from '%s' to '%s' by %.3f s, using latest TF: %s",
-            source_frame.c_str(),
-            target_frame.c_str(),
-            tf_delta_sec,
-            exact_error.what());
-        }
-        return true;
-      } catch (const std::exception &latest_error) {
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 2000,
-          "ObstacleDetector.-> TF lookup failed from '%s' to '%s': %s",
-          source_frame.c_str(),
-          target_frame.c_str(),
-          latest_error.what());
+    } catch (const tf2::TransformException &) {
+      if (!allow_tf_fallback_) {return false;}
+    }
+    try {
+      const auto tf = tf_buffer_.lookupTransform(target, source,
+        rclcpp::Time(0, 0, get_clock()->get_clock_type()),
+        rclcpp::Duration::from_seconds(tf_timeout_));
+      const rclcpp::Time tf_stamp(tf.header.stamp, get_clock()->get_clock_type());
+      // A zero timestamp is allowed for a static transform.
+      if (tf_stamp.nanoseconds() != 0 && std::abs((stamp - tf_stamp).seconds()) > tf_max_age_) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
+          "Rejected stale fallback TF from '%s' to '%s'", source.c_str(), target.c_str());
         return false;
       }
+      result = tf2::transformToEigen(tf.transform);
+      return true;
+    } catch (const tf2::TransformException & error) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_, "TF unavailable: %s", error.what());
+      return false;
     }
   }
 
-  // ===== map init =====
-  /*void try_get_static_map_once()
+  void mark_obstacle(int x, int y, const rclcpp::Time & stamp)
   {
-    if (have_grid_) {
-      //wait_map_timer_->cancel();
-      return;
-    }
-    if (!clt_get_static_map_->wait_for_service(std::chrono::seconds(0))) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                           "ObstacleDetector.-> Waiting for static_map service...");
-      return;
-    }
-
-    auto req = std::make_shared<nav_msgs::srv::GetMap::Request>();
-    clt_get_static_map_->async_send_request(req,
-      [this](rclcpp::Client<nav_msgs::srv::GetMap>::SharedFuture fut) {
-        try {
-          auto map = fut.get()->map;
-          obstacles_map_ = map;
-          for (auto &c : obstacles_map_.data) c = 0;
-          have_grid_ = true;
-          RCLCPP_INFO(this->get_logger(), "ObstacleDetector.-> Got grid %u x %u (res %.3f)",
-                      obstacles_map_.info.width, obstacles_map_.info.height, obstacles_map_.info.resolution);
-        } catch (const std::exception &e) {
-          RCLCPP_ERROR(this->get_logger(), "ObstacleDetector.-> Failed to get static map: %s", e.what());
-        }
-      }
-    );
-  }*/
-
-  void try_get_static_map_once()
-{
-  if (have_grid_) return;
-
-  if (!clt_get_static_map_->wait_for_service(std::chrono::seconds(0))) {
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                         "ObstacleDetector.-> Waiting for static_map service...");
-    return;
+    const size_t index = map_augmenter::cell_index(obstacles_map_, x, y);
+    if (ignore_static_ && static_ignore_mask_.data[index] > 0) {return;}
+    // Occupancy encoding is fixed: unknown=-1, free=0, occupied=100.
+    obstacles_map_.data[index] = 100;
+    last_observed_ns_[index] = std::max(last_observed_ns_[index], stamp.nanoseconds());
   }
 
-  auto req = std::make_shared<nav_msgs::srv::GetMap::Request>();
-  clt_get_static_map_->async_send_request(req,
-    [this](rclcpp::Client<nav_msgs::srv::GetMap>::SharedFuture fut) {
-      try {
-        auto map = fut.get()->map;
-
-        if (map.info.width == 0 || map.info.height == 0 || map.data.empty()) {
-          RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                               "ObstacleDetector.-> Got EMPTY map. Will retry...");
-          return;
-        }
-
-        static_reference_map_ = map;
-        obstacles_map_ = map;
-        for (auto &c : obstacles_map_.data) c = 0;
-        have_grid_ = true;
-
-        RCLCPP_INFO(this->get_logger(),
-                    "ObstacleDetector.-> Got base grid %u x %u (res %.3f). Starting publish.",
-                    obstacles_map_.info.width, obstacles_map_.info.height, obstacles_map_.info.resolution);
-
-        if (wait_map_timer_) wait_map_timer_->cancel();
-
-      } catch (const std::exception &e) {
-        RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                              "ObstacleDetector.-> Failed to get static map: %s (will retry)", e.what());
-      }
-    });
-}
-
-
-  // ===== sensor callbacks =====
-  void cb_cloud1(const sensor_msgs::msg::PointCloud2::SharedPtr msg) { latest_cloud1_ = msg; cloud1_received_ = true; }
-  void cb_cloud2(const sensor_msgs::msg::PointCloud2::SharedPtr msg) { latest_cloud2_ = msg; cloud2_received_ = true; }
-  void cb_scan  (const sensor_msgs::msg::LaserScan::SharedPtr msg)   { latest_scan_   = msg; scan_received_   = true; }
-
-  // ===== core =====
-  bool is_near_static_obstacle(int cell_x, int cell_y) const
+  // Validate arbitrary PointCloud2 layouts instead of assuming x/y/z at 0/4/8.
+  static const Field * coordinate_field(const Cloud & cloud, const std::string & name)
   {
-    if (static_reference_map_.data.empty()) return false;
-
-    const int width = static_cast<int>(static_reference_map_.info.width);
-    const int height = static_cast<int>(static_reference_map_.info.height);
-    if (cell_x < 0 || cell_x >= width || cell_y < 0 || cell_y >= height) return false;
-
-    const double resolution = static_reference_map_.info.resolution;
-    if (resolution <= 0.0) return false;
-
-    const int radius_cells = static_cast<int>(
-      std::ceil(std::max(0.0, static_obstacle_ignore_radius_) / resolution));
-
-    for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
-      for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
-        if (dx * dx + dy * dy > radius_cells * radius_cells) continue;
-
-        const int nx = cell_x + dx;
-        const int ny = cell_y + dy;
-        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-
-        const int nidx = ny * width + nx;
-        if (nidx >= 0 &&
-            nidx < static_cast<int>(static_reference_map_.data.size()) &&
-            static_reference_map_.data[nidx] > 0) {
-          return true;
-        }
-      }
+    for (const auto & field : cloud.fields) {
+      if (field.name != name || field.count < 1) {continue;}
+      const uint32_t size = field.datatype == Field::FLOAT32 ? sizeof(float) :
+        field.datatype == Field::FLOAT64 ? sizeof(double) : 0;
+      if (size != 0 && static_cast<uint64_t>(field.offset) + size <= cloud.point_step) {return &field;}
     }
-
-    return false;
+    return nullptr;
   }
 
-  inline void mark_cell(double mx, double my)
+  template<typename Scalar>
+  static double read_scalar(const uint8_t * source, bool big_endian)
   {
-    int cell_x = static_cast<int>((mx - obstacles_map_.info.origin.position.x) / obstacles_map_.info.resolution);
-    int cell_y = static_cast<int>((my - obstacles_map_.info.origin.position.y) / obstacles_map_.info.resolution);
-    int idx = cell_y * static_cast<int>(obstacles_map_.info.width) + cell_x;
-    if (idx >= 0 && idx < static_cast<int>(obstacles_map_.data.size())) {
-      if (is_near_static_obstacle(cell_x, cell_y)) {
-        return;
-      }
-      obstacles_map_.data[idx] = 100;
-    }
+    std::array<uint8_t, sizeof(Scalar)> bytes;
+    std::copy_n(source, bytes.size(), bytes.begin());
+    const uint16_t native = 1;
+    const bool native_big = *reinterpret_cast<const uint8_t *>(&native) == 0;
+    if (big_endian != native_big) {std::reverse(bytes.begin(), bytes.end());}
+    Scalar value;
+    std::memcpy(&value, bytes.data(), sizeof(value));
+    return static_cast<double>(value);
   }
 
-  // Usamos argumentos por valor para que el compilador los ponga en registros (CPU registers)
-  inline void mark_cell_fast(double x, double y, 
-                            double origin_x, double origin_y, 
-                            double inv_res, int width, int height, int map_size)
+  static double read_coordinate(const uint8_t * point, const Field & field, bool big_endian)
   {
-    // Usar el inverso de la resolución (multiplicación) es más rápido que dividir
-    int cell_x = static_cast<int>((x - origin_x) * inv_res);
-    int cell_y = static_cast<int>((y - origin_y) * inv_res);
-
-    if (cell_x < 0 || cell_x >= width || cell_y < 0 || cell_y >= height) return;
-
-    int idx = cell_y * width + cell_x;
-
-    // Verificación de límites rápida
-    if (idx >= 0 && idx < map_size) {
-      if (is_near_static_obstacle(cell_x, cell_y)) {
-        return;
-      }
-      obstacles_map_.data[idx] = 100;
-    }
+    const auto * source = point + field.offset;
+    return field.datatype == Field::FLOAT32 ?
+      read_scalar<float>(source, big_endian) : read_scalar<double>(source, big_endian);
   }
 
   struct CellEvidence
   {
-    int count{0};
-    int cell_x{0};
-    int cell_y{0};
+    size_t count{0};
+    int x{0}, y{0};
   };
-/*
-void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cloud, int downsample)
-{
-  if (!cloud) return;
-  if (cloud->data.empty() || cloud->width == 0 || cloud->height == 0) return;
 
-  const unsigned char *p = cloud->data.data();
-  Eigen::Affine3d cam_to_robot = get_relative_position(base_link_name_, cloud->header.frame_id);
-  Eigen::Affine3d robot_to_map = get_relative_position("map", base_link_name_);
-
-  const size_t total = static_cast<size_t>(cloud->width) * static_cast<size_t>(cloud->height);
-  
-  for (size_t i = 0; i < total; i += static_cast<size_t>(downsample))
+  void add_cloud(const Cloud & cloud, int stride)
   {
-    Eigen::Vector3d v(
-      *reinterpret_cast<const float*>(p + 0),
-      *reinterpret_cast<const float*>(p + 4),
-      *reinterpret_cast<const float*>(p + 8)
-    );
-
-    v = cam_to_robot * v;
-
-    if (v.x() > cloud_min_x_ && v.x() < cloud_max_x_ &&
-        v.y() > cloud_min_y_ && v.y() < cloud_max_y_ &&
-        v.z() > cloud_min_z_ && v.z() < cloud_max_z_)
-    {
-      v = robot_to_map * v;
-      mark_cell(v.x(), v.y());
-    }
-
-    p += static_cast<std::size_t>(downsample * cloud->point_step);
-  }
-}
-
-  void add_obstacles_from_scan(const sensor_msgs::msg::LaserScan::SharedPtr &scan, int downsample)
-  {
-    if (!scan) return;
-
-    Eigen::Affine3d lidar_to_robot = get_relative_position(base_link_name_, scan->header.frame_id);
-    Eigen::Affine3d robot_to_map   = get_relative_position("map", base_link_name_);
-
-    for (size_t i = 0; i < scan->ranges.size(); i += static_cast<size_t>(downsample))
-    {
-      float range = scan->ranges[i];
-      float angle = scan->angle_min + static_cast<float>(i) * scan->angle_increment;
-
-      Eigen::Vector3d v(range * std::cos(angle), range * std::sin(angle), 0.0);
-      v = lidar_to_robot * v;
-
-      if (v.x() > laser_min_x_ && v.x() < laser_max_x_ &&
-          v.y() > laser_min_y_ && v.y() < laser_max_y_ &&
-          v.z() > laser_min_z_ && v.z() < laser_max_z_)
-      {
-        v = robot_to_map * v;
-        mark_cell(v.x(), v.y());
-      }
-    }
-  }
-*/
-  void add_obstacles_from_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr &cloud, int downsample)
-  {
-    if (!cloud || cloud->data.empty()) return;
-
-    // --- 1. TFs ÚNICAS POR NUBE ---
-    Eigen::Affine3d cam_to_robot;
-    Eigen::Affine3d robot_to_map;
-    // De camara a base_link (para la cajita) y de base_link a mapa (grid).
-    if (!lookup_transform_with_latest_fallback(
-        base_link_name_, cloud->header.frame_id, cloud->header.stamp, cam_to_robot)) {
+    if (cloud.width == 0 || cloud.height == 0) {return;}
+    const auto * fx = coordinate_field(cloud, "x");
+    const auto * fy = coordinate_field(cloud, "y");
+    const auto * fz = coordinate_field(cloud, "z");
+    const uint64_t minimum_row = static_cast<uint64_t>(cloud.width) * cloud.point_step;
+    const uint64_t required = static_cast<uint64_t>(cloud.row_step) * cloud.height;
+    if (!fx || !fy || !fz || cloud.row_step < minimum_row || required > cloud.data.size()) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_, "Rejected malformed PointCloud2 layout");
       return;
     }
-    if (!lookup_transform_with_latest_fallback(
-        "map", base_link_name_, cloud->header.stamp, robot_to_map)) {
-      return;
+    rclcpp::Time stamp(0, 0, get_clock()->get_clock_type());
+    if (!sensor_stamp(cloud.header.stamp, stamp)) {return;}
+    Eigen::Affine3d sensor_to_base, base_to_map;
+    if (!lookup_transform(base_link_, cloud.header.frame_id, stamp, sensor_to_base) ||
+      !lookup_transform(map_frame_, base_link_, stamp, base_to_map)) {return;}
+
+    std::unordered_map<size_t, CellEvidence> hits;
+    const size_t total = static_cast<size_t>(cloud.width) * cloud.height;
+    for (size_t i = 0; i < total; i += static_cast<size_t>(stride)) {
+      // Respect padding between rows in organised Xtion clouds.
+      const auto * p = cloud.data.data() + (i / cloud.width) * cloud.row_step +
+        (i % cloud.width) * cloud.point_step;
+      const Eigen::Vector3d point(
+        read_coordinate(p, *fx, cloud.is_bigendian),
+        read_coordinate(p, *fy, cloud.is_bigendian),
+        read_coordinate(p, *fz, cloud.is_bigendian));
+      if (!point.allFinite()) {continue;}
+      const Eigen::Vector3d base_point = sensor_to_base * point;
+      if (!cloud_box_.contains(base_point) || base_point.head<2>().norm() < self_ignore_radius_) {continue;}
+      const Eigen::Vector3d map_point = base_to_map * base_point;
+      int x, y;
+      if (!map_augmenter::world_to_cell(obstacles_map_, map_point.x(), map_point.y(), x, y)) {continue;}
+      auto & hit = hits[map_augmenter::cell_index(obstacles_map_, x, y)];
+      ++hit.count;
+      hit.x = x;
+      hit.y = y;
     }
-
-    // --- 2. PRECALCULO DE REJILLA ---
-    double inv_res = 1.0 / obstacles_map_.info.resolution;
-    double origin_x = obstacles_map_.info.origin.position.x;
-    double origin_y = obstacles_map_.info.origin.position.y;
-    int width = static_cast<int>(obstacles_map_.info.width);
-    int height = static_cast<int>(obstacles_map_.info.height);
-    int map_size = static_cast<int>(obstacles_map_.data.size());
-
-    // --- 3. BUCLE DE PUNTOS ---
-    // La nube del Kinect puede traer ruido temporal o puntos aislados en bordes.
-    // En vez de marcar una celda con un solo punto, acumulamos evidencia por celda
-    // y solo publicamos obstaculos donde exista densidad y continuidad espacial.
-    std::unordered_map<int, CellEvidence> cell_hits;
-    cell_hits.reserve(1024);
-
-    const unsigned char *p = cloud->data.data();
-    const size_t point_step = cloud->point_step;
-    const size_t total = static_cast<size_t>(cloud->width) * static_cast<size_t>(cloud->height);
-    const size_t skip = static_cast<size_t>(std::max(1, downsample)) * point_step;
-
-    for (size_t i = 0; i < total; i += static_cast<size_t>(downsample))
-    {
-      // Punto en coordenadas de cámara
-      Eigen::Vector3d v_cam(
-        *reinterpret_cast<const float*>(p + 0),
-        *reinterpret_cast<const float*>(p + 4),
-        *reinterpret_cast<const float*>(p + 8)
-      );
-      if (!std::isfinite(v_cam.x()) || !std::isfinite(v_cam.y()) || !std::isfinite(v_cam.z())) {
-        p += skip;
-        continue;
-      }
-
-      Eigen::Vector3d v_robot = cam_to_robot * v_cam;
-
-      if (v_robot.x() > cloud_min_x_ && v_robot.x() < cloud_max_x_ &&
-          v_robot.y() > cloud_min_y_ && v_robot.y() < cloud_max_y_ &&
-          v_robot.z() > cloud_min_z_ && v_robot.z() < cloud_max_z_)
-      {
-        Eigen::Vector3d v_map = robot_to_map * v_robot;
-
-        int cell_x = static_cast<int>((v_map.x() - origin_x) * inv_res);
-        int cell_y = static_cast<int>((v_map.y() - origin_y) * inv_res);
-        if (cell_x < 0 || cell_x >= width || cell_y < 0 || cell_y >= height) {
-          p += skip;
-          continue;
+    for (const auto & entry : hits) {
+      const auto & hit = entry.second;
+      if (hit.count < static_cast<size_t>(cloud_min_points_)) {continue;}
+      int neighbors = 0;
+      for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+          if (dx == 0 && dy == 0) {continue;}
+          const int x = hit.x + dx, y = hit.y + dy;
+          if (x < 0 || y < 0 || x >= static_cast<int>(obstacles_map_.info.width) ||
+            y >= static_cast<int>(obstacles_map_.info.height)) {continue;}
+          const auto found = hits.find(map_augmenter::cell_index(obstacles_map_, x, y));
+          if (found != hits.end() && found->second.count >= static_cast<size_t>(cloud_min_points_)) {++neighbors;}
         }
-
-        int idx = cell_y * width + cell_x;
-        auto &hit = cell_hits[idx];
-        hit.count++;
-        hit.cell_x = cell_x;
-        hit.cell_y = cell_y;
       }
-      p += skip;
-    }
-
-    // --- 4. VALIDACION DE CELDAS ---
-    // Una silla/mesa real proyectada al mapa normalmente ocupa varias celdas cercanas.
-    // Si una celda no tiene suficientes puntos o no tiene vecinos con evidencia,
-    // se considera ruido y no se manda al mapa de obstaculos.
-    const int min_points = std::max(1, cloud_min_points_per_cell_);
-    const int min_neighbors = std::max(0, cloud_min_neighbor_cells_);
-
-    for (const auto &entry : cell_hits)
-    {
-      const int idx = entry.first;
-      const CellEvidence &hit = entry.second;
-
-      if (hit.count < min_points) continue;
-
-      if (min_neighbors > 0) {
-        int neighbors = 0;
-        for (int dy = -1; dy <= 1; ++dy) {
-          for (int dx = -1; dx <= 1; ++dx) {
-            if (dx == 0 && dy == 0) continue;
-
-            const int nx = hit.cell_x + dx;
-            const int ny = hit.cell_y + dy;
-            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-
-            const int nidx = ny * width + nx;
-            auto nentry = cell_hits.find(nidx);
-            if (nentry != cell_hits.end() && nentry->second.count >= min_points) {
-              neighbors++;
-            }
-          }
-        }
-        if (neighbors < min_neighbors) continue;
-      }
-
-      if (idx >= 0 && idx < map_size) {
-        if (is_near_static_obstacle(hit.cell_x, hit.cell_y)) {
-          continue;
-        }
-        obstacles_map_.data[idx] = 100;
-      }
+      if (neighbors >= cloud_min_neighbors_) {mark_obstacle(hit.x, hit.y, stamp);}
     }
   }
 
-  void add_obstacles_from_scan(const sensor_msgs::msg::LaserScan::SharedPtr &scan, int downsample)
+  void add_scan(const Scan & scan)
   {
-    if (!scan) return;
-
-    // --- 1. TFs ÚNICAS (UNA VEZ POR ESCANEO) ---
-    Eigen::Affine3d lidar_to_robot;
-    Eigen::Affine3d robot_to_map;
-    if (!lookup_transform_with_latest_fallback(
-        base_link_name_, scan->header.frame_id, scan->header.stamp, lidar_to_robot)) {
-      return;
-    }
-    if (!lookup_transform_with_latest_fallback(
-        "map", base_link_name_, scan->header.stamp, robot_to_map)) {
-      return;
-    }
-
-    // --- 2. PRECALCULO DE REJILLA ---
-    double inv_res = 1.0 / obstacles_map_.info.resolution;
-    double origin_x = obstacles_map_.info.origin.position.x;
-    double origin_y = obstacles_map_.info.origin.position.y;
-    int width = static_cast<int>(obstacles_map_.info.width);
-    int height = static_cast<int>(obstacles_map_.info.height);
-    int map_size = static_cast<int>(obstacles_map_.data.size());
-
-    // --- 3. BUCLE DE LECTURAS ---
-    const size_t skip = std::max(1, downsample);
-    for (size_t i = 0; i < scan->ranges.size(); i += skip)
-    {
-      float range = scan->ranges[i];
-      
-      // Filtro básico de hardware/ruido (descarta códigos de error del Hokuyo < 0.10m)
-      if (range < scan->range_min || range < 0.10f || range > scan->range_max || std::isnan(range) || std::isinf(range)) {
-          continue;
-      }
-
-      float angle = scan->angle_min + static_cast<float>(i) * scan->angle_increment;
-
-      // Punto en coordenadas locales del LIDAR (X es hacia adelante, Y lateral)
-      Eigen::Vector3d v_lidar(range * std::cos(angle), range * std::sin(angle), 0.0);
-
-      // PASO A: Transformar a coordenadas del ROBOT
-      Eigen::Vector3d v_robot = lidar_to_robot * v_lidar;
-
-      if (v_robot.x() > laser_min_x_ && v_robot.x() < laser_max_x_ &&
-          v_robot.y() > laser_min_y_ && v_robot.y() < laser_max_y_ &&
-          v_robot.z() > laser_min_z_ && v_robot.z() < laser_max_z_)
-      {
-        // PASO B: Si está en la caja, lo pasamos al MAPA
-        Eigen::Vector3d v_map = robot_to_map * v_robot;
-        
-        mark_cell_fast(v_map.x(), v_map.y(), origin_x, origin_y, inv_res, width, height, map_size);
-      }
+    if (!std::isfinite(scan.range_min) || !std::isfinite(scan.range_max) ||
+      scan.range_min < 0.0f || scan.range_max < scan.range_min ||
+      !std::isfinite(scan.angle_min) || !std::isfinite(scan.angle_increment)) {return;}
+    rclcpp::Time stamp(0, 0, get_clock()->get_clock_type());
+    if (!sensor_stamp(scan.header.stamp, stamp)) {return;}
+    Eigen::Affine3d sensor_to_base, base_to_map;
+    if (!lookup_transform(base_link_, scan.header.frame_id, stamp, sensor_to_base) ||
+      !lookup_transform(map_frame_, base_link_, stamp, base_to_map)) {return;}
+    for (size_t i = 0; i < scan.ranges.size(); i += static_cast<size_t>(lidar_downsampling_)) {
+      const double range = scan.ranges[i];
+      if (!std::isfinite(range) || range < scan.range_min ||
+        range > scan.range_max || range < laser_min_range_) {continue;}
+      const double angle = scan.angle_min + i * scan.angle_increment;
+      const Eigen::Vector3d base_point = sensor_to_base *
+        Eigen::Vector3d(range * std::cos(angle), range * std::sin(angle), 0.0);
+      if (!laser_box_.contains(base_point) || base_point.head<2>().norm() < self_ignore_radius_) {continue;}
+      const Eigen::Vector3d point = base_to_map * base_point;
+      int x, y;
+      if (map_augmenter::world_to_cell(obstacles_map_, point.x(), point.y(), x, y)) {mark_obstacle(x, y, stamp);}
     }
   }
 
-  void decay_map(nav_msgs::msg::OccupancyGrid &map, int decay)
+  void clear_transient_obstacles()
   {
-    for (auto &c : map.data) {
-      int v = static_cast<int>(c) - decay;
-      c = static_cast<int8_t>(v < 0 ? 0 : v);
+    std::fill(obstacles_map_.data.begin(), obstacles_map_.data.end(), 0);
+    std::fill(last_observed_ns_.begin(), last_observed_ns_.end(), never_observed);
+    latest_cloud1_.reset();
+    latest_cloud2_.reset();
+    latest_scan_.reset();
+    reset_before_ns_ = now().nanoseconds();
+  }
+
+  void check_pose_correction()
+  {
+    if (!clear_on_pose_jump_) {return;}
+    try {
+      const auto tf = tf_buffer_.lookupTransform(map_frame_, odom_frame_, tf2::TimePointZero);
+      const Eigen::Affine3d current = tf2::transformToEigen(tf.transform);
+      if (have_pose_correction_) {
+        const Eigen::Affine3d delta = previous_map_to_odom_.inverse() * current;
+        if (delta.translation().norm() > pose_jump_translation_ ||
+          std::abs(Eigen::AngleAxisd(delta.rotation()).angle()) > pose_jump_rotation_)
+        {
+          clear_transient_obstacles();
+          RCLCPP_INFO(get_logger(), "Cleared transient obstacles after map-to-odom correction");
+        }
+      }
+      previous_map_to_odom_ = current;
+      have_pose_correction_ = true;
+    } catch (const tf2::TransformException &) {
+      // No fabricated identity transform. Sensors still need valid TF below.
     }
   }
 
   void processing()
   {
-    if (!have_grid_) return;
-
-    try{
-
-    // decay rápido (esto te quita “ghost obstacles” sin depender del merger)
-    decay_map(obstacles_map_, decay_factor_);
-
-    // integra sensores “lo más rápido posible”
-    if (use_cloud_  && cloud1_received_) { add_obstacles_from_cloud(latest_cloud1_,  std::max(1, cloud_downsampling_));  cloud1_received_ = false; }
-    if (use_cloud2_ && cloud2_received_) { add_obstacles_from_cloud(latest_cloud2_, std::max(1, cloud_downsampling2_)); cloud2_received_ = false; }
-    if (use_lidar_  && scan_received_)   { add_obstacles_from_scan (latest_scan_,   std::max(1, lidar_downsampling_));  scan_received_ = false; }
-
-    obstacles_map_.header.stamp = this->now();
-    obstacles_map_.header.frame_id = "map";
-    pub_obstacles_map_->publish(obstacles_map_);
+    if (!have_grid_) {return;}
+    const auto current = now();
+    const int64_t current_ns = current.nanoseconds();
+    if (previous_processing_ns_ != never_observed && current_ns < previous_processing_ns_) {
+      clear_transient_obstacles();
+      have_pose_correction_ = false;
     }
-    catch(const std::exception &e)
-    {
-        RCLCPP_ERROR(this->get_logger(), "ObstacleDetector.-> Error in processing loop: %s", e.what());
+    previous_processing_ns_ = current_ns;
+    check_pose_correction();
 
+    const int64_t lifetime = rclcpp::Duration::from_seconds(obstacle_timeout_).nanoseconds();
+    for (size_t i = 0; i < obstacles_map_.data.size(); ++i) {
+      if (obstacles_map_.data[i] <= 0) {continue;}
+      const auto observed = last_observed_ns_[i];
+      // Future stamps within the configured tolerance retain their evidence.
+      if (observed == never_observed || (current_ns >= observed && current_ns - observed >= lifetime)) {
+        obstacles_map_.data[i] = 0;
+        last_observed_ns_[i] = never_observed;
+      }
     }
-    catch(...)
-    {
-        RCLCPP_ERROR(this->get_logger(), "ObstacleDetector.-> Unknown error in processing loop.");
+
+    if (auto cloud = std::exchange(latest_cloud1_, nullptr)) {add_cloud(*cloud, cloud_downsampling_);}
+    if (auto cloud = std::exchange(latest_cloud2_, nullptr)) {add_cloud(*cloud, cloud_downsampling2_);}
+    if (auto scan = std::exchange(latest_scan_, nullptr)) {add_scan(*scan);}
+    // Late, but still acceptable sensor frames must not resurrect already expired evidence.
+    const int64_t publish_ns = now().nanoseconds();
+    for (size_t i = 0; i < obstacles_map_.data.size(); ++i) {
+      const int64_t observed = last_observed_ns_[i];
+      if (obstacles_map_.data[i] > 0 && observed != never_observed &&
+        publish_ns >= observed && publish_ns - observed >= lifetime)
+      {
+        obstacles_map_.data[i] = 0;
+        last_observed_ns_[i] = never_observed;
+      }
     }
+    obstacles_map_.header.stamp = now();
+    pub_obstacles_->publish(obstacles_map_);
   }
 
+  bool use_namespace_{false}, use_lidar_{false}, use_cloud_{false}, use_cloud2_{false};
+  bool have_grid_{false}, ignore_static_{true}, allow_zero_stamp_{false};
+  bool allow_tf_fallback_{true}, clear_on_pose_jump_{true}, have_pose_correction_{false};
+  Box laser_box_, cloud_box_;
+  std::string base_link_, map_frame_, odom_frame_;
+  double obstacle_timeout_, sensor_max_age_, future_tolerance_, tf_timeout_, tf_max_age_;
+  double static_ignore_radius_, self_ignore_radius_, laser_min_range_;
+  double pose_jump_translation_, pose_jump_rotation_;
+  int cloud_downsampling_, cloud_downsampling2_, lidar_downsampling_;
+  int cloud_min_points_, cloud_min_neighbors_, log_throttle_ms_;
+  int64_t reset_before_ns_{never_observed}, previous_processing_ns_{never_observed};
+  Grid obstacles_map_, static_reference_, static_ignore_mask_;
+  std::vector<int64_t> last_observed_ns_;
+  Eigen::Affine3d previous_map_to_odom_;
+  tf2_ros::Buffer tf_buffer_;
+  tf2_ros::TransformListener tf_listener_;
+  Cloud::ConstSharedPtr latest_cloud1_, latest_cloud2_;
+  Scan::ConstSharedPtr latest_scan_;
+  rclcpp::Publisher<Grid>::SharedPtr pub_obstacles_;
+  rclcpp::Subscription<Grid>::SharedPtr sub_base_;
+  rclcpp::Subscription<Cloud>::SharedPtr sub_cloud1_, sub_cloud2_;
+  rclcpp::Subscription<Scan>::SharedPtr sub_scan_;
+  rclcpp::TimerBase::SharedPtr processing_timer_;
 };
 
-int main(int argc, char **argv)
+int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<ObstacleDetectorNode>();
-  rclcpp::executors::MultiThreadedExecutor exec;
-  exec.add_node(node);
-  exec.spin();
+  rclcpp::spin(std::make_shared<ObstacleDetectorNode>());
   rclcpp::shutdown();
   return 0;
 }
