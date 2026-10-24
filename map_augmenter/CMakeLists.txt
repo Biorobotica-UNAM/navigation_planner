@@ -19,6 +19,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -57,6 +58,8 @@ ament_target_dependencies(obstacle_detector_node
   rcl_interfaces
   nav_msgs
   sensor_msgs
+  std_msgs
+  std_srvs
   tf2
   tf2_ros
   tf2_geometry_msgs

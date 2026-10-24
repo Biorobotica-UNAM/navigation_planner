@@ -200,6 +200,93 @@ public:
   }
 
 private:
+  void update_cloud_subscriptions()
+  {
+    const bool enabled = !cloud_gating_enabled_ || (navigation_active_ && cloud_override_enabled_);
+    if (!enabled) {
+      if (sub_cloud1_ || sub_cloud2_) {
+        ++cloud_subscription_generation_;
+        sub_cloud1_.reset();
+        sub_cloud2_.reset();
+        latest_cloud1_.reset();
+        latest_cloud2_.reset();
+        RCLCPP_INFO(get_logger(), "Cloud subscriptions disabled; LiDAR and obstacle expiration remain active");
+      }
+      return;
+    }
+    const auto generation = cloud_subscription_generation_;
+    if (use_cloud_ && !sub_cloud1_) {
+      sub_cloud1_ = create_subscription<Cloud>(cloud_topic1_, cloud_qos_,
+        [this, generation](Cloud::ConstSharedPtr msg) {
+          if (generation != cloud_subscription_generation_) {return;}
+          if (diagnostics_enabled_) {record_received(cloud1_diagnostics_, msg->header.stamp, bool(latest_cloud1_));}
+          latest_cloud1_ = std::move(msg);
+        });
+    }
+    if (use_cloud2_ && !sub_cloud2_) {
+      sub_cloud2_ = create_subscription<Cloud>(cloud_topic2_, cloud_qos_,
+        [this, generation](Cloud::ConstSharedPtr msg) {
+          if (generation != cloud_subscription_generation_) {return;}
+          if (diagnostics_enabled_) {record_received(cloud2_diagnostics_, msg->header.stamp, bool(latest_cloud2_));}
+          latest_cloud2_ = std::move(msg);
+        });
+    }
+  }
+
+  void clear_obstacle_memory()
+  {
+    memory_cells_.clear();
+    memory_overlay_ = Grid{};
+    memory_dirty_ = true;
+  }
+
+  void remember_obstacle_cell(int x, int y)
+  {
+    if (!remember_all_obstacles_) {return;}
+    const double yaw = map_augmenter::origin_yaw(obstacles_map_);
+    const double resolution = obstacles_map_.info.resolution;
+    const double dx = x * resolution, dy = y * resolution;
+    const double wx = obstacles_map_.info.origin.position.x + std::cos(yaw) * dx - std::sin(yaw) * dy;
+    const double wy = obstacles_map_.info.origin.position.y + std::sin(yaw) * dx + std::cos(yaw) * dy;
+    // Retain cell footprints in world coordinates, including cells outside a
+    // later, smaller map. Resolution changes must not reinterpret old keys.
+    if (memory_cells_.emplace(wx, wy, resolution, yaw).second) {memory_dirty_ = true;}
+  }
+
+  void rebuild_memory_overlay()
+  {
+    memory_overlay_ = map_augmenter::empty_obstacle_grid(obstacles_map_);
+    Grid cell;
+    cell.header.frame_id = map_frame_;
+    cell.info.width = cell.info.height = 1;
+    cell.data = {100};
+    for (const auto & remembered : memory_cells_) {
+      cell.info.origin.position.x = std::get<0>(remembered);
+      cell.info.origin.position.y = std::get<1>(remembered);
+      cell.info.resolution = std::get<2>(remembered);
+      const double yaw = std::get<3>(remembered);
+      cell.info.origin.orientation.z = std::sin(yaw / 2.0);
+      cell.info.origin.orientation.w = std::cos(yaw / 2.0);
+      map_augmenter::for_each_projected_obstacle(cell, memory_overlay_,
+        [this](size_t, size_t to) {memory_overlay_.data[to] = 100;});
+    }
+    memory_dirty_ = false;
+  }
+
+  void publish_obstacles()
+  {
+    obstacles_map_.header.stamp = now();
+    if (remember_all_obstacles_ && !memory_cells_.empty()) {
+      if (memory_dirty_) {rebuild_memory_overlay();}
+      // Memory is applied only to the output. It must never refresh transient
+      // timestamps or become a new sensor observation after it is cleared.
+      const Grid output = map_augmenter::overlay_obstacles(obstacles_map_, memory_overlay_);
+      pub_obstacles_->publish(output);
+    } else {
+      pub_obstacles_->publish(obstacles_map_);
+    }
+  }
+
   struct AgeRange
   {
     uint64_t samples{0};
@@ -328,13 +415,18 @@ private:
     if (!diagnostics_enabled_) {return;}
     const double seconds = std::chrono::duration<double>(SteadyClock::now() - diagnostics_window_).count();
     if (seconds < debug_period_) {return;}
-    const size_t occupied = std::count_if(obstacles_map_.data.begin(), obstacles_map_.data.end(),
-      [](int8_t value) {return value > 0;});
+    size_t occupied = 0;
+    for (size_t i = 0; i < obstacles_map_.data.size(); ++i) {
+      if (obstacles_map_.data[i] > 0 || (remember_all_obstacles_ &&
+        i < memory_overlay_.data.size() && memory_overlay_.data[i] > 0)) {++occupied;}
+    }
     std::ostringstream text;
     text << std::fixed << std::setprecision(1)
          << "Detection[summary] window_s=" << seconds << " grid_ready=" << have_grid_
          << " published=" << diagnostic_cycles_ << " observed_hz=" << diagnostic_cycles_ / seconds
          << " no_grid_cycles=" << diagnostic_no_grid_ << " occupied_now=" << occupied
+         << " remembered_cells=" << memory_cells_.size()
+         << " cloud_subscriptions=" << (bool(sub_cloud1_) + bool(sub_cloud2_))
          << " expired_before=" << diagnostic_expired_before_ << " expired_after=" << diagnostic_expired_after_
          << " pose_resets=" << diagnostic_pose_resets_ << " clock_resets=" << diagnostic_clock_resets_
          << " cleared_cells=" << diagnostic_cleared_cells_
@@ -420,6 +512,7 @@ private:
       }
       obstacles_map_ = std::move(resized);
       last_observed_ns_ = std::move(times);
+      memory_dirty_ = true;
     }
     static_reference_ = map;
     if (reference_changed && ignore_static_) {
@@ -506,6 +599,7 @@ private:
     // Occupancy encoding is fixed: unknown=-1, free=0, occupied=100.
     obstacles_map_.data[index] = 100;
     last_observed_ns_[index] = std::max(last_observed_ns_[index], stamp.nanoseconds());
+    remember_obstacle_cell(x, y);
   }
 
   // Validate arbitrary PointCloud2 layouts instead of assuming x/y/z at 0/4/8.
@@ -576,6 +670,15 @@ private:
     }
     if (stats) {++stats->tf_ok;}
 
+    double crop_cos = 1.0, crop_sin = 0.0;
+    if (cloud_follow_head_) {
+      const Eigen::Vector3d view = sensor_to_base.linear() * cloud_forward_axis_;
+      if (std::hypot(view.x(), view.y()) > cloud_yaw_min_projection_) {
+        const double yaw = std::atan2(view.y(), view.x());
+        crop_cos = std::cos(yaw);
+        crop_sin = std::sin(yaw);
+      }
+    }
     std::unordered_map<size_t, CellEvidence> hits;
     const size_t total = static_cast<size_t>(cloud.width) * cloud.height;
     for (size_t i = 0; i < total; i += static_cast<size_t>(stride)) {
@@ -590,7 +693,10 @@ private:
       if (!point.allFinite()) {continue;}
       if (stats) {++stats->finite;}
       const Eigen::Vector3d base_point = sensor_to_base * point;
-      if (!cloud_box_.contains(base_point)) {continue;}
+      const Eigen::Vector3d crop_point(
+        crop_cos * base_point.x() + crop_sin * base_point.y(),
+        -crop_sin * base_point.x() + crop_cos * base_point.y(), base_point.z());
+      if (!cloud_box_.contains(crop_point)) {continue;}
       if (stats) {++stats->crop_hits;}
       if (base_point.head<2>().norm() < self_ignore_radius_) {
         if (stats) {++stats->self_rejected;}
@@ -695,6 +801,7 @@ private:
     }
     std::fill(obstacles_map_.data.begin(), obstacles_map_.data.end(), 0);
     std::fill(last_observed_ns_.begin(), last_observed_ns_.end(), never_observed);
+    clear_obstacle_memory();
     latest_cloud1_.reset();
     latest_cloud2_.reset();
     latest_scan_.reset();
@@ -714,7 +821,7 @@ private:
         {
           if (diagnostics_enabled_) {++diagnostic_pose_resets_;}
           clear_transient_obstacles();
-          RCLCPP_INFO(get_logger(), "Cleared transient obstacles after map-to-odom correction");
+          RCLCPP_INFO(get_logger(), "Cleared transient obstacles and memory after map-to-odom correction");
         }
       }
       previous_map_to_odom_ = current;
@@ -776,8 +883,7 @@ private:
         last_observed_ns_[i] = never_observed;
       }
     }
-    obstacles_map_.header.stamp = now();
-    pub_obstacles_->publish(obstacles_map_);
+    publish_obstacles();
     if (diagnostics_enabled_) {
       ++diagnostic_cycles_;
       const double ms = std::chrono::duration<double, std::milli>(SteadyClock::now() - processing_started).count();
@@ -790,8 +896,16 @@ private:
   bool use_namespace_{false}, use_lidar_{false}, use_cloud_{false}, use_cloud2_{false};
   bool have_grid_{false}, ignore_static_{true}, allow_zero_stamp_{false};
   bool allow_tf_fallback_{true}, clear_on_pose_jump_{true}, have_pose_correction_{false};
+  bool cloud_follow_head_{true}, cloud_gating_enabled_{false};
+  bool navigation_active_{false}, cloud_override_enabled_{true};
+  bool remember_all_obstacles_{false}, memory_dirty_{true};
   Box laser_box_, cloud_box_;
   std::string base_link_, map_frame_, odom_frame_;
+  std::string cloud_topic1_, cloud_topic2_;
+  Eigen::Vector3d cloud_forward_axis_{Eigen::Vector3d::UnitZ()};
+  double cloud_yaw_min_projection_;
+  rclcpp::QoS cloud_qos_{rclcpp::SensorDataQoS()};
+  uint64_t cloud_subscription_generation_{0};
   double obstacle_timeout_, sensor_max_age_, future_tolerance_, tf_timeout_, tf_max_age_;
   double static_ignore_radius_, self_ignore_radius_, laser_min_range_;
   double pose_jump_translation_, pose_jump_rotation_;
@@ -799,6 +913,9 @@ private:
   int cloud_min_points_, cloud_min_neighbors_, log_throttle_ms_;
   int64_t reset_before_ns_{never_observed}, previous_processing_ns_{never_observed};
   Grid obstacles_map_, static_reference_, static_ignore_mask_;
+  Grid memory_overlay_;
+  // World X/Y of the cell origin, its resolution, and yaw. No map-array indices.
+  std::set<std::tuple<double, double, double, double>> memory_cells_;
   std::vector<int64_t> last_observed_ns_;
   Eigen::Affine3d previous_map_to_odom_;
   tf2_ros::Buffer tf_buffer_;
@@ -809,6 +926,8 @@ private:
   rclcpp::Subscription<Grid>::SharedPtr sub_base_;
   rclcpp::Subscription<Cloud>::SharedPtr sub_cloud1_, sub_cloud2_;
   rclcpp::Subscription<Scan>::SharedPtr sub_scan_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_navigation_enable_, sub_cloud_enable_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_clear_memory_;
   rclcpp::TimerBase::SharedPtr processing_timer_;
   bool diagnostics_enabled_{false};
   double debug_period_;
