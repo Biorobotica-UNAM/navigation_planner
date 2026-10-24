@@ -29,30 +29,42 @@ public:
   MapAugmenterNode()
   : Node("map_augmenter_node"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
   {
-    use_namespace_ = parameter("use_namespace", false, "Namespace the default internal endpoints.");
-    use_online_ = parameter("use_online", false,
-      "Continue polling the base-map service when map topics are unavailable.");
-    use_prohibition_ = parameter("use_prohibition_map", true, "Enable the prohibition overlay.");
-    require_prohibition_ = parameter("require_prohibition_map", true,
-      "Wait for the prohibition overlay before serving planning maps.") && use_prohibition_;
-    circular_ = parameter("circular_inflation", false, "Circular inflation; false uses a square kernel.");
-    const double legacy_radius = parameter("inflation_radius", 0.15,
-      "Fallback inflation radius in metres when a specific radius is negative.");
-    const double shared_radius = parameter("obstacle_inflation_radius", -1.0,
-      "Fallback for both inflation radii; negative selects inflation_radius.");
-    static_radius_ = parameter("static_obstacle_inflation_radius", 0.05,
-      "Static clearance in metres; negative selects the fallback radius.");
-    dynamic_radius_ = parameter("dynamic_obstacle_inflation_radius", 0.15,
-      "Dynamic clearance in metres; negative selects the fallback radius.");
+    use_namespace_ =              parameter("use_namespace", false, 
+                                            "Namespace the default internal endpoints.");
+    use_online_ =                 parameter("use_online", false,
+                                            "Continue polling the base-map service when map topics are unavailable.");
+    use_prohibition_ =            parameter("use_prohibition_map", true, 
+                                            "Enable the prohibition overlay.");
+    require_prohibition_ =        parameter("require_prohibition_map", true,
+                                            "Wait for the prohibition overlay before serving planning maps.") && use_prohibition_;
+    circular_ =                   parameter("circular_inflation", false, 
+                                            "Circular inflation; false uses a square kernel.");
+    const double legacy_radius =  parameter("inflation_radius", 0.15,
+                                            "Fallback inflation radius in metres when a specific radius is negative.");
+    const double shared_radius =  parameter("obstacle_inflation_radius", -1.0,
+                                            "Fallback for both inflation radii; negative selects inflation_radius.");
+    static_radius_ =              parameter("static_obstacle_inflation_radius", 0.05,
+                                            "Static clearance in metres; negative selects the fallback radius.");
+    dynamic_radius_ =             parameter("dynamic_obstacle_inflation_radius", 0.15,
+                                            "Dynamic clearance in metres; negative selects the fallback radius.");
+    
     const double fallback = shared_radius >= 0.0 ? shared_radius : legacy_radius;
+    
     if (static_radius_ < 0.0) {static_radius_ = fallback;}
     if (dynamic_radius_ < 0.0) {dynamic_radius_ = fallback;}
-    cost_radius_ = parameter("cost_radius", 0.35, "Soft-cost influence radius in metres.");
-    cost_peak_ = parameter("cost_peak", 6, "Maximum generated soft cost, from 1 to 99.");
-    debug_ = parameter("debug_maps", false, "Log processed map statistics.");
-    log_throttle_ms_ = parameter("log_throttle_ms", 2000, "Repeated warning interval in milliseconds.");
-    topic_timeout_ = parameter("map_topic_timeout_sec", 3.0,
-      "Time without topic messages before allowing service fallback.");
+    
+    cost_radius_ =                parameter("cost_radius", 0.35, 
+                                            "Soft-cost influence radius in metres.");
+    
+    cost_peak_ =                  parameter("cost_peak", 6,
+                                            "Maximum generated soft cost, from 1 to 99.");
+    debug_ =                      parameter("debug_maps", false, 
+                                            "Log processed map statistics.");
+    
+    log_throttle_ms_ =            parameter("log_throttle_ms", 2000,
+                                            "Repeated warning interval in milliseconds.");
+    topic_timeout_ =              parameter("map_topic_timeout_sec", 3.0,
+                                          "Time without topic messages before allowing service fallback.");
     request_timeout_ = parameter("map_request_timeout_sec", 3.0, "Unanswered map-request timeout.");
     const double refresh_period = parameter("map_refresh_period_sec", 1.0, "Map-service polling interval.");
     const double publish_period = parameter("publish_period_sec", 1.1, "Cached map republishing interval.");

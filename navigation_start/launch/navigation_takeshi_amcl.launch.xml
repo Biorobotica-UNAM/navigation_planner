@@ -116,7 +116,8 @@
         exec="map_server"
         output="screen"
         respawn="true"
-        namespace="$(var namespace_nav)">
+        namespace="$(var namespace_nav)"
+        ros_args="--log-level warn">
     <param name="yaml_filename" value="$(var prohibition_map_file)"/>
     <remap from="map" to="fixed_prohibition_layer_map"/>
   </node>
