@@ -1,207 +1,585 @@
 #include "path_planner/PathPlanner.h"
+
+#include <algorithm>
 #include <cmath>
-#include <cstdlib>
-#include <climits>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <queue>
+#include <stdexcept>
+#include <tuple>
+#include <utility>
+#include <vector>
 
-bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
-                        const nav_msgs::msg::OccupancyGrid &cost_map,
-                        const geometry_msgs::msg::Pose &start_pose,
-                        const geometry_msgs::msg::Pose &goal_pose,
-                        bool diagonal_paths,
-                        nav_msgs::msg::Path &result_path)
+namespace
 {
-    std::cout << "PathCalculator.-> Calculating by A* from " << start_pose.position.x << "  ";
-    std::cout << start_pose.position.y << "  to " << goal_pose.position.x << "  " << goal_pose.position.y << std::endl;
+using Grid = nav_msgs::msg::OccupancyGrid;
+using Path = nav_msgs::msg::Path;
+using Pose = geometry_msgs::msg::Pose;
+constexpr double geometry_epsilon = 1e-9;
+constexpr size_t no_parent = std::numeric_limits<size_t>::max();
 
-    int idx_start_x;
-    int idx_start_y;
-    int idx_goal_x;
-    int idx_goal_y;
-    idx_start_y = (int)((start_pose.position.y - map.info.origin.position.y)/map.info.resolution);
-    idx_start_x = (int)((start_pose.position.x - map.info.origin.position.x)/map.info.resolution);
-    int idx_start = idx_start_y*map.info.width + idx_start_x;
+struct GridGeometry
+{
+    double ox, oy, oz, resolution, yaw, c, s;
+    int width, height;
 
-    idx_goal_y  = (int)((goal_pose.position.y  - map.info.origin.position.y)/map.info.resolution);
-    idx_goal_x  = (int)((goal_pose.position.x  - map.info.origin.position.x)/map.info.resolution);
-    int idx_goal  = idx_goal_y *map.info.width + idx_goal_x;
-
-    //double distance = 0.1;
-    //double angle = 1.414213562;
-    int _idx_goal_y = idx_goal_y;
-    int _idx_goal_x = idx_goal_x;
-
-    int count = 0;
-    int loop_count = 0;
-    double radius = 0.1;
-    
-    int MAX_GOAL_UPDATE = 16; //points on circle
-    double angle_increment = 2 * M_PI / (MAX_GOAL_UPDATE - 1);
-    while (map.data[idx_goal] != 0 && loop_count < 4)
+    explicit GridGeometry(const Grid& grid)
     {
-        double angle = count * angle_increment;
-        idx_goal_y  = _idx_goal_y + radius * cos(angle);
-        idx_goal_x  = _idx_goal_x + radius * sin(angle);
-        idx_goal  = idx_goal_y *map.info.width + idx_goal_x;
-	
-        count++;
-        if (count == MAX_GOAL_UPDATE)
+        const auto& info = grid.info;
+        const auto& p = info.origin.position;
+        const auto& q = info.origin.orientation;
+        const uint64_t cells = static_cast<uint64_t>(info.width) * info.height;
+        const double norm = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+        if (grid.header.frame_id.empty() || !std::isfinite(info.resolution) ||
+            info.resolution <= 0.0 || info.width == 0 || info.height == 0 ||
+            info.width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+            info.height > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+            cells != grid.data.size() || !std::isfinite(p.x) || !std::isfinite(p.y) ||
+            !std::isfinite(p.z) || !std::isfinite(norm) ||
+            std::abs(norm - 1.0) > 1e-5 || std::abs(q.x) > geometry_epsilon ||
+            std::abs(q.y) > geometry_epsilon)
+            throw std::invalid_argument("Invalid planar occupancy-grid geometry");
+
+        ox = p.x;
+        oy = p.y;
+        oz = p.z;
+        resolution = info.resolution;
+        width = static_cast<int>(info.width);
+        height = static_cast<int>(info.height);
+        yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+        c = std::cos(yaw);
+        s = std::sin(yaw);
+    }
+
+    bool worldToCell(double wx, double wy, int& x, int& y) const
+    {
+        const double dx = wx - ox;
+        const double dy = wy - oy;
+        const double gx = (c * dx + s * dy) / resolution;
+        const double gy = (-s * dx + c * dy) / resolution;
+        if (!std::isfinite(gx) || !std::isfinite(gy) ||
+            gx < 0.0 || gy < 0.0 || gx >= width || gy >= height)
+            return false;
+        x = static_cast<int>(std::floor(gx));
+        y = static_cast<int>(std::floor(gy));
+        return true;
+    }
+
+    geometry_msgs::msg::Point cellCenter(int x, int y) const
+    {
+        const double gx = (x + 0.5) * resolution;
+        const double gy = (y + 0.5) * resolution;
+        geometry_msgs::msg::Point point;
+        point.x = ox + c * gx - s * gy;
+        point.y = oy + s * gx + c * gy;
+        point.z = oz;
+        return point;
+    }
+};
+
+void finishPath(Path& path)
+{
+    if (path.poses.empty())
+        return;
+    auto final_orientation = path.poses.back().pose.orientation;
+    const double norm = std::sqrt(
+        final_orientation.x * final_orientation.x +
+        final_orientation.y * final_orientation.y +
+        final_orientation.z * final_orientation.z +
+        final_orientation.w * final_orientation.w);
+    const bool preserve_final = std::isfinite(norm) && norm > geometry_epsilon;
+    double heading = 0.0;
+    for (size_t i = 0; i < path.poses.size(); ++i)
+    {
+        auto& pose = path.poses[i];
+        pose.header = path.header;
+        if (i + 1 < path.poses.size())
         {
-            count = 0;
-            radius += 0.1;
-            loop_count++;
+            const auto& next = path.poses[i + 1].pose.position;
+            const auto& current = pose.pose.position;
+            heading = std::atan2(next.y - current.y, next.x - current.x);
+        }
+        pose.pose.orientation.x = 0.0;
+        pose.pose.orientation.y = 0.0;
+        pose.pose.orientation.z = std::sin(heading / 2.0);
+        pose.pose.orientation.w = std::cos(heading / 2.0);
+    }
+    if (preserve_final)
+    {
+        final_orientation.x /= norm;
+        final_orientation.y /= norm;
+        final_orientation.z /= norm;
+        final_orientation.w /= norm;
+        path.poses.back().pose.orientation = final_orientation;
+    }
+}
+
+bool validatePathSegments(const Path& path, const Grid& map, bool allow_unknown)
+{
+    if (path.poses.empty() || path.header.frame_id != map.header.frame_id)
+        return false;
+    const GridGeometry geometry(map);
+    for (size_t i = 0; i < path.poses.size(); ++i)
+    {
+        const auto& point = path.poses[i].pose.position;
+        int end_x, end_y;
+        if (!geometry.worldToCell(point.x, point.y, end_x, end_y))
+            return false;
+        const size_t end_index = static_cast<size_t>(end_y) * geometry.width + end_x;
+        const int8_t end_value = map.data[end_index];
+        if (end_value != 0 && !(end_value == -1 && allow_unknown))
+            return false;
+        if (i == 0)
+            continue;
+
+        const auto& previous = path.poses[i - 1].pose.position;
+        const double start_x = (geometry.c * (previous.x - geometry.ox) +
+                                geometry.s * (previous.y - geometry.oy)) / geometry.resolution;
+        const double start_y = (-geometry.s * (previous.x - geometry.ox) +
+                                 geometry.c * (previous.y - geometry.oy)) / geometry.resolution;
+        const double target_x = (geometry.c * (point.x - geometry.ox) +
+                                 geometry.s * (point.y - geometry.oy)) / geometry.resolution;
+        const double target_y = (-geometry.s * (point.x - geometry.ox) +
+                                  geometry.c * (point.y - geometry.oy)) / geometry.resolution;
+        int x, y;
+        if (!geometry.worldToCell(previous.x, previous.y, x, y))
+            return false;
+        const double dx = target_x - start_x;
+        const double dy = target_y - start_y;
+        const int step_x = dx > 0.0 ? 1 : (dx < 0.0 ? -1 : 0);
+        const int step_y = dy > 0.0 ? 1 : (dy < 0.0 ? -1 : 0);
+        const double infinity = std::numeric_limits<double>::infinity();
+        const double delta_x = step_x == 0 ? infinity : 1.0 / std::abs(dx);
+        const double delta_y = step_y == 0 ? infinity : 1.0 / std::abs(dy);
+        double next_x = step_x == 0 ? infinity :
+            (x + (step_x > 0 ? 1.0 : 0.0) - start_x) / dx;
+        double next_y = step_y == 0 ? infinity :
+            (y + (step_y > 0 ? 1.0 : 0.0) - start_y) / dy;
+
+        // Traverse crossed cells; inspect both side cells at corner crossings.
+        while (x != end_x || y != end_y)
+        {
+            if (std::min(next_x, next_y) >= 1.0 - 1e-12)
+                break;
+            if (std::abs(next_x - next_y) <= 1e-12)
+            {
+                const int sx = x + step_x;
+                const int sy = y + step_y;
+                if (sx < 0 || sx >= geometry.width || sy < 0 || sy >= geometry.height)
+                    return false;
+                const int8_t side_x = map.data[static_cast<size_t>(y) * geometry.width + sx];
+                const int8_t side_y = map.data[static_cast<size_t>(sy) * geometry.width + x];
+                if ((side_x != 0 && !(side_x == -1 && allow_unknown)) ||
+                    (side_y != 0 && !(side_y == -1 && allow_unknown)))
+                    return false;
+                x = sx;
+                y = sy;
+                next_x += delta_x;
+                next_y += delta_y;
+            }
+            else if (next_x < next_y)
+            {
+                x += step_x;
+                next_x += delta_x;
+            }
+            else
+            {
+                y += step_y;
+                next_y += delta_y;
+            }
+            if (x < 0 || y < 0 || x >= geometry.width || y >= geometry.height)
+                return false;
+            const int8_t value = map.data[static_cast<size_t>(y) * geometry.width + x];
+            if (value != 0 && !(value == -1 && allow_unknown))
+                return false;
         }
     }
-
-
-    if(map.data[idx_goal] != 0)
-    {
-        std::cout << "PathPlanner.->Goal point is inside non-free space!!!!" << std::endl;
-        return false;
-    }
-    if(map.data[idx_start] != 0)
-    {
-        std::cout << "PathPlanner.->Start point is inside non-free space!!!!" << std::endl;
-        return false;
-    }
-
-    std::vector<Node> nodes;
-    Node* current_node; 
-    std::vector<int> node_neighbors;
-    int steps = 0;
-    nodes.resize(map.data.size());
-    if(diagonal_paths)
-        node_neighbors.resize(8);
-    else
-        node_neighbors.resize(4);
-    std::priority_queue<Node*, std::vector<Node*>, CompareByFValue>   open_list;
-    for(size_t i=0;  i < map.data.size(); i++)
-	nodes[i].index = i;
-
-    current_node = &nodes[idx_start];
-    current_node->g_value      = 0;
-    current_node->in_open_list = true;    
-    open_list.push(current_node);
-    
-    while(!open_list.empty() && current_node->index != idx_goal)
-    {
-        
-            current_node = open_list.top();  
-            open_list.pop();                   
-            current_node->in_closed_list = true;
-
-            node_neighbors[0] = current_node->index + map.info.width;
-            node_neighbors[1] = current_node->index + 1;
-            node_neighbors[2] = current_node->index - map.info.width;
-            node_neighbors[3] = current_node->index - 1;
-            if(diagonal_paths)
-            {
-                node_neighbors[4] = current_node->index + map.info.width + 1;
-                node_neighbors[5] = current_node->index + map.info.width - 1;
-                node_neighbors[6] = current_node->index - map.info.width + 1;
-                node_neighbors[7] = current_node->index - map.info.width - 1;
-            }
-           
-            for(size_t i=0; i < node_neighbors.size(); i++)
-            {
-                if(map.data[node_neighbors[i]] != 0 || nodes[node_neighbors[i]].in_closed_list)
-                    continue;
-           
-                Node* neighbor = &nodes[node_neighbors[i]];
-                float delta_g = i < 4 ? 1.0 : 1.414213562;
-                float g_value = current_node->g_value + (delta_g) + cost_map.data[node_neighbors[i]];
-                float h_value;
-                int   h_value_x = node_neighbors[i]%map.info.width - idx_goal_x;
-                int   h_value_y = node_neighbors[i]/map.info.width - idx_goal_y;
-                if(diagonal_paths)
-                    h_value = sqrt(h_value_x*h_value_x + h_value_y*h_value_y);
-                else
-                    h_value = fabs(h_value_x) + fabs(h_value_y);
-                
-                if(g_value < neighbor->g_value)
-                {
-                    neighbor->g_value = g_value;
-                    neighbor->f_value = g_value + h_value;
-                    neighbor->parent  = current_node;
-                }
-
-                if(!neighbor->in_open_list)
-                {
-                    neighbor->in_open_list = true;
-                    open_list.push(neighbor);
-                }
-            }
-            steps++;
-        
-    }
-    std::cout << "PathPlanner.->A* Algorithm ended after " << steps << " steps" << std::endl;
-
-    if(current_node->index != idx_goal){
-        std::cout << "PathPlanner.-> current_node->index != idx_goal " << std::endl;
-	    return false;
-    }
-    
-    result_path.header.frame_id = "map";
-    result_path.poses.clear();
-    geometry_msgs::msg::PoseStamped p;
-    p.header.frame_id = "map";
-    while(current_node->parent != NULL)
-    {
-        p.pose.position.x = current_node->index % map.info.width * map.info.resolution + map.info.origin.position.x;	
-        p.pose.position.y = current_node->index / map.info.width * map.info.resolution + map.info.origin.position.y;
-        result_path.poses.insert(result_path.poses.begin(), p);
-        current_node = current_node->parent;
-    }
-    
-    std::cout << "PathCalculator.->Resulting path by A* has " << result_path.poses.size() << " points." << std::endl;
     return true;
 }
 
-nav_msgs::msg::Path PathPlanner::SmoothPath(
-                        const nav_msgs::msg::Path& path, 
-                        float weight_data, 
-                        float weight_smooth, 
-                        float tolerance)
+PlanResult planSegments(
+    const Grid& map, const Grid& costs, const Pose& start,
+    const std::vector<Pose>& stops, const PlanOptions& options,
+    double final_tolerance, size_t& failed_segment)
 {
-    nav_msgs::msg::Path newPath;
-    for(size_t i=0; i< path.poses.size(); i++)
-        newPath.poses.push_back(path.poses[i]);
-    newPath.header.frame_id = "map";   
-    if(path.poses.size() < 3)  return newPath;
-    int attempts = 0;
-    tolerance *= path.poses.size();
-    float change = tolerance + 1;
-
-    while(change >= tolerance && ++attempts < 1000)
+    PlanResult result;
+    result.path.header = map.header;
+    Pose current_start = start;
+    for (size_t i = 0; i < stops.size(); ++i)
     {
-        change = 0;
-        for(size_t i=1; i< path.poses.size() - 1; i++)
+        failed_segment = i;
+        PlanOptions segment_options = options;
+        segment_options.goal_tolerance_m = i + 1 == stops.size() ? final_tolerance : 0.0;
+        Path segment;
+        if (!PathPlanner::AStar(map, costs, current_start, stops[i],
+                               options.diagonal_paths, segment, segment_options, &result.status))
         {
-            geometry_msgs::msg::Point old_p = path.poses[i].pose.position;
-            geometry_msgs::msg::Point new_p = newPath.poses[i].pose.position;
-            geometry_msgs::msg::Point new_p_next = newPath.poses[i+1].pose.position;
-            geometry_msgs::msg::Point new_p_prev = newPath.poses[i-1].pose.position;
-            float last_x = newPath.poses[i].pose.position.x;
-            float last_y = newPath.poses[i].pose.position.y;
-            new_p.x += weight_data*(old_p.x - new_p.x) + weight_smooth*(new_p_next.x + new_p_prev.x - 2.0*new_p.x);
-            new_p.y += weight_data*(old_p.y - new_p.y) + weight_smooth*(new_p_next.y + new_p_prev.y - 2.0*new_p.y);
-            change += fabs(new_p.x - last_x) + fabs(new_p.y - last_y);
-            newPath.poses[i].pose.position = new_p;
+            result.path.poses.clear();
+            return result;
+        }
+        result.goal_relocated = i + 1 == stops.size() &&
+            std::hypot(segment.poses.back().pose.position.x - stops[i].position.x,
+                       segment.poses.back().pose.position.y - stops[i].position.y) > geometry_epsilon;
+        Path smoothed = PathPlanner::SmoothPath(
+            segment, static_cast<float>(options.smooth_alpha),
+            static_cast<float>(options.smooth_beta),
+            static_cast<float>(options.smooth_tolerance), &map, options.allow_unknown);
+        auto first = smoothed.poses.begin();
+        // Every segment starts at the endpoint already appended by the previous one.
+        if (!result.path.poses.empty() && first != smoothed.poses.end())
+            ++first;
+        result.path.poses.insert(result.path.poses.end(), first, smoothed.poses.end());
+        current_start = segment.poses.back().pose;
+    }
+    result.status = PlanStatus::Success;
+    finishPath(result.path);
+    return result;
+}
+}  // namespace
+
+bool PathPlanner::AStar(
+    const Grid& map, const Grid& cost_map, const Pose& start_pose, const Pose& goal_pose,
+    bool diagonal_paths, Path& result_path, const PlanOptions& options, PlanStatus* status)
+{
+    result_path = Path{};
+    if (status)
+        *status = PlanStatus::InvalidInput;
+    try
+    {
+        const GridGeometry geometry(map);
+        const GridGeometry cost_geometry(cost_map);
+        if (!std::isfinite(start_pose.position.z) || !std::isfinite(goal_pose.position.z) ||
+            !std::isfinite(options.unknown_cost) || options.unknown_cost < 0.0 ||
+            !std::isfinite(options.goal_tolerance_m) || options.goal_tolerance_m < 0.0 ||
+            map.header.frame_id != cost_map.header.frame_id ||
+            geometry.width != cost_geometry.width || geometry.height != cost_geometry.height ||
+            geometry.resolution != cost_geometry.resolution ||
+            geometry.ox != cost_geometry.ox || geometry.oy != cost_geometry.oy ||
+            geometry.oz != cost_geometry.oz ||
+            std::abs(std::remainder(geometry.yaw - cost_geometry.yaw, 2.0 * std::acos(-1.0))) >
+                geometry_epsilon)
+            return false;
+
+        int start_x, start_y, goal_x, goal_y;
+        if (!geometry.worldToCell(start_pose.position.x, start_pose.position.y, start_x, start_y) ||
+            !geometry.worldToCell(goal_pose.position.x, goal_pose.position.y, goal_x, goal_y))
+        {
+            if (status)
+                *status = PlanStatus::OutsideMap;
+            return false;
+        }
+        const size_t start = static_cast<size_t>(start_y) * geometry.width + start_x;
+        const size_t goal = static_cast<size_t>(goal_y) * geometry.width + goal_x;
+        const int8_t start_value = map.data[start];
+        const int8_t goal_value = map.data[goal];
+        if (start_value != 0 && !(start_value == -1 && options.allow_unknown))
+        {
+            if (status)
+                *status = PlanStatus::StartBlocked;
+            return false;
+        }
+        if (goal_value != 0 && !(goal_value == -1 && options.allow_unknown) &&
+            options.goal_tolerance_m == 0.0)
+        {
+            if (status)
+                *status = PlanStatus::GoalBlocked;
+            return false;
+        }
+
+        struct SearchNode
+        {
+            double g = std::numeric_limits<double>::infinity();
+            size_t parent = no_parent;
+            bool closed = false;
+        };
+        std::vector<SearchNode> nodes(map.data.size());
+        // Tuple priorities are immutable, including entries superseded by better costs.
+        using Entry = std::tuple<double, double, size_t>;
+        std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+        const double initial_h = diagonal_paths ?
+            std::hypot(start_x - goal_x, start_y - goal_y) :
+            std::abs(start_x - goal_x) + std::abs(start_y - goal_y);
+        nodes[start].g = 0.0;
+        open.emplace(initial_h, 0.0, start);
+        size_t endpoint = no_parent;
+        size_t closest = start;
+        double closest_distance = std::numeric_limits<double>::infinity();
+        bool closest_is_start_pose = false;
+        while (!open.empty())
+        {
+            const auto [priority, queued_g, index] = open.top();
+            (void)priority;
+            open.pop();
+            if (nodes[index].closed || queued_g != nodes[index].g)
+                continue;
+            nodes[index].closed = true;
+            const int x = static_cast<int>(index % geometry.width);
+            const int y = static_cast<int>(index / geometry.width);
+            const auto point = geometry.cellCenter(x, y);
+            double distance = std::hypot(
+                point.x - goal_pose.position.x, point.y - goal_pose.position.y);
+            bool use_start_pose = false;
+            if (index == start)
+            {
+                const double start_distance = std::hypot(
+                    start_pose.position.x - goal_pose.position.x,
+                    start_pose.position.y - goal_pose.position.y);
+                if (start_distance <= distance)
+                {
+                    distance = start_distance;
+                    use_start_pose = true;
+                }
+            }
+            if (distance < closest_distance ||
+                (distance == closest_distance && nodes[index].g < nodes[closest].g))
+            {
+                closest = index;
+                closest_distance = distance;
+                closest_is_start_pose = use_start_pose;
+            }
+            if (index == goal)
+            {
+                endpoint = index;
+                break;
+            }
+            for (int dy = -1; dy <= 1; ++dy)
+            {
+                for (int dx = -1; dx <= 1; ++dx)
+                {
+                    if ((dx == 0 && dy == 0) || (!diagonal_paths && dx != 0 && dy != 0))
+                        continue;
+                    const int nx = x + dx;
+                    const int ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= geometry.width || ny >= geometry.height)
+                        continue;
+                    const size_t next = static_cast<size_t>(ny) * geometry.width + nx;
+                    const int8_t occupancy = map.data[next];
+                    if ((occupancy != 0 && !(occupancy == -1 && options.allow_unknown)) ||
+                        nodes[next].closed)
+                        continue;
+                    if (dx != 0 && dy != 0)
+                    {
+                        const int8_t side_x = map.data[static_cast<size_t>(y) * geometry.width + nx];
+                        const int8_t side_y = map.data[static_cast<size_t>(ny) * geometry.width + x];
+                        if ((side_x != 0 && !(side_x == -1 && options.allow_unknown)) ||
+                            (side_y != 0 && !(side_y == -1 && options.allow_unknown)))
+                            continue;
+                    }
+                    const double step = dx != 0 && dy != 0 ? std::sqrt(2.0) : 1.0;
+                    const double extra_cost = occupancy == -1 ? options.unknown_cost :
+                        std::max(0, static_cast<int>(cost_map.data[next]));
+                    const double candidate = nodes[index].g + step + extra_cost;
+                    if (candidate < nodes[next].g)
+                    {
+                        nodes[next].g = candidate;
+                        nodes[next].parent = index;
+                        const double heuristic = diagonal_paths ?
+                            std::hypot(nx - goal_x, ny - goal_y) :
+                            std::abs(nx - goal_x) + std::abs(ny - goal_y);
+                        open.emplace(candidate + heuristic, candidate, next);
+                    }
+                }
+            }
+        }
+        if (endpoint == no_parent)
+        {
+            // An exhausted search has visited the entire reachable component.
+            if (options.goal_tolerance_m > 0.0 &&
+                closest_distance <= options.goal_tolerance_m)
+                endpoint = closest;
+            else
+            {
+                if (status)
+                    *status = PlanStatus::NoPath;
+                return false;
+            }
+        }
+
+        result_path.header = map.header;
+        std::vector<size_t> cells;
+        for (size_t index = endpoint; index != no_parent; index = nodes[index].parent)
+            cells.push_back(index);
+        std::reverse(cells.begin(), cells.end());
+        result_path.poses.reserve(cells.size() + 1);
+        for (const size_t index : cells)
+        {
+            geometry_msgs::msg::PoseStamped pose;
+            pose.pose.position = geometry.cellCenter(
+                static_cast<int>(index % geometry.width),
+                static_cast<int>(index / geometry.width));
+            result_path.poses.push_back(pose);
+        }
+        result_path.poses.front().pose = start_pose;
+        if (endpoint == goal)
+        {
+            if (cells.size() == 1 &&
+                std::hypot(goal_pose.position.x - start_pose.position.x,
+                           goal_pose.position.y - start_pose.position.y) > geometry_epsilon)
+                result_path.poses.emplace_back();
+            result_path.poses.back().pose = goal_pose;
+        }
+        else if (cells.size() == 1 && !closest_is_start_pose)
+        {
+            // Relocation may require a short move inside the robot's current cell.
+            geometry_msgs::msg::PoseStamped pose;
+            pose.pose.position = geometry.cellCenter(start_x, start_y);
+            result_path.poses.push_back(pose);
+        }
+        finishPath(result_path);
+        if (status)
+            *status = PlanStatus::Success;
+        return true;
+    }
+    catch (const std::invalid_argument&)
+    {
+        return false;
+    }
+}
+
+Path PathPlanner::SmoothPath(
+    const Path& path, float weight_data, float weight_smooth, float tolerance,
+    const Grid* collision_map, bool allow_unknown)
+{
+    Path result = path;
+    if (!std::isfinite(weight_data) || !std::isfinite(weight_smooth) ||
+        !std::isfinite(tolerance) || weight_data < 0.0f || weight_data > 1.0f ||
+        weight_smooth < 0.0f || weight_smooth > 1.0f || tolerance <= 0.0f)
+        throw std::invalid_argument("Invalid smoothing weights or tolerance");
+    const double threshold = static_cast<double>(tolerance) * path.poses.size();
+    if (path.poses.size() >= 3)
+    {
+        for (int attempt = 0; attempt < 1000; ++attempt)
+        {
+            double change = 0.0;
+            for (size_t i = 1; i + 1 < path.poses.size(); ++i)
+            {
+                auto& point = result.poses[i].pose.position;
+                const auto old = point;
+                const auto& original = path.poses[i].pose.position;
+                const auto& previous = result.poses[i - 1].pose.position;
+                const auto& next = result.poses[i + 1].pose.position;
+                point.x += weight_data * (original.x - point.x) +
+                    weight_smooth * (previous.x + next.x - 2.0 * point.x);
+                point.y += weight_data * (original.y - point.y) +
+                    weight_smooth * (previous.y + next.y - 2.0 * point.y);
+                change += std::abs(point.x - old.x) + std::abs(point.y - old.y);
+            }
+            if (!std::isfinite(change))
+            {
+                result = path;
+                break;
+            }
+            if (change < threshold)
+                break;
         }
     }
-    std::cout << "PathCalculator.->Smoothing finished after " << attempts << " attempts" <<  std::endl;
-    return newPath;
+    if (collision_map && !validatePathSegments(result, *collision_map, allow_unknown))
+        result = path;
+    finishPath(result);
+    return result;
 }
 
-Node::Node()
+PlanResult PathPlanner::Plan(
+    const Grid& map, const Grid& cost_map, const Pose& start_pose, const Pose& goal_pose,
+    const PlanOptions& options, const std::vector<Pose>& via_points)
 {
-    this->index            = -1;
-    this->g_value          = INT_MAX;
-    this->f_value          = INT_MAX;
-    this->in_open_list     = false;
-    this->in_closed_list   = false;
-    this->parent           = NULL;  
-}
+    PlanResult result;
+    try
+    {
+        const GridGeometry geometry(map);
+        if (!std::isfinite(options.escape_clear_radius) || options.escape_clear_radius < 0.0 ||
+            !std::isfinite(options.online_behind_clearance) || options.online_behind_clearance < 0.0 ||
+            !std::isfinite(options.smooth_alpha) || options.smooth_alpha < 0.0 || options.smooth_alpha > 1.0 ||
+            !std::isfinite(options.smooth_beta) || options.smooth_beta < 0.0 || options.smooth_beta > 1.0 ||
+            !std::isfinite(options.smooth_tolerance) || options.smooth_tolerance <= 0.0 ||
+            !std::isfinite(options.unknown_cost) || options.unknown_cost < 0.0 ||
+            !std::isfinite(options.goal_tolerance_m) || options.goal_tolerance_m < 0.0)
+            return result;
+        std::vector<Pose> stops = via_points;
+        stops.push_back(goal_pose);
+        int x, y;
+        if (!geometry.worldToCell(start_pose.position.x, start_pose.position.y, x, y))
+        {
+            result.status = PlanStatus::OutsideMap;
+            return result;
+        }
+        for (const auto& stop : stops)
+        {
+            if (!geometry.worldToCell(stop.position.x, stop.position.y, x, y))
+            {
+                result.status = PlanStatus::OutsideMap;
+                return result;
+            }
+        }
 
-Node::~Node()
-{
+        const Grid* working = &map;
+        Grid modified;
+        if (options.disable_rear_path_plan)
+        {
+            modified = map;
+            for (int gy = 0; gy < geometry.height; ++gy)
+                for (int gx = 0; gx < geometry.width; ++gx)
+                    if (geometry.cellCenter(gx, gy).x < -options.online_behind_clearance)
+                        modified.data[static_cast<size_t>(gy) * geometry.width + gx] = 100;
+            working = &modified;
+        }
+        size_t failed_segment = 0;
+        result = planSegments(*working, cost_map, start_pose, stops, options, 0.0, failed_segment);
+        if (result.status == PlanStatus::Success || result.status == PlanStatus::InvalidInput)
+            return result;
+
+        bool used_escape = false;
+        if (options.escape_clear_radius > 0.0 && failed_segment == 0 &&
+            (result.status == PlanStatus::StartBlocked || result.status == PlanStatus::NoPath))
+        {
+            if (working == &map)
+                modified = map;
+            working = &modified;
+            int cx, cy;
+            geometry.worldToCell(start_pose.position.x, start_pose.position.y, cx, cy);
+            const int reach = static_cast<int>(std::min(
+                std::ceil(options.escape_clear_radius / geometry.resolution),
+                static_cast<double>(std::max(geometry.width, geometry.height))));
+            for (int gy = std::max(0, cy - reach); gy <= std::min(geometry.height - 1, cy + reach); ++gy)
+            {
+                for (int gx = std::max(0, cx - reach); gx <= std::min(geometry.width - 1, cx + reach); ++gx)
+                {
+                    const auto point = geometry.cellCenter(gx, gy);
+                    const size_t index = static_cast<size_t>(gy) * geometry.width + gx;
+                    if (std::hypot(point.x - start_pose.position.x, point.y - start_pose.position.y) >
+                            options.escape_clear_radius ||
+                        (options.disable_rear_path_plan && point.x < -options.online_behind_clearance))
+                        continue;
+                    // Preserve unknown cells and the configured rear boundary.
+                    if (modified.data[index] > 0)
+                        modified.data[index] = 0;
+                }
+            }
+            // Clear the occupied start cell even when its centre is beyond a tiny radius.
+            const size_t start = static_cast<size_t>(cy) * geometry.width + cx;
+            if (modified.data[start] > 0 &&
+                (!options.disable_rear_path_plan ||
+                 geometry.cellCenter(cx, cy).x >= -options.online_behind_clearance))
+                modified.data[start] = 0;
+            used_escape = true;
+            result = planSegments(*working, cost_map, start_pose, stops, options, 0.0, failed_segment);
+            result.used_escape = true;
+            if (result.status == PlanStatus::Success)
+                return result;
+        }
+        if (options.goal_tolerance_m > 0.0 && failed_segment + 1 == stops.size() &&
+            (result.status == PlanStatus::GoalBlocked || result.status == PlanStatus::NoPath))
+        {
+            result = planSegments(*working, cost_map, start_pose, stops, options,
+                                  options.goal_tolerance_m, failed_segment);
+            result.used_escape = used_escape;
+        }
+        return result;
+    }
+    catch (const std::invalid_argument&)
+    {
+        return result;
+    }
 }

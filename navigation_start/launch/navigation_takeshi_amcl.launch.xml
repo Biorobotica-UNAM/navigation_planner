@@ -166,32 +166,6 @@
     <remap from="point_obstacle"         to="clicked_point"/>
   </node>
 
-  <!--node name="cloud_filter"
-        pkg="map_augmenter"
-        exec="cloud_filter_node"
-        output="screen"
-        respawn="true"
-        namespace="$(var namespace_nav)">
-    <param name="use_sim_time" value="$(var use_sim_time)"/>
-    <param name="input_topic" value="$(var raw_point_cloud_topic)"/>
-    <param name="output_topic" value="$(var point_cloud_topic)"/>
-    <param name="input_qos_mode" value="$(var cloud_filter_input_qos_mode)"/>
-    <param name="base_link_name" value="$(var base_link_name)"/>
-    <param name="min_x" value="$(var cloud_min_x)"/>
-    <param name="max_x" value="$(var cloud_max_x)"/>
-    <param name="min_y" value="$(var cloud_min_y)"/>
-    <param name="max_y" value="$(var cloud_max_y)"/>
-    <param name="min_z" value="$(var cloud_min_z)"/>
-    <param name="max_z" value="$(var cloud_max_z)"/>
-    <param name="voxel_leaf_size" value="0.03"/>
-    <param name="input_downsampling" value="4"/>
-    <param name="processing_rate_hz" value="20.0"/>
-    <param name="tf_fallback_warn_threshold_sec" value="0.20"/>
-    <param name="min_points_per_voxel" value="$(var cloud_filter_min_points_per_voxel)"/>
-    <param name="min_neighbor_voxels" value="$(var cloud_filter_min_neighbor_voxels)"/>
-    <param name="debug" value="$(var cloud_filter_debug)"/>
-  </node-->
-
   <node name="obstacle_detector"
         pkg="map_augmenter"
         exec="obstacle_detector_node"
@@ -231,7 +205,6 @@
   <!-- ================================================================== -->
   <!--                         Path Planning                              -->
   <!-- ================================================================== -->
-
   <node name="path_planner"
         pkg="path_planner"
         exec="path_planner_node"
@@ -242,6 +215,9 @@
     <param name="diagonal_paths"    value="$(var diagonal_paths)"/>
   </node>
 
+  <!-- ================================================================== -->
+  <!--                         Simple Move                                -->
+  <!-- ================================================================== -->
   <node name="simple_move"
         pkg="simple_move"
         exec="simple_move_node"
@@ -259,6 +235,9 @@
     <remap from="/cmd_vel"                      to="$(var cmd_vel_topic)"/>
   </node>
 
+  <!-- ================================================================== -->
+  <!--                         Potential Fields                           -->
+  <!-- ================================================================== -->
   <node name="potential_fields"
         pkg="potential_fields"
         exec="potential_fields_node"

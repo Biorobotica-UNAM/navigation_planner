@@ -3,22 +3,17 @@
 <package format="3">
   <name>path_planner</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>Occupancy-grid A* planning with SLAM support, waypoints, and bounded map updates.</description>
   <maintainer email="rsandovr@gmail.com">pumas</maintainer>
   <license>TODO: License declaration</license>
-
   <buildtool_depend>ament_cmake</buildtool_depend>
-
   <depend>rclcpp</depend>
-  <depend>std_msgs</depend>
-  <depend>sensor_msgs</depend>
+  <depend>rcl_interfaces</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
-  <depend>rcl_interfaces</depend>
-
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
-
+  <depend>pumas_interfaces</depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>rclpy</test_depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>

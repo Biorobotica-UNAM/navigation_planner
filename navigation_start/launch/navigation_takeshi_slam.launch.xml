@@ -79,6 +79,8 @@
   <!-- ===== Path Planner ===== -->
   <!-- Diagonal paths disabled while SLAM is still building the map -->
   <arg name="diagonal_paths" default="False"/>
+  <arg name="allow_unknown" default="True"/>
+  <arg name="unknown_cost" default="1.0"/>
 
   <!-- ===== Simple Move ===== -->
   <!-- More conservative speeds while exploring an unknown map -->
@@ -278,6 +280,8 @@
         namespace="$(var namespace_nav)">
     <param name="use_namespace"  value="$(var use_namespace)"/>
     <param name="diagonal_paths" value="$(var diagonal_paths)"/>
+    <param name="allow_unknown" value="$(var allow_unknown)"/>
+    <param name="unknown_cost" value="$(var unknown_cost)"/>
   </node>
 
   <node name="simple_move"

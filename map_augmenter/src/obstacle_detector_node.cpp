@@ -1,17 +1,28 @@
+// ------------------------------------------------
+// ----- Utils for obstacle_detector_node.cpp -----
+// ------------------------------------------------
+
 #include "map_augmenter/grid_utils.hpp"
 
+// ----- ROS 2 -----
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rclcpp/rclcpp.hpp>
+
+// ----- ROS 2 messages -----
+// --- sensor_msgs ---
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/point_field.hpp>
+// --- std_msgs ---
 #include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
+// --- tf2_msgs ---  
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
-#include <Eigen/Geometry>
 
+// ------- C++ standard library -----
+#include <Eigen/Geometry>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -32,95 +43,207 @@
 
 class ObstacleDetectorNode : public rclcpp::Node
 {
-  using Grid = map_augmenter::Grid;
-  using Cloud = sensor_msgs::msg::PointCloud2;
-  using Scan = sensor_msgs::msg::LaserScan;
-  using Field = sensor_msgs::msg::PointField;
+  using Grid        = map_augmenter::Grid;
+  using Cloud       = sensor_msgs::msg::PointCloud2;
+  using Scan        = sensor_msgs::msg::LaserScan;
+  using Field       = sensor_msgs::msg::PointField;
   using SteadyClock = std::chrono::steady_clock;
   static constexpr int64_t never_observed = std::numeric_limits<int64_t>::min();
 
 public:
-  ObstacleDetectorNode()
-  : Node("obstacle_detector_node"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
+  ObstacleDetectorNode() :  Node("obstacle_detector_node"), 
+                            tf_buffer_(get_clock()), 
+                            tf_listener_(tf_buffer_)
   {
-    use_namespace_ = parameter("use_namespace", false, "Namespace the default internal endpoints.");
-    use_lidar_ = parameter("use_lidar", false, "Enable the LaserScan input.");
-    use_cloud_ = parameter("use_point_cloud", false, "Enable camera input 1 (PointCloud2).");
-    use_cloud2_ = parameter("use_point_cloud2", false, "Enable optional camera input 2 (also PointCloud2).");
-    laser_box_ = declare_box("laser");
-    cloud_box_ = declare_box("cloud");
-    cloud_follow_head_ = parameter("cloud_follow_head", true,
-      "Rotate the horizontal cloud crop about the base origin to follow the camera viewing yaw.");
+    use_namespace_      = parameter("use_namespace", false, 
+                                    "Namespace the default internal endpoints.");
+    
+    use_lidar_          = parameter("use_lidar", false, 
+                                    "Enable the LaserScan input.");
+
+    use_cloud_          = parameter("use_point_cloud", false, 
+                                    "Enable camera input 1 (PointCloud2).");
+
+    use_cloud2_         = parameter("use_point_cloud2", false, 
+                                    "Enable optional camera input 2 (also PointCloud2).");
+
+    laser_box_          = declare_box("laser");
+    cloud_box_          = declare_box("cloud");
+    cloud_follow_head_  = parameter("cloud_follow_head", true,
+                                    "Rotate the horizontal cloud crop about the base origin to follow the camera viewing yaw.");
+                                    
     const auto forward_axis = parameter("cloud_forward_axis", std::string("z"),
-      "Forward axis of the cloud TF frame: x, y or z; optical camera frames use z.");
-    if (forward_axis == "x") {cloud_forward_axis_ = Eigen::Vector3d::UnitX();}
+                                        "Forward axis of the cloud TF frame: x, y or z; optical camera frames use z.");
+
+    if      (forward_axis == "x") {cloud_forward_axis_ = Eigen::Vector3d::UnitX();}
     else if (forward_axis == "y") {cloud_forward_axis_ = Eigen::Vector3d::UnitY();}
     else if (forward_axis == "z") {cloud_forward_axis_ = Eigen::Vector3d::UnitZ();}
     else {throw std::invalid_argument("cloud_forward_axis must be x, y or z");}
+    
     cloud_yaw_min_projection_ = parameter("cloud_yaw_min_horizontal_projection", 0.1,
-      "Minimum horizontal forward-axis projection for a defined viewing yaw; otherwise use base-aligned crop.");
-    cloud_gating_enabled_ = parameter("cloud_gating_enabled", false,
-      "Use navigation/cloud enable topics to create and destroy cloud subscriptions; LiDAR is independent.");
-    navigation_active_ = parameter("cloud_navigation_initially_active", false,
-      "Initial navigation gate when cloud gating is enabled; false waits for an enable message.");
-    cloud_override_enabled_ = parameter("cloud_override_initially_enabled", true,
-      "Initial cloud gate; both navigation and cloud gates must be true to subscribe.");
-    remember_all_obstacles_ = parameter("remember_all_obstacles", false,
-      "Keep accepted obstacle cells in map coordinates until cleared; pose/clock resets also clear memory.");
-    base_link_ = parameter("base_link_name", std::string("base_footprint"), "Robot base TF frame.");
-    map_frame_ = parameter("map_frame", std::string("map"), "Required map TF frame.");
-    odom_frame_ = parameter("odom_frame", std::string("odom"), "Odometry TF frame.");
-    const double period = parameter("processing_period_sec", 0.075, "Integration and publication interval.");
-    obstacle_timeout_ = parameter("obstacle_timeout_sec", 0.75, "Lifetime since the last sensor observation.");
-    sensor_max_age_ = parameter("sensor_max_age_sec", 0.5, "Maximum accepted sensor-message age.");
-    future_tolerance_ = parameter("sensor_future_tolerance_sec", 0.05, "Maximum sensor timestamp lead.");
-    allow_zero_stamp_ = parameter("allow_zero_sensor_stamp", false,
-      "Interpret a zero sensor stamp as reception/processing time; false rejects it.");
-    tf_timeout_ = parameter("tf_timeout_sec", 0.03, "Per-transform lookup timeout.");
-    allow_tf_fallback_ = parameter("tf_allow_latest_fallback", true, "Allow a recent latest TF fallback.");
+                                          "Minimum horizontal forward-axis projection for a defined viewing yaw; otherwise use base-aligned crop.");
+
+    cloud_gating_enabled_     = parameter("cloud_gating_enabled", false,
+                                          "Use navigation/cloud enable topics to create and destroy cloud subscriptions; LiDAR is independent.");
+
+    navigation_active_        = parameter("cloud_navigation_initially_active", false,
+                                          "Initial navigation gate when cloud gating is enabled; false waits for an enable message.");
+
+    cloud_override_enabled_   = parameter("cloud_override_initially_enabled", true,
+                                          "Initial cloud gate; both navigation and cloud gates must be true to subscribe.");
+
+    remember_all_obstacles_   = parameter("remember_all_obstacles", false,
+                                          "Keep accepted obstacle cells in map coordinates until cleared; pose/clock resets also clear memory.");
+
+    base_link_                = parameter("base_link_name", std::string("base_footprint"), 
+                                          "Robot base TF frame.");
+
+    map_frame_                = parameter("map_frame", std::string("map"),
+                                          "Required map TF frame.");
+
+    odom_frame_               = parameter("odom_frame", std::string("odom"),
+                                          "Odometry TF frame.");
+
+    const double period       = parameter("processing_period_sec", 0.075,
+                                          "Integration and publication interval.");
+
+    obstacle_timeout_         = parameter("obstacle_timeout_sec", 0.75, 
+                                          "Lifetime since the last sensor observation.");
+
+    sensor_max_age_           = parameter("sensor_max_age_sec", 0.5,
+                                          "Maximum accepted sensor-message age.");
+
+    future_tolerance_         = parameter("sensor_future_tolerance_sec", 0.05,
+                                          "Maximum sensor timestamp lead.");
+
+    allow_zero_stamp_         = parameter("allow_zero_sensor_stamp", false,
+                                          "Interpret a zero sensor stamp as reception/processing time; false rejects it.");
+
+    tf_timeout_               = parameter("tf_timeout_sec", 0.03,
+                                          "Per-transform lookup timeout.");
+
+    allow_tf_fallback_        = parameter("tf_allow_latest_fallback", true,
+                                          "Allow a recent latest TF fallback.");
+
     const double legacy_tf_warning = parameter("tf_fallback_warn_threshold_sec", 0.20,
-      "Compatibility default for tf_fallback_max_age_sec; stale fallback transforms are now rejected.");
-    tf_max_age_ = parameter("tf_fallback_max_age_sec", legacy_tf_warning, "Maximum fallback TF time difference.");
-    static_ignore_radius_ = parameter("static_obstacle_ignore_radius", 0.10,
-      "Suppress detections near raw static obstacles, in metres.");
-    ignore_static_ = parameter("ignore_static_obstacles", true, "Suppress detections already represented by the base map.");
-    self_ignore_radius_ = parameter("self_obstacle_ignore_radius", 0.0,
-      "Ignore sensor points within this horizontal distance of the robot base.");
-    laser_min_range_ = parameter("laser_min_range", 0.10, "Additional minimum laser range.");
-    cloud_downsampling_ = parameter("cloud_downsampling", 1, "Camera input 1 sample stride.");
-    cloud_downsampling2_ = parameter("cloud_downsampling2", 1, "Camera input 2 sample stride.");
-    lidar_downsampling_ = parameter("lidar_downsampling", 1, "LaserScan sample stride.");
-    cloud_min_points_ = parameter("cloud_min_points_per_cell", 2, "Minimum per-frame cloud evidence per cell.");
-    cloud_min_neighbors_ = parameter("cloud_min_neighbor_cells", 1,
-      "Minimum neighboring cells with sufficient evidence in the surrounding 3x3 cells.");
-    clear_on_pose_jump_ = parameter("clear_on_pose_jump", true, "Clear transient evidence after large map-to-odom corrections.");
-    pose_jump_translation_ = parameter("pose_jump_translation_m", 0.5, "Translation change that clears transient evidence.");
-    pose_jump_rotation_ = parameter("pose_jump_rotation_rad", 0.35, "Rotation change that clears transient evidence.");
-    log_throttle_ms_ = parameter("log_throttle_ms", 2000, "Repeated warning interval in milliseconds.");
+                                          "Compatibility default for tf_fallback_max_age_sec; stale fallback transforms are now rejected.");
+
+    tf_max_age_               = parameter("tf_fallback_max_age_sec", legacy_tf_warning,
+                                          "Maximum fallback TF time difference.");
+
+    static_ignore_radius_     = parameter("static_obstacle_ignore_radius", 0.10,
+                                          "Suppress detections near raw static obstacles, in metres.");
+
+    ignore_static_            = parameter("ignore_static_obstacles", true, 
+                                          "Suppress detections already represented by the base map.");
+
+    self_ignore_radius_       = parameter("self_obstacle_ignore_radius", 0.0,
+                                          "Ignore sensor points within this horizontal distance of the robot base.");
+
+    laser_min_range_          = parameter("laser_min_range", 0.10,
+                                         "Additional minimum laser range.");
+
+    cloud_downsampling_       = parameter("cloud_downsampling", 1,
+                                          "Camera input 1 sample stride.");
+
+    cloud_downsampling2_      = parameter("cloud_downsampling2", 1,
+                                          "Camera input 2 sample stride.");
+
+    lidar_downsampling_       = parameter("lidar_downsampling", 1,
+                                          "LaserScan sample stride.");
+
+    cloud_min_points_         = parameter("cloud_min_points_per_cell", 2,
+                                          "Minimum per-frame cloud evidence per cell.");
+
+    cloud_min_neighbors_      = parameter("cloud_min_neighbor_cells", 1,
+                                          "Minimum neighboring cells with sufficient evidence in the surrounding 3x3 cells.");
+
+    clear_on_pose_jump_       = parameter("clear_on_pose_jump", true,
+                                          "Clear transient evidence after large map-to-odom corrections.");
+
+    pose_jump_translation_    = parameter("pose_jump_translation_m", 0.5,
+                                          "Translation change that clears transient evidence.");
+
+    pose_jump_rotation_       = parameter("pose_jump_rotation_rad", 0.35,
+                                          "Rotation change that clears transient evidence.");
+
+    log_throttle_ms_          = parameter("log_throttle_ms", 2000,
+                                          "Repeated warning interval in milliseconds.");
+    
     rcl_interfaces::msg::ParameterDescriptor debug_descriptor;
     debug_descriptor.description = "Enable detection-stage counters at runtime without changing detection behavior.";
     declare_parameter<bool>("debug_detection", false, debug_descriptor);
-    debug_period_ = parameter("debug_detection_period_sec", 2.0,
-      "Detection diagnostic summary interval; configured at startup.");
-    const int grid_depth = parameter("map_qos_depth", 1, "Grid history depth.");
-    const int sensor_depth = parameter("sensor_qos_depth", 5, "Sensor subscription history depth.");
-    const bool map_latched = parameter("map_input_transient_local", true, "Receive the retained base map.");
-    const bool map_reliable = parameter("map_input_reliable", true, "Request reliable base maps.");
-    const bool output_latched = parameter("map_output_transient_local", true, "Retain the obstacle grid.");
-    const bool output_reliable = parameter("map_output_reliable", true, "Publish reliable obstacle grids.");
-    const bool sensor_reliable = parameter("sensor_input_reliable", false, "Request reliable sensor data instead of best effort.");
-    const int control_depth = parameter("cloud_control_qos_depth", 1, "Cloud control topic history depth.");
-    const bool control_latched = parameter("cloud_control_transient_local", true, "Receive retained cloud control messages.");
-    const bool control_reliable = parameter("cloud_control_reliable", true, "Request reliable cloud control messages.");
-    if (!positive(period) || !positive(obstacle_timeout_) || !nonnegative(sensor_max_age_) ||
-      !nonnegative(future_tolerance_) || !nonnegative(tf_timeout_) || !nonnegative(tf_max_age_) ||
-      !nonnegative(static_ignore_radius_) || !nonnegative(self_ignore_radius_) ||
-      !nonnegative(laser_min_range_) || !positive(pose_jump_translation_) || !positive(pose_jump_rotation_) ||
-      cloud_downsampling_ < 1 || cloud_downsampling2_ < 1 || lidar_downsampling_ < 1 ||
-      cloud_min_points_ < 1 || cloud_min_neighbors_ < 0 || cloud_min_neighbors_ > 8 ||
-      log_throttle_ms_ < 1 || !positive(debug_period_) || grid_depth < 1 || sensor_depth < 1 ||
-      map_frame_.empty() || base_link_.empty() || odom_frame_.empty() ||
-      !nonnegative(cloud_yaw_min_projection_) || cloud_yaw_min_projection_ >= 1.0 || control_depth < 1)
+    
+    debug_period_             = parameter("debug_detection_period_sec", 2.0,
+                                          "Detection diagnostic summary interval; configured at startup.");
+                              
+    const int grid_depth      = parameter("map_qos_depth", 1,
+                                          "Grid history depth.");
+
+    const int sensor_depth    = parameter("sensor_qos_depth", 5,
+                                          "Sensor subscription history depth.");
+
+    const bool map_latched    = parameter("map_input_transient_local", true,
+                                          "Receive the retained base map.");
+
+    const bool map_reliable   = parameter("map_input_reliable", true,
+                                          "Request reliable base maps.");
+
+    const bool output_latched = parameter("map_output_transient_local", true,
+                                          "Retain the obstacle grid.");
+
+    const bool output_reliable = parameter("map_output_reliable", true,
+                                          "Publish reliable obstacle grids.");
+
+    const bool sensor_reliable = parameter("sensor_input_reliable", false, 
+                                          "Request reliable sensor data instead of best effort.");
+
+    const int control_depth   = parameter("cloud_control_qos_depth", 1,
+                                          "Cloud control topic history depth.");
+
+    const bool control_latched = parameter("cloud_control_transient_local", true,
+                                          "Receive retained cloud control messages.");
+
+    const bool control_reliable = parameter("cloud_control_reliable", true,
+                                          "Request reliable cloud control messages.");
+
+    cloud_topic1_               = parameter("point_cloud_topic", std::string("/point_cloud"),
+                                            "Camera input 1 PointCloud2 topic.");
+
+    cloud_topic2_               = parameter("point_cloud_topic2", std::string("/point_cloud2"),
+                                            "Optional camera input 2 PointCloud2 topic.");
+                              
+    const auto laser_topic      = parameter("laser_scan_topic", std::string("/scan"),
+                                       "Hokuyo or other LaserScan topic.");
+
+    const auto navigation_topic = endpoint("cloud_navigation_enable_topic", "/map_augmenter/enable");
+    const auto cloud_enable_topic = endpoint("cloud_enable_topic", "/map_augmenter/enable_cloud");
+                                          
+    if (!positive(period) || 
+        !positive(obstacle_timeout_) || 
+        !nonnegative(sensor_max_age_) ||
+        !nonnegative(future_tolerance_) || 
+        !nonnegative(tf_timeout_) || 
+        !nonnegative(tf_max_age_) ||
+        !nonnegative(static_ignore_radius_) ||
+        !nonnegative(self_ignore_radius_) ||
+        !nonnegative(laser_min_range_) ||
+        !positive(pose_jump_translation_) ||
+        !positive(pose_jump_rotation_) ||
+        cloud_downsampling_ < 1 || 
+        cloud_downsampling2_ < 1 || 
+        lidar_downsampling_ < 1 ||
+        cloud_min_points_ < 1 || 
+        cloud_min_neighbors_ < 0 || 
+        cloud_min_neighbors_ > 8 ||
+        log_throttle_ms_ < 1 || 
+        !positive(debug_period_) || 
+        grid_depth < 1 || sensor_depth < 1 ||
+        map_frame_.empty() || 
+        base_link_.empty() || 
+        odom_frame_.empty() ||
+        !nonnegative(cloud_yaw_min_projection_) || 
+        cloud_yaw_min_projection_ >= 1.0 || control_depth < 1)
     {
       throw std::invalid_argument("Invalid obstacle detector parameter range");
     }
@@ -140,62 +263,86 @@ public:
     parameter("ransac_distance_threshold", 0.03, "Legacy unused ground-filter setting.");
 
     auto map_qos = rclcpp::QoS(grid_depth);
-    if (map_latched) {map_qos.transient_local();}
-    if (map_reliable) {map_qos.reliable();} else {map_qos.best_effort();}
+    if (map_latched)    {map_qos.transient_local();}
+    if (map_reliable)   {map_qos.reliable();} else {map_qos.best_effort();}
+
     auto output_qos = rclcpp::QoS(grid_depth);
-    if (output_latched) {output_qos.transient_local();}
-    if (output_reliable) {output_qos.reliable();} else {output_qos.best_effort();}
+    if (output_latched)   {output_qos.transient_local();}
+    if (output_reliable)  {output_qos.reliable();} else {output_qos.best_effort();}
+    
     auto sensor_qos = rclcpp::QoS(sensor_depth);
     if (sensor_reliable) {sensor_qos.reliable();} else {sensor_qos.best_effort();}
+    
     cloud_qos_ = sensor_qos;
 
-    pub_obstacles_ = create_publisher<Grid>(endpoint("obstacles_map_topic", "/obstacles_map"), output_qos);
-    sub_base_ = create_subscription<Grid>(
-      endpoint("base_map_topic", "/map_augmenter/base_map"), map_qos,
-      [this](Grid::ConstSharedPtr msg) {on_base_map(*msg);});
-    cloud_topic1_ = parameter("point_cloud_topic", std::string("/point_cloud"), "Camera input 1 PointCloud2 topic.");
-    cloud_topic2_ = parameter("point_cloud_topic2", std::string("/point_cloud2"), "Optional camera input 2 PointCloud2 topic.");
-    const auto laser_topic = parameter("laser_scan_topic", std::string("/scan"), "Hokuyo or other LaserScan topic.");
-    const auto navigation_topic = endpoint("cloud_navigation_enable_topic", "/map_augmenter/enable");
-    const auto cloud_enable_topic = endpoint("cloud_enable_topic", "/map_augmenter/enable_cloud");
-    if (cloud_gating_enabled_) {
+    pub_obstacles_  = create_publisher<Grid>(endpoint("obstacles_map_topic",
+                                                      "/obstacles_map"),
+                                                      output_qos);
+
+    sub_base_       = create_subscription<Grid>(endpoint("base_map_topic",
+                                                         "/map_augmenter/base_map"), 
+                                                         map_qos,
+                                                         [this](Grid::ConstSharedPtr msg) {on_base_map(*msg);});
+    
+    if (cloud_gating_enabled_)
+    {
       auto control_qos = rclcpp::QoS(control_depth);
-      if (control_latched) {control_qos.transient_local();}
-      if (control_reliable) {control_qos.reliable();} else {control_qos.best_effort();}
-      sub_navigation_enable_ = create_subscription<std_msgs::msg::Bool>(navigation_topic, control_qos,
-        [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
-          navigation_active_ = msg->data;
-          update_cloud_subscriptions();
-        });
-      sub_cloud_enable_ = create_subscription<std_msgs::msg::Bool>(cloud_enable_topic, control_qos,
-        [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
-          cloud_override_enabled_ = msg->data;
-          update_cloud_subscriptions();
-        });
+      
+      if (control_latched)  {control_qos.transient_local();}
+      if (control_reliable) {control_qos.reliable();}  else {control_qos.best_effort();}
+      
+      sub_navigation_enable_ = create_subscription<std_msgs::msg::Bool>(navigation_topic,
+                                                                        control_qos,
+                                                                        [this](std_msgs::msg::Bool::ConstSharedPtr msg)
+                                                                        {
+                                                                          navigation_active_ = msg->data;
+                                                                          update_cloud_subscriptions();
+                                                                        });
+
+      sub_cloud_enable_ = create_subscription<std_msgs::msg::Bool>(cloud_enable_topic,
+                                                                   control_qos,
+                                                                   [this](std_msgs::msg::Bool::ConstSharedPtr msg)
+                                                                   {
+                                                                     cloud_override_enabled_ = msg->data;
+                                                                     update_cloud_subscriptions();
+                                                                   });
     }
+
     update_cloud_subscriptions();
-    if (use_lidar_) {
-      sub_scan_ = create_subscription<Scan>(laser_topic, sensor_qos,
-        [this](Scan::ConstSharedPtr msg) {
-          if (diagnostics_enabled_) {record_received(lidar_diagnostics_, msg->header.stamp, bool(latest_scan_));}
-          latest_scan_ = std::move(msg);
-        });
+    
+    if (use_lidar_)
+    {
+        sub_scan_ = create_subscription<Scan>(laser_topic,
+                                              sensor_qos,
+                                              [this](Scan::ConstSharedPtr msg)
+                                              {
+                                                if (diagnostics_enabled_)
+                                                {
+                                                  record_received(lidar_diagnostics_,
+                                                                  msg->header.stamp,
+                                                                  bool(latest_scan_));
+                                                }
+                                                latest_scan_ = std::move(msg);
+                                              });
     }
-    srv_clear_memory_ = create_service<std_srvs::srv::Trigger>(
-      endpoint("clear_obstacle_memory_service", "/map_augmenter/clear_obstacle_memory"),
-      [this](std_srvs::srv::Trigger::Request::SharedPtr,
-      std_srvs::srv::Trigger::Response::SharedPtr response) {
-        const auto count = memory_cells_.size();
-        clear_obstacle_memory();
-        if (have_grid_) {publish_obstacles();}
-        response->success = true;
-        response->message = "Cleared " + std::to_string(count) +
-          " remembered cells; live detections remain until they expire.";
-      });
+
+    srv_clear_memory_ = create_service<std_srvs::srv::Trigger>(endpoint("clear_obstacle_memory_service",
+                                                                        "/map_augmenter/clear_obstacle_memory"),
+                                                              [this](std_srvs::srv::Trigger::Request::SharedPtr,
+                                                              std_srvs::srv::Trigger::Response::SharedPtr response)
+                                                              {
+                                                                const auto count = memory_cells_.size();
+                                                                clear_obstacle_memory();
+                                                                if (have_grid_) {publish_obstacles();}
+                                                                response->success = true;
+                                                                response->message = "Cleared " + std::to_string(count) +
+                                                                " remembered cells; live detections remain until they expire.";
+                                                              });
 
     // Sensor, map and timer callbacks share the default mutually-exclusive group.
     // A frame is consumed once, including when it is rejected for age or bad TF.
     processing_timer_ = create_wall_timer(std::chrono::duration<double>(period), [this]() {processing();});
+    
     RCLCPP_INFO(get_logger(), "Obstacle detector ready; debug_detection is runtime-switchable; other configuration is startup-only");
   }
 
@@ -203,8 +350,11 @@ private:
   void update_cloud_subscriptions()
   {
     const bool enabled = !cloud_gating_enabled_ || (navigation_active_ && cloud_override_enabled_);
-    if (!enabled) {
-      if (sub_cloud1_ || sub_cloud2_) {
+    
+    if (!enabled)
+    {
+      if (sub_cloud1_ || sub_cloud2_)
+      {
         ++cloud_subscription_generation_;
         sub_cloud1_.reset();
         sub_cloud2_.reset();
@@ -214,22 +364,41 @@ private:
       }
       return;
     }
+
     const auto generation = cloud_subscription_generation_;
-    if (use_cloud_ && !sub_cloud1_) {
-      sub_cloud1_ = create_subscription<Cloud>(cloud_topic1_, cloud_qos_,
-        [this, generation](Cloud::ConstSharedPtr msg) {
-          if (generation != cloud_subscription_generation_) {return;}
-          if (diagnostics_enabled_) {record_received(cloud1_diagnostics_, msg->header.stamp, bool(latest_cloud1_));}
-          latest_cloud1_ = std::move(msg);
-        });
+    
+    if (use_cloud_ && !sub_cloud1_)
+    {
+        sub_cloud1_ = create_subscription<Cloud>(cloud_topic1_,
+                                                 cloud_qos_,
+                                                 [this, generation](Cloud::ConstSharedPtr msg)
+                                                 {
+                                                    if(generation != cloud_subscription_generation_){return;}
+                                                    if(diagnostics_enabled_)
+                                                    {
+                                                      record_received(cloud1_diagnostics_,
+                                                                      msg->header.stamp,
+                                                                      bool(latest_cloud1_));
+                                                    }
+                                                    latest_cloud1_ = std::move(msg);
+                                                  });
     }
-    if (use_cloud2_ && !sub_cloud2_) {
-      sub_cloud2_ = create_subscription<Cloud>(cloud_topic2_, cloud_qos_,
-        [this, generation](Cloud::ConstSharedPtr msg) {
-          if (generation != cloud_subscription_generation_) {return;}
-          if (diagnostics_enabled_) {record_received(cloud2_diagnostics_, msg->header.stamp, bool(latest_cloud2_));}
-          latest_cloud2_ = std::move(msg);
-        });
+
+    if (use_cloud2_ && !sub_cloud2_)
+    {
+      sub_cloud2_ = create_subscription<Cloud>(cloud_topic2_,
+                                              cloud_qos_,
+                                              [this, generation](Cloud::ConstSharedPtr msg)
+                                              {
+                                                if(generation != cloud_subscription_generation_) {return;}
+                                                if (diagnostics_enabled_)
+                                                {
+                                                  record_received(cloud2_diagnostics_,
+                                                                  msg->header.stamp, 
+                                                                  bool(latest_cloud2_));
+                                                }
+                                                latest_cloud2_ = std::move(msg);
+                                              });
     }
   }
 
@@ -260,7 +429,8 @@ private:
     cell.header.frame_id = map_frame_;
     cell.info.width = cell.info.height = 1;
     cell.data = {100};
-    for (const auto & remembered : memory_cells_) {
+    for (const auto & remembered : memory_cells_)
+    {
       cell.info.origin.position.x = std::get<0>(remembered);
       cell.info.origin.position.y = std::get<1>(remembered);
       cell.info.resolution = std::get<2>(remembered);
@@ -276,13 +446,16 @@ private:
   void publish_obstacles()
   {
     obstacles_map_.header.stamp = now();
-    if (remember_all_obstacles_ && !memory_cells_.empty()) {
+    if (remember_all_obstacles_ && !memory_cells_.empty())
+    {
       if (memory_dirty_) {rebuild_memory_overlay();}
       // Memory is applied only to the output. It must never refresh transient
       // timestamps or become a new sensor observation after it is cleared.
       const Grid output = map_augmenter::overlay_obstacles(obstacles_map_, memory_overlay_);
       pub_obstacles_->publish(output);
-    } else {
+    }
+    else
+    {
       pub_obstacles_->publish(obstacles_map_);
     }
   }
