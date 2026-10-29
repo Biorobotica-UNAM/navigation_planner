@@ -89,10 +89,10 @@ public:
         //############
         // Publishers
         pub_pot_fields_enable_ = this->create_publisher<std_msgs::msg::Bool>(
-            make_name("/navigation/potential_fields/enable"), 
+            make_name("/potential_fields/enable"), 
             rclcpp::QoS(10).transient_local());
         pub_pot_fields_enable_cloud_ = this->create_publisher<std_msgs::msg::Bool>(
-            make_name("/navigation/potential_fields/enable_cloud"), 
+            make_name("/potential_fields/enable_cloud"), 
             rclcpp::QoS(10).transient_local());
         pub_goal_path_ = this->create_publisher<nav_msgs::msg::Path>(
             make_name("/simple_move/goal_path"), 
@@ -133,12 +133,12 @@ public:
 
         //// motion
         sub_set_patience_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/navigation/set_patience"), 
+            make_name("/set_patience"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&MotionPlannerNode::callback_set_patience, this, std::placeholders::_1));
 
         sub_collision_risk_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/navigation/potential_fields/collision_risk"), 
+            make_name("/potential_fields/collision_risk"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&MotionPlannerNode::callback_collision_risk, this, std::placeholders::_1));
 

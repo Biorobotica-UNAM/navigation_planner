@@ -4,6 +4,12 @@ project(map_augmenter)  # <- pon aquí el nombre real de tu paquete si es otro
 # =====================
 # Compile options
 # =====================
+# Keep sensor processing optimized for ordinary colcon builds while honoring
+# an explicitly selected build type and multi-configuration generators.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "CMake build type" FORCE)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()

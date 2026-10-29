@@ -159,9 +159,9 @@ public:
             make_name("/simple_move/goal_dist_lateral"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_move_lateral, this, std::placeholders::_1));
-
+            
         sub_collisionRisk_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/navigation/potential_fields/collision_risk"), 
+            make_name("/potential_fields/collision_risk"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_collision_risk, this, std::placeholders::_1));
 
@@ -171,7 +171,7 @@ public:
             std::bind(&SimpleMoveNode::callback_move_head_bypass, this, std::placeholders::_1));
 
         sub_rejectionForce_ = this->create_subscription<geometry_msgs::msg::Vector3>(
-            make_name("/navigation/potential_fields/pf_rejection_force"), 
+            make_name("/potential_fields/pf_rejection_force"), 
             rclcpp::SensorDataQoS(), 
             std::bind(&SimpleMoveNode::callback_rejection_force, this, std::placeholders::_1));
 

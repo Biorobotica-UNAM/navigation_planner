@@ -67,10 +67,12 @@
   <!-- Higher decay/inflation because the SLAM map can have momentary noise -->
   <arg name="augmenter_decay_factor"     default="18"/>
   <arg name="augmenter_inflation_radius" default="0.18"/>
-  <arg name="augmenter_cost_radius"      default="0.20"/>
+  <arg name="augmenter_cost_radius"      default="0.90"/>
   <arg name="robot_radius" default="0.35"/>
-  <arg name="static_obstacle_inflation_radius" default="0.05"/>
-  <arg name="dynamic_obstacle_inflation_radius" default="0.12"/>
+  <arg name="circular_inflation" default="true"/>
+  <!-- Hard clearance assumes a 0.35 m footprint radius plus 0.05 m margin. -->
+  <arg name="static_obstacle_inflation_radius" default="0.40"/>
+  <arg name="dynamic_obstacle_inflation_radius" default="0.40"/>
   <arg name="map_augmenter_debug" default="false"/>
 
   <!-- ===== Obstacle Detector ===== -->
@@ -199,6 +201,7 @@
     <param name="inflation_radius"       value="$(var augmenter_inflation_radius)"/>
     <param name="cost_radius"            value="$(var augmenter_cost_radius)"/>
     <param name="robot_radius"           value="$(var robot_radius)"/>
+    <param name="circular_inflation"     value="$(var circular_inflation)"/>
     <param name="static_obstacle_inflation_radius" value="$(var static_obstacle_inflation_radius)"/>
     <param name="dynamic_obstacle_inflation_radius" value="$(var dynamic_obstacle_inflation_radius)"/>
     <param name="debug_maps"             value="$(var map_augmenter_debug)"/>
@@ -282,6 +285,8 @@
     <param name="diagonal_paths" value="$(var diagonal_paths)"/>
     <param name="allow_unknown" value="$(var allow_unknown)"/>
     <param name="unknown_cost" value="$(var unknown_cost)"/>
+    <!-- Keep occupied cells intact during recovery. -->
+    <param name="escape_clear_radius" value="0.0"/>
   </node>
 
   <node name="simple_move"

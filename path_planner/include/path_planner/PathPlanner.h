@@ -61,12 +61,14 @@ public:
         const PlanOptions& options = {},
         const std::vector<geometry_msgs::msg::Pose>& via_points = {});
 
-    // Supply collision_map to validate all crossed cells after smoothing.
+    // Optional cost_map preserves the original local segment cost ceiling.
+    // Revert to the input path if smoothing violates collision or cost limits.
     static nav_msgs::msg::Path SmoothPath(
         const nav_msgs::msg::Path& path,
         float weight_data = 0.1f,
         float weight_smooth = 0.9f,
         float tolerance = 0.00001f,
         const nav_msgs::msg::OccupancyGrid* collision_map = nullptr,
-        bool allow_unknown = false);
+        bool allow_unknown = false,
+        const nav_msgs::msg::OccupancyGrid* cost_map = nullptr);
 };

@@ -93,14 +93,15 @@ public:
             prefix.clear();
         const std::string map_prefix = prefix + "/map_augmenter/";
         const std::string plan_prefix = prefix + "/path_planner/";
+        // ROS 2 Humble service clients take an rmw QoS profile.
         cycles_[0].map_client = create_client<GetMap>(
-            map_prefix + "get_static_map", rclcpp::ServicesQoS(), update_group_);
+            map_prefix + "get_static_map", rmw_qos_profile_services_default, update_group_);
         cycles_[0].cost_client = create_client<GetMap>(
-            map_prefix + "get_static_cost_map", rclcpp::ServicesQoS(), update_group_);
+            map_prefix + "get_static_cost_map", rmw_qos_profile_services_default, update_group_);
         cycles_[1].map_client = create_client<GetMap>(
-            map_prefix + "get_augmented_map", rclcpp::ServicesQoS(), update_group_);
+            map_prefix + "get_augmented_map", rmw_qos_profile_services_default, update_group_);
         cycles_[1].cost_client = create_client<GetMap>(
-            map_prefix + "get_augmented_cost_map", rclcpp::ServicesQoS(), update_group_);
+            map_prefix + "get_augmented_cost_map", rmw_qos_profile_services_default, update_group_);
 
         static_service_ = create_service<GetPlan>(
             plan_prefix + "plan_path_with_static",

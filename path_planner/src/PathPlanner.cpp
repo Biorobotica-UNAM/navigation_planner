@@ -116,20 +116,39 @@ void finishPath(Path& path)
     }
 }
 
-bool validatePathSegments(const Path& path, const Grid& map, bool allow_unknown)
+bool validatePathSegments(const Path& path, const Grid& map, bool allow_unknown,
+                          const Grid* costs = nullptr, const Path* original = nullptr)
 {
     if (path.poses.empty() || path.header.frame_id != map.header.frame_id)
         return false;
     const GridGeometry geometry(map);
     for (size_t i = 0; i < path.poses.size(); ++i)
     {
+        // Preserve the local cost envelope, including every crossed segment cell.
+        int cost_limit = 0;
+        if (costs && original)
+        {
+            for (size_t j = i == 0 ? 0 : i - 1; j <= i; ++j)
+            {
+                int cx, cy;
+                const auto& p = original->poses[j].pose.position;
+                if (!geometry.worldToCell(p.x, p.y, cx, cy))
+                    return false;
+                cost_limit = std::max(cost_limit, static_cast<int>(costs->data[
+                    static_cast<size_t>(cy) * geometry.width + cx]));
+            }
+        }
+        const auto acceptable = [&](size_t index) {
+            const int value = map.data[index];
+            return (value == 0 || (value == -1 && allow_unknown)) &&
+                (!costs || costs->data[index] <= cost_limit);
+        };
         const auto& point = path.poses[i].pose.position;
         int end_x, end_y;
         if (!geometry.worldToCell(point.x, point.y, end_x, end_y))
             return false;
         const size_t end_index = static_cast<size_t>(end_y) * geometry.width + end_x;
-        const int8_t end_value = map.data[end_index];
-        if (end_value != 0 && !(end_value == -1 && allow_unknown))
+        if (!acceptable(end_index))
             return false;
         if (i == 0)
             continue;
@@ -145,6 +164,8 @@ bool validatePathSegments(const Path& path, const Grid& map, bool allow_unknown)
                                   geometry.c * (point.y - geometry.oy)) / geometry.resolution;
         int x, y;
         if (!geometry.worldToCell(previous.x, previous.y, x, y))
+            return false;
+        if (!acceptable(static_cast<size_t>(y) * geometry.width + x))
             return false;
         const double dx = target_x - start_x;
         const double dy = target_y - start_y;
@@ -169,10 +190,8 @@ bool validatePathSegments(const Path& path, const Grid& map, bool allow_unknown)
                 const int sy = y + step_y;
                 if (sx < 0 || sx >= geometry.width || sy < 0 || sy >= geometry.height)
                     return false;
-                const int8_t side_x = map.data[static_cast<size_t>(y) * geometry.width + sx];
-                const int8_t side_y = map.data[static_cast<size_t>(sy) * geometry.width + x];
-                if ((side_x != 0 && !(side_x == -1 && allow_unknown)) ||
-                    (side_y != 0 && !(side_y == -1 && allow_unknown)))
+                if (!acceptable(static_cast<size_t>(y) * geometry.width + sx) ||
+                    !acceptable(static_cast<size_t>(sy) * geometry.width + x))
                     return false;
                 x = sx;
                 y = sy;
@@ -191,8 +210,7 @@ bool validatePathSegments(const Path& path, const Grid& map, bool allow_unknown)
             }
             if (x < 0 || y < 0 || x >= geometry.width || y >= geometry.height)
                 return false;
-            const int8_t value = map.data[static_cast<size_t>(y) * geometry.width + x];
-            if (value != 0 && !(value == -1 && allow_unknown))
+            if (!acceptable(static_cast<size_t>(y) * geometry.width + x))
                 return false;
         }
     }
@@ -225,6 +243,8 @@ PlanResult planSegments(
         Path smoothed = PathPlanner::SmoothPath(
             segment, static_cast<float>(options.smooth_alpha),
             static_cast<float>(options.smooth_beta),
+            // Soft costs guide A*; smoothing may cross their contours.
+            // The inflated collision map still validates every crossed cell.
             static_cast<float>(options.smooth_tolerance), &map, options.allow_unknown);
         auto first = smoothed.poses.begin();
         // Every segment starts at the endpoint already appended by the previous one.
@@ -440,13 +460,21 @@ bool PathPlanner::AStar(
 
 Path PathPlanner::SmoothPath(
     const Path& path, float weight_data, float weight_smooth, float tolerance,
-    const Grid* collision_map, bool allow_unknown)
+    const Grid* collision_map, bool allow_unknown, const Grid* cost_map)
 {
     Path result = path;
     if (!std::isfinite(weight_data) || !std::isfinite(weight_smooth) ||
         !std::isfinite(tolerance) || weight_data < 0.0f || weight_data > 1.0f ||
         weight_smooth < 0.0f || weight_smooth > 1.0f || tolerance <= 0.0f)
         throw std::invalid_argument("Invalid smoothing weights or tolerance");
+    if (cost_map && (!collision_map ||
+        (cost_map->header.frame_id != collision_map->header.frame_id ||
+         cost_map->info.width != collision_map->info.width ||
+         cost_map->info.height != collision_map->info.height ||
+         cost_map->info.resolution != collision_map->info.resolution ||
+         cost_map->info.origin != collision_map->info.origin ||
+         cost_map->data.size() != collision_map->data.size())))
+        throw std::invalid_argument("Cost map requires matching collision geometry");
     const double threshold = static_cast<double>(tolerance) * path.poses.size();
     if (path.poses.size() >= 3)
     {
@@ -475,7 +503,7 @@ Path PathPlanner::SmoothPath(
                 break;
         }
     }
-    if (collision_map && !validatePathSegments(result, *collision_map, allow_unknown))
+    if (collision_map && !validatePathSegments(result, *collision_map, allow_unknown, cost_map, &path))
         result = path;
     finishPath(result);
     return result;

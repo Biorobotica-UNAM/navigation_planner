@@ -13,7 +13,7 @@ class EnablePublisher(Node):
         self.declare_parameter("use_namespace", False)
         use_namespace = self.get_parameter("use_namespace").get_parameter_value().bool_value
 
-        suffix = "/navigation/potential_fields/enable"
+        suffix = "/potential_fields/enable"
 
         if use_namespace:
             prefix = self.get_namespace()

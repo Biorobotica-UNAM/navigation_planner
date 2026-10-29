@@ -127,15 +127,15 @@ public:
         //############
         // Publishers
         pub_collision_risk_ = this->create_publisher<std_msgs::msg::Bool>(
-            make_name("/navigation/potential_fields/collision_risk"), 
+            make_name("/potential_fields/collision_risk"), 
             rclcpp::QoS(10).transient_local());
 
         pub_pot_fields_markers_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
-            make_name("/navigation/potential_fields/pot_field_markers"), 
+            make_name("/potential_fields/pot_field_markers"), 
             rclcpp::QoS(10).transient_local());
 
         pub_pot_fields_rejection_ = this->create_publisher<geometry_msgs::msg::Vector3>(
-            make_name("/navigation/potential_fields/pf_rejection_force"), 
+            make_name("/potential_fields/pf_rejection_force"), 
             rclcpp::QoS(10).transient_local());
 
 
@@ -146,12 +146,12 @@ public:
             std::bind(&PotentialFieldsNode::callback_cmd_vel, this, std::placeholders::_1));
 
         sub_enable_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/navigation/potential_fields/enable"), 
+            make_name("/potential_fields/enable"), 
             rclcpp::SensorDataQoS(),
             std::bind(&PotentialFieldsNode::callback_enable, this, std::placeholders::_1));
 
         sub_enable_cloud_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/navigation/potential_fields/enable_cloud"), 
+            make_name("/potential_fields/enable_cloud"), 
             rclcpp::SensorDataQoS(),
             std::bind(&PotentialFieldsNode::callback_enable_cloud, this, std::placeholders::_1));
 

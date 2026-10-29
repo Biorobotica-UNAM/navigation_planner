@@ -23,7 +23,6 @@
   <!-- ===== Sensor toggles ===== -->
   <arg name="use_lidar"                               default="True"/>
   <arg name="use_point_cloud"                         default="True"/>
-  <arg name="use_point_cloud2"                        default="false"/>
   <arg name="use_pot_fields"                          default="True"/>
 
   <!-- ===== Tuning / thresholds ===== -->
@@ -32,9 +31,7 @@
   <arg name="cloud_filter_debug"                      default="false"/>
   <arg name="cloud_filter_min_points_per_voxel"       default="2"/>
   <arg name="cloud_filter_min_neighbor_voxels"        default="2"/>
-  <arg name="lidar_downsampling"                      default="1"/>
   <arg name="static_obstacle_ignore_radius"           default="0.001"/>
-  <arg name="obstacle_cloud_min_points_per_cell"      default="2"/>
   <arg name="obstacle_cloud_min_neighbor_cells"       default="2"/>
   <arg name="cloud_points_threshold"                  default="15"/>
   <arg name="lidar_points_threshold"                  default="20"/>
@@ -56,27 +53,76 @@
   <arg name="cloud_min_z"                             default="0.15"/>
   <arg name="cloud_max_z"                             default="1.20"/>
 
-  <!-- ===== Map Enhancer ===== -->
-  <arg name="map_enhancer_obstacle_radius"            default="0.08"/>
-  <arg name="map_enhancer_debug"                      default="True"/>
-
   <!-- ===== Map Augmenter ===== -->
-  <!-- use_online=False: static map cached at startup; obstacle_detector manages detections -->
-  <!-- decay=0 because obstacle_detector handles its own decay independently -->
-  <arg name="augmenter_decay_factor"                  default="0"/>
-  <arg name="augmenter_inflation_radius"              default="0.15"/>
-  <arg name="augmenter_cost_radius"                   default="0.25"/>
-  <arg name="augmenter_use_online"                    default="False"/>
-  <arg name="robot_radius"                            default="0.35"/>
-  <arg name="static_obstacle_inflation_radius"        default="0.05"/>
-  <arg name="dynamic_obstacle_inflation_radius"       default="0.12"/>
-  <arg name="map_augmenter_debug"                     default="false"/>
+  <arg name="augmenter_cost_radius"                   default="0.90"/>
+  <arg name="dynamic_obstacle_inflation_radius"       default="0.25"/>
 
-  <!-- ===== Obstacle Detector ===== -->
-  <arg name="detector_decay_factor"                   default="10"/>
+  <arg name="augmenter_use_online"                     default="false"/>
+  <arg name="use_prohibition_map"                      default="true"/>
+  <arg name="require_prohibition_map"                  default="true"/>
+  <arg name="circular_inflation"                       default="true"/>
+  <!-- Hard clearance assumes a 0.35 m footprint radius plus 0.05 m margin. -->
+  <arg name="static_obstacle_inflation_radius"         default="0.1"/>
+  <arg name="augmenter_cost_peak"                      default="6"/>
+  <arg name="map_augmenter_debug"                      default="false"/>
+  <arg name="augmenter_map_topic_timeout_sec"          default="3.0"/>
+  <arg name="augmenter_map_request_timeout_sec"        default="3.0"/>
+  <arg name="augmenter_map_refresh_period_sec"         default="1.0"/>
+  <arg name="augmenter_publish_period_sec"             default="1.1"/>
+  <arg name="augmenter_tf_timeout_sec"                 default="0.03"/>
+  <arg name="augmenter_robot_tf_max_age_sec"           default="0.5"/>
+  <arg name="augmenter_base_map_topic"                 default="map"/>
+  <!--arg name="prohibition_map_topic"                    default=""/-->
+
+  <!-- ===== Obstacle Detector tuning (distances in metres, times in seconds) ===== -->
+  <!-- Cloud gating is off by default; when enabled, connect both enable topics. -->
+  <arg name="use_point_cloud2"                         default="false"/>
+  <arg name="cloud_downsampling2"                      default="1"/>
+  <arg name="lidar_downsampling"                       default="1"/>
+  <arg name="obstacle_cloud_min_points_per_cell"       default="2"/>
+  <arg name="cloud_follow_head"                        default="true"/>
+  <arg name="cloud_forward_axis"                       default="z"/>
+  <arg name="cloud_yaw_min_horizontal_projection"      default="0.1"/>
+  <arg name="cloud_gating_enabled"                     default="false"/>
+  <arg name="cloud_navigation_initially_active"        default="false"/>
+  <arg name="cloud_override_initially_enabled"         default="true"/>
+  <arg name="cloud_navigation_enable_topic"            default="map_augmenter/enable"/>
+  <arg name="cloud_enable_topic"                       default="map_augmenter/enable_cloud"/>
+  <arg name="remember_all_obstacles"                   default="false"/>
+  <arg name="odom_frame"                               default="odom"/>
+  <arg name="detector_processing_period_sec"           default="0.075"/>
+  <arg name="obstacle_timeout_sec"                     default="0.75"/>
+  <arg name="sensor_max_age_sec"                       default="0.5"/>
+  <arg name="sensor_future_tolerance_sec"              default="0.05"/>
+  <arg name="allow_zero_sensor_stamp"                  default="false"/>
+  <arg name="detector_tf_timeout_sec"                  default="0.03"/>
+  <arg name="tf_allow_latest_fallback"                 default="true"/>
+  <arg name="tf_fallback_max_age_sec"                  default="0.20"/>
+  <arg name="ignore_static_obstacles"                  default="true"/>
+  <arg name="self_obstacle_ignore_radius"              default="0.0"/>
+  <arg name="detector_laser_min_range"                 default="0.10"/>
+  <arg name="clear_on_pose_jump"                       default="true"/>
+  <arg name="pose_jump_translation_m"                  default="0.5"/>
+  <arg name="pose_jump_rotation_rad"                   default="0.35"/>
+  <arg name="debug_detection"                          default="false"/>
+  <arg name="debug_detection_period_sec"               default="2.0"/>
 
   <!-- ===== Path Planner ===== -->
   <arg name="diagonal_paths"                          default="True"/>
+
+  <arg name="allow_unknown"                            default="false"/>
+  <arg name="unknown_cost"                             default="1.0"/>
+  <arg name="smooth_alpha"                             default="0.1"/>
+  <arg name="smooth_beta"                              default="0.9"/>
+  <arg name="smooth_tolerance"                         default="0.00001"/>
+  <!-- Keep occupied cells intact; recovery must not erase footprint clearance. -->
+  <arg name="escape_clear_radius"                      default="0.6"/>
+  <arg name="goal_relocation_radius"                   default="1.0"/>
+  <arg name="disable_rear_path_plan"                   default="false"/>
+  <arg name="online_behind_clearance"                  default="1.0"/>
+  <arg name="planner_map_refresh_period_sec"           default="1.0"/>
+  <arg name="planner_map_request_timeout_sec"          default="5.0"/>
+  <arg name="planner_map_pair_retry_limit"             default="1"/>
 
   <!-- ===== Simple Move ===== -->
   <arg name="max_linear_speed"                        default="0.9"/>
@@ -150,18 +196,28 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
-    <param name="use_namespace"                       value="$(var use_namespace)"/>
-    <param name="static_map_server"                   value="static_map_server/map"/>
-    <param name="prohibition_map_server"              value="prohibition_map_server/map"/>
-    <param name="base_link_name"                      value="$(var base_link_name)"/>
-    <param name="decay_factor"                        value="$(var augmenter_decay_factor)"/>
-    <param name="inflation_radius"                    value="$(var augmenter_inflation_radius)"/>
-    <param name="cost_radius"                         value="$(var augmenter_cost_radius)"/>
-    <param name="robot_radius"                        value="$(var robot_radius)"/>
-    <param name="static_obstacle_inflation_radius"    value="$(var static_obstacle_inflation_radius)"/>
-    <param name="dynamic_obstacle_inflation_radius"   value="$(var dynamic_obstacle_inflation_radius)"/>
-    <param name="debug_maps"                          value="$(var map_augmenter_debug)"/>
-    <param name="use_online"                          value="$(var augmenter_use_online)"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="use_online"                               value="$(var augmenter_use_online)"/>
+    <param name="use_prohibition_map"                      value="$(var use_prohibition_map)"/>
+    <param name="require_prohibition_map"                  value="$(var require_prohibition_map)"/>
+    <param name="circular_inflation"                       value="$(var circular_inflation)"/>
+    <param name="static_obstacle_inflation_radius"         value="$(var static_obstacle_inflation_radius)"/>
+    <param name="cost_peak"                                value="$(var augmenter_cost_peak)"/>
+    <param name="debug_maps"                               value="$(var map_augmenter_debug)"/>
+    <param name="map_topic_timeout_sec"                    value="$(var augmenter_map_topic_timeout_sec)"/>
+    <param name="map_request_timeout_sec"                  value="$(var augmenter_map_request_timeout_sec)"/>
+    <param name="map_refresh_period_sec"                   value="$(var augmenter_map_refresh_period_sec)"/>
+    <param name="publish_period_sec"                       value="$(var augmenter_publish_period_sec)"/>
+    <param name="tf_timeout_sec"                           value="$(var augmenter_tf_timeout_sec)"/>
+    <param name="robot_tf_max_age_sec"                     value="$(var augmenter_robot_tf_max_age_sec)"/>
+    <param name="base_map_topic"                           value="$(var augmenter_base_map_topic)"/>
+    <!--param name="prohibition_map_topic"                    value="$(var prohibition_map_topic)" type="str"/-->
+    <param name="use_namespace"                             value="$(var use_namespace)"/>
+    <param name="static_map_server"                         value="static_map_server/map"/>
+    <param name="prohibition_map_server"                    value="prohibition_map_server/map"/>
+    <param name="base_link_name"                            value="$(var base_link_name)"/>
+    <param name="cost_radius"                               value="$(var augmenter_cost_radius)"/>
+    <param name="dynamic_obstacle_inflation_radius"         value="$(var dynamic_obstacle_inflation_radius)"/>
 
     <remap from="point_obstacle"         to="clicked_point"/>
   </node>
@@ -172,20 +228,46 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="use_point_cloud2"                         value="$(var use_point_cloud2)"/>
+    <param name="point_cloud_topic2"                       value="$(var point_cloud_topic2)"/>
+    <param name="cloud_downsampling"                       value="$(var cloud_downsampling)"/>
+    <param name="cloud_downsampling2"                      value="$(var cloud_downsampling2)"/>
+    <param name="lidar_downsampling"                       value="$(var lidar_downsampling)"/>
+    <param name="cloud_min_points_per_cell"                value="$(var obstacle_cloud_min_points_per_cell)"/>
+    <param name="cloud_follow_head"                        value="$(var cloud_follow_head)"/>
+    <param name="cloud_forward_axis"                       value="$(var cloud_forward_axis)" type="str"/>
+    <param name="cloud_yaw_min_horizontal_projection"      value="$(var cloud_yaw_min_horizontal_projection)"/>
+    <param name="cloud_gating_enabled"                     value="$(var cloud_gating_enabled)"/>
+    <param name="cloud_navigation_initially_active"        value="$(var cloud_navigation_initially_active)"/>
+    <param name="cloud_override_initially_enabled"         value="$(var cloud_override_initially_enabled)"/>
+    <param name="cloud_navigation_enable_topic"            value="$(var cloud_navigation_enable_topic)"/>
+    <param name="cloud_enable_topic"                       value="$(var cloud_enable_topic)"/>
+    <param name="remember_all_obstacles"                   value="$(var remember_all_obstacles)"/>
+    <param name="odom_frame"                               value="$(var odom_frame)"/>
+    <param name="processing_period_sec"                    value="$(var detector_processing_period_sec)"/>
+    <param name="obstacle_timeout_sec"                     value="$(var obstacle_timeout_sec)"/>
+    <param name="sensor_max_age_sec"                       value="$(var sensor_max_age_sec)"/>
+    <param name="sensor_future_tolerance_sec"              value="$(var sensor_future_tolerance_sec)"/>
+    <param name="allow_zero_sensor_stamp"                  value="$(var allow_zero_sensor_stamp)"/>
+    <param name="tf_timeout_sec"                           value="$(var detector_tf_timeout_sec)"/>
+    <param name="tf_allow_latest_fallback"                 value="$(var tf_allow_latest_fallback)"/>
+    <param name="tf_fallback_max_age_sec"                  value="$(var tf_fallback_max_age_sec)"/>
+    <param name="ignore_static_obstacles"                  value="$(var ignore_static_obstacles)"/>
+    <param name="self_obstacle_ignore_radius"              value="$(var self_obstacle_ignore_radius)"/>
+    <param name="laser_min_range"                          value="$(var detector_laser_min_range)"/>
+    <param name="clear_on_pose_jump"                       value="$(var clear_on_pose_jump)"/>
+    <param name="pose_jump_translation_m"                  value="$(var pose_jump_translation_m)"/>
+    <param name="pose_jump_rotation_rad"                   value="$(var pose_jump_rotation_rad)"/>
+    <param name="debug_detection"                          value="$(var debug_detection)"/>
+    <param name="debug_detection_period_sec"               value="$(var debug_detection_period_sec)"/>
     <param name="use_namespace"                       value="$(var use_namespace)"/>
     <param name="laser_scan_topic"                    value="$(var laser_scan_topic)"/>
     <param name="point_cloud_topic"                   value="$(var point_cloud_topic)"/>
-    <param name="static_map_server"                   value="static_map_server/map"/>
     <param name="base_link_name"                      value="$(var base_link_name)"/>
     <param name="use_lidar"                           value="$(var use_lidar)"/>
     <param name="use_point_cloud"                     value="$(var use_point_cloud)"/>
-    <param name="use_point_cloud2"                    value="$(var use_point_cloud2)"/>
-    <param name="cloud_downsampling"                  value="$(var cloud_downsampling)"/>
-    <param name="lidar_downsampling"                  value="$(var lidar_downsampling)"/>
-    <param name="decay_factor"                        value="$(var detector_decay_factor)"/>
-    <param name="tf_fallback_warn_threshold_sec"      value="0.20"/>
     <param name="static_obstacle_ignore_radius"       value="$(var static_obstacle_ignore_radius)"/>
-    <param name="cloud_min_points_per_cell"           value="$(var obstacle_cloud_min_points_per_cell)"/>
     <param name="cloud_min_neighbor_cells"            value="$(var obstacle_cloud_min_neighbor_cells)"/>
     <param name="laser_min_x"                         value="$(var laser_min_x)"/>
     <param name="laser_max_x"                         value="$(var laser_max_x)"/>
@@ -211,6 +293,19 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="allow_unknown"                            value="$(var allow_unknown)"/>
+    <param name="unknown_cost"                             value="$(var unknown_cost)"/>
+    <param name="smooth_alpha"                             value="$(var smooth_alpha)"/>
+    <param name="smooth_beta"                              value="$(var smooth_beta)"/>
+    <param name="smooth_tolerance"                         value="$(var smooth_tolerance)"/>
+    <param name="escape_clear_radius"                      value="$(var escape_clear_radius)"/>
+    <param name="goal_relocation_radius"                   value="$(var goal_relocation_radius)"/>
+    <param name="disable_rear_path_plan"                   value="$(var disable_rear_path_plan)"/>
+    <param name="online_behind_clearance"                  value="$(var online_behind_clearance)"/>
+    <param name="map_refresh_period_sec"                   value="$(var planner_map_refresh_period_sec)"/>
+    <param name="map_request_timeout_sec"                  value="$(var planner_map_request_timeout_sec)"/>
+    <param name="map_pair_retry_limit"                     value="$(var planner_map_pair_retry_limit)"/>
     <param name="use_namespace"     value="$(var use_namespace)"/>
     <param name="diagonal_paths"    value="$(var diagonal_paths)"/>
   </node>
