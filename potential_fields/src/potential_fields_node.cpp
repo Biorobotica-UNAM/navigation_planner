@@ -1,811 +1,571 @@
-#include "rclcpp/rclcpp.hpp"
-#include "rcl_interfaces/msg/set_parameters_result.hpp"
+// ----- ROS 2 -----
+#include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
 
-// Message types
-#include "std_msgs/msg/bool.hpp"
-#include "sensor_msgs/msg/range.hpp"
-#include "sensor_msgs/msg/laser_scan.hpp"
-#include "sensor_msgs/msg/point_cloud2.hpp"
-#include "geometry_msgs/msg/point.hpp"
-#include "geometry_msgs/msg/vector3.hpp"
-#include "visualization_msgs/msg/marker.hpp"
-#include "visualization_msgs/msg/marker_array.hpp"
-#include "nav_msgs/msg/path.hpp"
+// ----- ROS 2 messages -----
+#include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/vector3.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/float32.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <tf2_eigen/tf2_eigen.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <opencv2/highgui.hpp>
 
-// TF2 (Transform listener)
-#include "tf2_ros/transform_listener.h"
-#include "tf2_ros/buffer.h"
-#include "tf2/exceptions.h"
-#include "tf2_eigen/tf2_eigen.hpp"
-
-// Action messages (used less directly in ROS 2; here for compatibility)
-#include "action_msgs/msg/goal_status.hpp"
-
-#include "opencv2/core.hpp"
-#include "opencv2/highgui.hpp"
-
-// Standard
+// ----- C++ standard library -----
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
+#include <cstring>
+#include <string>
 #include <sstream>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <limits>
+#include <stdexcept>
+#include <utility>
 #include <vector>
-#include <exception>
 
 class PotentialFieldsNode : public rclcpp::Node
 {
+  using Clock = std::chrono::steady_clock;
+  struct SensorState
+  {
+    double min_x, max_x, min_y, max_y, min_z, max_z, collision_min_y, collision_max_y, radius, gain;
+    int stride, threshold;
+    bool risk = false;
+    int critical_points = 0;
+    double speed_limit = std::numeric_limits<double>::infinity();
+    double clearance = std::numeric_limits<double>::infinity();
+    geometry_msgs::msg::Vector3 force;
+    Clock::time_point received, last_message, measurement_time;
+    std::string rejection = "no_messages";
+    cv::Mat image;
+  };
+
 public:
-    PotentialFieldsNode() : Node("potential_fields_node"), tf_buffer_(this->get_clock()), tf_listener_(tf_buffer_)
+  PotentialFieldsNode()
+  : Node("potential_fields_node"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
+  {
+    rcl_interfaces::msg::ParameterDescriptor startup;
+    startup.read_only = true;startup.description = "Configured at startup.";
+    const bool namespaced = declare_parameter<bool>("use_namespace", false, startup);
+    base_frame_ = declare_parameter<std::string>("base_link_name", "base_link", startup);
+    declare_parameter<bool>("debug", false);
+    declare_parameter<bool>("show_image", false);
+    declare_parameter<bool>("use_pot_fields", false);
+    use_lidar_ = declare_parameter<bool>("use_lidar", true, startup);
+    use_cloud_ = declare_parameter<bool>("use_point_cloud", false, startup);
+    laser_topic_ = declare_parameter<std::string>("laser_scan_topic", "/scan", startup);
+    cloud_topic_ = declare_parameter<std::string>("point_cloud_topic", "/points", startup);
+    timeout_ = declare_parameter<double>("no_sensor_data_timeout", 0.5, startup);
+    future_tolerance_ = declare_parameter<double>("sensor_future_tolerance_sec", 0.05, startup);
+    tf_timeout_ = declare_parameter<double>("tf_timeout_sec", 0.03, startup);
+    allow_tf_fallback_ = declare_parameter<bool>("tf_allow_latest_fallback", true, startup);
+    tf_max_age_ = declare_parameter<double>("tf_fallback_max_age_sec", 0.2, startup);
+    footprint_ = declare_parameter<double>("collision_footprint_radius", 0.30, startup);
+    margin_ = declare_parameter<double>("collision_stop_margin", 0.08, startup);
+    reaction_time_ = declare_parameter<double>("collision_reaction_time_sec", 0.10, startup);
+    critical_margin_ = declare_parameter<double>("collision_critical_margin", 0.02, startup);
+    deceleration_ = declare_parameter<double>("collision_deceleration", 0.3, startup);
+    max_force_ = declare_parameter<double>("repulsion_max_speed", 0.15, startup);
+    filter_time_ = declare_parameter<double>("repulsion_filter_time_sec", 0.15, startup);
+    if (!std::isfinite(reaction_time_) || reaction_time_ <= 0.0 ||
+      !std::isfinite(critical_margin_) || critical_margin_ < 0.0 || critical_margin_ > margin_ ||
+      !std::isfinite(future_tolerance_) || future_tolerance_ < 0.0 ||
+      !std::isfinite(tf_timeout_) || tf_timeout_ < 0.0 ||
+      !std::isfinite(tf_max_age_) || tf_max_age_ < 0.0 ||
+      !std::isfinite(timeout_) || timeout_ <= 0 || !std::isfinite(footprint_) ||
+      footprint_ <= 0 ||
+      !std::isfinite(margin_) || margin_ < 0 || !std::isfinite(deceleration_) ||
+      deceleration_ <= 0 ||
+      !std::isfinite(max_force_) || max_force_ <= 0 || !std::isfinite(filter_time_) ||
+      filter_time_ <= 0)
     {
-        //############
-        // Declare parameters
-        this->declare_parameter<bool>("use_namespace",   false);
-        this->declare_parameter<bool>("debug",           false);
-        this->declare_parameter<bool>("show_image",      false);
-        this->declare_parameter<bool>("use_pot_fields",  false);
-
-        this->declare_parameter<bool>("use_lidar",       true);
-        this->declare_parameter<bool>("use_point_cloud", false);
-
-        this->declare_parameter<float>("laser_min_x", 0.30);
-        this->declare_parameter<float>("laser_max_x", 0.80);
-        this->declare_parameter<float>("laser_min_y", -0.30);
-        this->declare_parameter<float>("laser_max_y", 0.30);
-        this->declare_parameter<float>("laser_collision_min_y", -0.22);
-        this->declare_parameter<float>("laser_collision_max_y", 0.22);
-        this->declare_parameter<float>("laser_min_z", 0.05);
-        this->declare_parameter<float>("laser_max_z", 1.50);
-
-        this->declare_parameter<float>("cloud_min_x", 0.30);
-        this->declare_parameter<float>("cloud_max_x", 0.80);
-        this->declare_parameter<float>("cloud_min_y", -0.30);
-        this->declare_parameter<float>("cloud_max_y", 0.30);
-        this->declare_parameter<float>("cloud_collision_min_y", -0.22);
-        this->declare_parameter<float>("cloud_collision_max_y", 0.22);
-        this->declare_parameter<float>("cloud_min_z", 0.05);
-        this->declare_parameter<float>("cloud_max_z", 1.50);
-
-        this->declare_parameter<float>("laser_pot_fields_d0",   1.0);
-        this->declare_parameter<float>("cloud_pot_fields_d0",   1.0);
-        this->declare_parameter<float>("laser_pot_fields_k_rej",1.0);
-        this->declare_parameter<float>("cloud_pot_fields_k_rej",1.0);
-        this->declare_parameter<float>("no_sensor_data_timeout", 0.5);
-
-        this->declare_parameter<int>("cloud_points_threshold", 100);
-        this->declare_parameter<int>("cloud_downsampling",     9);
-        this->declare_parameter<int>("lidar_points_threshold", 10);
-        this->declare_parameter<int>("lidar_downsampling",     1);
-
-        this->declare_parameter<std::string>("point_cloud_topic", "/points");
-        this->declare_parameter<std::string>("laser_scan_topic",  "/scan");
-        this->declare_parameter<std::string>("base_link_name",    "base_link");
-
-        // Load parameter values into variables
-        this->get_parameter("use_namespace",   use_namespace_);
-        this->get_parameter("debug",           debug_);
-        this->get_parameter("show_image",      show_img_);
-        this->get_parameter("use_pot_fields",  use_pot_fields_);
-
-        this->get_parameter("use_lidar",       use_lidar_);
-        this->get_parameter("use_point_cloud", use_cloud_);
-
-        this->get_parameter("laser_min_x", laser_min_x_);
-        this->get_parameter("laser_max_x", laser_max_x_);
-        this->get_parameter("laser_min_y", laser_min_y_);
-        this->get_parameter("laser_max_y", laser_max_y_);
-        this->get_parameter("laser_collision_min_y", laser_collision_min_y_);
-        this->get_parameter("laser_collision_max_y", laser_collision_max_y_);
-        this->get_parameter("laser_min_z", laser_min_z_);
-        this->get_parameter("laser_max_z", laser_max_z_);
-
-        this->get_parameter("cloud_min_x", cloud_min_x_);
-        this->get_parameter("cloud_max_x", cloud_max_x_);
-        this->get_parameter("cloud_min_y", cloud_min_y_);
-        this->get_parameter("cloud_max_y", cloud_max_y_);
-        this->get_parameter("cloud_collision_min_y", cloud_collision_min_y_);
-        this->get_parameter("cloud_collision_max_y", cloud_collision_max_y_);
-        this->get_parameter("cloud_min_z", cloud_min_z_);
-        this->get_parameter("cloud_max_z", cloud_max_z_);
-
-        this->get_parameter("laser_pot_fields_d0",    laser_pot_fields_d0_);
-        this->get_parameter("cloud_pot_fields_d0",    cloud_pot_fields_d0_);
-        this->get_parameter("laser_pot_fields_k_rej", laser_pot_fields_k_rej_);
-        this->get_parameter("cloud_pot_fields_k_rej", cloud_pot_fields_k_rej_);
-        this->get_parameter("no_sensor_data_timeout", no_sensor_data_timeout_);
-
-        this->get_parameter("cloud_points_threshold", cloud_threshold_);
-        this->get_parameter("cloud_downsampling",     cloud_downsampling_);
-        this->get_parameter("lidar_points_threshold", lidar_threshold_);
-        this->get_parameter("lidar_downsampling",     lidar_downsampling_);
-
-        this->get_parameter("point_cloud_topic", point_cloud_topic_);
-        this->get_parameter("laser_scan_topic",  laser_scan_topic_);
-        this->get_parameter("base_link_name",    base_link_name_);
-
-        // Setup parameter change callback
-        param_callback_handle_ = this->add_on_set_parameters_callback(
-            std::bind(&PotentialFieldsNode::on_parameter_change, this, std::placeholders::_1));
-
-        //############
-        // Publishers
-        pub_collision_risk_ = this->create_publisher<std_msgs::msg::Bool>(
-            make_name("/potential_fields/collision_risk"), 
-            rclcpp::QoS(10).transient_local());
-
-        pub_pot_fields_markers_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
-            make_name("/potential_fields/pot_field_markers"), 
-            rclcpp::QoS(10).transient_local());
-
-        pub_pot_fields_rejection_ = this->create_publisher<geometry_msgs::msg::Vector3>(
-            make_name("/potential_fields/pf_rejection_force"), 
-            rclcpp::QoS(10).transient_local());
-
-
-        //############
-        // Subscribers
-        sub_cmd_vel_ = this->create_subscription<geometry_msgs::msg::Twist>(
-            "/cmd_vel", rclcpp::SensorDataQoS(),
-            std::bind(&PotentialFieldsNode::callback_cmd_vel, this, std::placeholders::_1));
-
-        sub_enable_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/potential_fields/enable"), 
-            rclcpp::SensorDataQoS(),
-            std::bind(&PotentialFieldsNode::callback_enable, this, std::placeholders::_1));
-
-        sub_enable_cloud_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/potential_fields/enable_cloud"), 
-            rclcpp::SensorDataQoS(),
-            std::bind(&PotentialFieldsNode::callback_enable_cloud, this, std::placeholders::_1));
-
-        sub_goal_path_ = this->create_subscription<nav_msgs::msg::Path>(
-            make_name("/simple_move/goal_path"), rclcpp::SensorDataQoS(),
-            std::bind(&PotentialFieldsNode::callback_goal_path, this, std::placeholders::_1));
-        
-        //############
-        // Wait for transforms
-        wait_for_transforms("map", base_link_name_);
-
-        // Simple Move main processing
-        processing_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(30),
-            std::bind(&PotentialFieldsNode::potential_fields_processing, this));
-
-        RCLCPP_INFO(this->get_logger(), "PotentialFields.-> PotentialFieldsNode is ready.");
+      throw std::invalid_argument("Invalid potential field limits");
     }
+    for (size_t i = 0; i < 2; ++i) {
+      const std::string prefix = i == 0 ? "laser" : "cloud";
+      auto & sensor = sensors_[i];
+      sensor.min_x = declare_parameter<double>(prefix + "_min_x", 0.30, startup);
+      sensor.max_x = declare_parameter<double>(prefix + "_max_x", 0.80, startup);
+      sensor.min_y = declare_parameter<double>(prefix + "_min_y", -0.30, startup);
+      sensor.max_y = declare_parameter<double>(prefix + "_max_y", 0.30, startup);
+      sensor.min_z = declare_parameter<double>(prefix + "_min_z", 0.05, startup);
+      sensor.max_z = declare_parameter<double>(prefix + "_max_z", 1.50, startup);
+      sensor.collision_min_y =
+        declare_parameter<double>(prefix + "_collision_min_y", -0.25, startup);
+      sensor.collision_max_y =
+        declare_parameter<double>(prefix + "_collision_max_y", 0.25, startup);
+      sensor.radius = declare_parameter<double>(prefix + "_pot_fields_d0", 1.0, startup);
+      sensor.gain = declare_parameter<double>(prefix + "_pot_fields_k_rej", 1.0, startup);
+      sensor.stride = declare_parameter<int>(
+        i == 0 ? "lidar_downsampling" : "cloud_downsampling",
+        1, startup);
+      sensor.threshold = declare_parameter<int>(
+        i == 0 ? "lidar_points_threshold" : "cloud_points_threshold", i == 0 ? 10 : 100, startup);
+      const std::array<double, 10> values{sensor.min_x, sensor.max_x, sensor.min_y, sensor.max_y,
+        sensor.min_z, sensor.max_z, sensor.collision_min_y, sensor.collision_max_y, sensor.radius,
+        sensor.gain};
+      if (!std::all_of(values.begin(), values.end(), [](double v) {return std::isfinite(v);}) ||
+        sensor.min_x >= sensor.max_x || sensor.min_y >= sensor.max_y ||
+        sensor.min_z >= sensor.max_z ||
+        sensor.collision_min_y >= sensor.collision_max_y || sensor.radius <= 0 || sensor.gain < 0 ||
+        sensor.stride < 1 || sensor.threshold < 0)
+      {
+        throw std::invalid_argument("Invalid " + prefix + " limits");
+      }
+    }
+    std::string prefix = namespaced ? get_namespace() : "";
+    if (prefix == "/") {prefix.clear();}
+    risk_pub_ = create_publisher<std_msgs::msg::Bool>(
+      prefix + "/potential_fields/collision_risk",
+      10);
+    speed_limit_pub_ = create_publisher<std_msgs::msg::Float32>(
+      prefix + "/potential_fields/speed_limit", 10);
+    ready_pub_ = create_publisher<std_msgs::msg::Bool>(prefix + "/potential_fields/ready", 10);
+    force_pub_ = create_publisher<geometry_msgs::msg::Vector3>(
+      prefix + "/potential_fields/pf_rejection_force", 10);
+    markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+      prefix + "/potential_fields/pot_field_markers", 10);
+    intent_sub_ = create_subscription<geometry_msgs::msg::Vector3>(
+      prefix + "/simple_move/motion_direction", 10,
+      [this](geometry_msgs::msg::Vector3::ConstSharedPtr intent) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const double norm = std::hypot(intent->x, intent->y);
+        if (std::isfinite(norm) && norm > 1e-6) {direction_ = std::atan2(intent->y, intent->x);}
+      });
+    cmd_sub_ = create_subscription<geometry_msgs::msg::Twist>(
+      "/cmd_vel", rclcpp::SensorDataQoS(),
+      [this](geometry_msgs::msg::Twist::ConstSharedPtr command) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        speed_ = std::hypot(command->linear.x, command->linear.y); angular_ = command->angular.z;
+      });
+    enable_sub_ = create_subscription<std_msgs::msg::Bool>(
+      prefix + "/potential_fields/enable", rclcpp::QoS(1),
+      [this](std_msgs::msg::Bool::ConstSharedPtr message) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (enabled_ == message->data) {return;}
+        ++cloud_generation_;
+        pending_cloud_.reset();
+        enabled_ = message->data;
+        RCLCPP_INFO(get_logger(), "Obstacle monitor %s", enabled_ ? "enabled" : "disabled");
+        sensors_[0].received = sensors_[1].received = Clock::time_point{};
+        filtered_ = geometry_msgs::msg::Vector3();
+        if (!enabled_) {
+          laser_sub_.reset();cloud_sub_.reset();ready_pub_->publish(std_msgs::msg::Bool());return;
+        }
+        if (use_lidar_) {
+          laser_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
+            laser_topic_, rclcpp::SensorDataQoS(),
+            [this](sensor_msgs::msg::LaserScan::ConstSharedPtr scan) {
+              auto & sensor = sensors_[0];
+              Eigen::Affine3d tf;
+              if (!prepare_observation(scan->header, sensor, tf)) {return;}
+              if (scan->ranges.empty() || !std::isfinite(scan->angle_min) ||
+              !std::isfinite(scan->angle_increment) || !std::isfinite(scan->range_min) ||
+              !std::isfinite(scan->range_max) || scan->range_max <= scan->range_min)
+              {
+                sensor.rejection = "invalid_laser_scan";return;
+              }
+              std::vector<Eigen::Vector3d> points;
+              for (size_t i = 0; i < scan->ranges.size(); i += sensors_[0].stride) {
+                const double range = scan->ranges[i],
+                angle = scan->angle_min + i * scan->angle_increment;
+                if (std::isfinite(range) &&
+                range >= std::max(0.10f, scan->range_min) && range <= scan->range_max)
+                {
+                  points.push_back(
+                    tf *
+                    Eigen::Vector3d(range * std::cos(angle), range * std::sin(angle), 0.0));
+                }
+              }
+              evaluate_points(points, sensors_[0], direction_, angular_);
+            });
+        }
+        if (use_cloud_ && cloud_enabled_) {subscribe_cloud();}
+      });
+    cloud_enable_sub_ = create_subscription<std_msgs::msg::Bool>(
+      prefix + "/potential_fields/enable_cloud", rclcpp::QoS(1),
+      [this](std_msgs::msg::Bool::ConstSharedPtr message) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        ++cloud_generation_;
+        pending_cloud_.reset();
+        cloud_enabled_ = message->data;
+        if (!cloud_enabled_) {
+          cloud_sub_.reset();sensors_[1].force = geometry_msgs::msg::Vector3();
+        } else if (enabled_ && use_cloud_ && !cloud_sub_) {subscribe_cloud();}
+      });
+    RCLCPP_INFO(
+      get_logger(), "Obstacle monitor: lidar=%s topic=%s; cloud=%s topic=%s; frame=%s; waiting for enable on %s/potential_fields/enable",
+      use_lidar_ ? "on" : "off", laser_topic_.c_str(), use_cloud_ ? "on" : "off",
+      cloud_topic_.c_str(), base_frame_.c_str(), prefix.c_str());
+    cloud_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    cloud_timer_ = create_wall_timer(
+      std::chrono::milliseconds(30),
+      std::bind(&PotentialFieldsNode::process_cloud, this), cloud_group_);
+    timer_ =
+      create_wall_timer(
+      std::chrono::milliseconds(30),
+      std::bind(&PotentialFieldsNode::publish_fields, this));
+  }
 
 private:
-    //############
-    // State variables
-    // Node state flags
-    bool use_namespace_        = false;
-    bool enable_               = false;
-    bool collision_risk_lidar_ = false;
-    bool collision_risk_cloud_ = false;
-
-    // Motion state
-    float current_speed_linear_ = 0.0;
-    float current_speed_angular_ = 0.0;
-
-    // Timeout counters
-    int no_data_cloud_counter_ = 0;
-    int no_data_lidar_counter_ = 0;
-
-    // Rejection force outputs
-    geometry_msgs::msg::Vector3 rejection_force_lidar_;
-    geometry_msgs::msg::Vector3 rejection_force_cloud_;
-
-    // Goal
-    float global_goal_x_ = 999999.0;
-    float global_goal_y_ = 999999.0;
-    
-    tf2_ros::Buffer tf_buffer_;
-    tf2_ros::TransformListener tf_listener_;
-
-    // Internal parameter values
-    bool debug_, show_img_, use_pot_fields_, use_lidar_, use_cloud_;
-
-    float laser_min_x_, laser_max_x_, laser_min_y_, laser_max_y_, laser_collision_min_y_, laser_collision_max_y_, laser_min_z_, laser_max_z_;
-    float cloud_min_x_, cloud_max_x_, cloud_min_y_, cloud_max_y_, cloud_collision_min_y_, cloud_collision_max_y_, cloud_min_z_, cloud_max_z_;
-    float laser_pot_fields_d0_, laser_pot_fields_k_rej_;
-    float cloud_pot_fields_d0_, cloud_pot_fields_k_rej_;
-    float no_sensor_data_timeout_;
-    int cloud_threshold_, cloud_downsampling_;
-    int lidar_threshold_, lidar_downsampling_;
-
-    std::string point_cloud_topic_;
-    std::string laser_scan_topic_;
-    std::string base_link_name_;
-
-    //############
-    // Publishers
-    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr                  pub_collision_risk_;
-    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_pot_fields_markers_;
-    rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr          pub_pot_fields_rejection_;
-
-
-    //############
-    // Subscribers
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr       sub_enable_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr       sub_enable_cloud_;
-    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_cmd_vel_;
-    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr       sub_goal_path_;
-    
-    // Dynamic subscribers
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_;
-    rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr sub_lidar_;
-
-    //############
-    // Parameter callback handle
-    OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
-
-    // Main processing loop
-    rclcpp::TimerBase::SharedPtr processing_timer_;
-
-
-    //############
-    // Runtime parameter update callback
-    rcl_interfaces::msg::SetParametersResult on_parameter_change(
-        const std::vector<rclcpp::Parameter> &params)
-    {
-        rcl_interfaces::msg::SetParametersResult result;
-        result.successful = true;
-
-        for (const auto &param : params)
-        {
-            const std::string &name = param.get_name();
-
-            if (name == "use_namespace")        use_namespace_  = param.as_bool();
-            else if (name == "debug")           debug_          = param.as_bool();
-            else if (name == "show_image")      show_img_       = param.as_bool();
-            else if (name == "use_pot_fields")  use_pot_fields_ = param.as_bool();
-
-            else if (name == "use_lidar")       use_lidar_      = param.as_bool();
-            else if (name == "use_point_cloud") use_cloud_      = param.as_bool();
-
-            else if (name == "laser_min_x") laser_min_x_ = param.as_double();
-            else if (name == "laser_max_x") laser_max_x_ = param.as_double();
-            else if (name == "laser_min_y") laser_min_y_ = param.as_double();
-            else if (name == "laser_max_y") laser_max_y_ = param.as_double();
-            else if (name == "laser_collision_min_y") laser_collision_min_y_ = param.as_double();
-            else if (name == "laser_collision_max_y") laser_collision_max_y_ = param.as_double();
-            else if (name == "laser_min_z") laser_min_z_ = param.as_double();
-            else if (name == "laser_max_z") laser_max_z_ = param.as_double();
-
-            else if (name == "cloud_min_x") cloud_min_x_ = param.as_double();
-            else if (name == "cloud_max_x") cloud_max_x_ = param.as_double();
-            else if (name == "cloud_min_y") cloud_min_y_ = param.as_double();
-            else if (name == "cloud_max_y") cloud_max_y_ = param.as_double();
-            else if (name == "cloud_collision_min_y") cloud_collision_min_y_ = param.as_double();
-            else if (name == "cloud_collision_max_y") cloud_collision_max_y_ = param.as_double();
-            else if (name == "cloud_min_z") cloud_min_z_ = param.as_double();
-            else if (name == "cloud_max_z") cloud_max_z_ = param.as_double();
-
-            else if (name == "laser_pot_fields_d0")     laser_pot_fields_d0_    = param.as_double();
-            else if (name == "cloud_pot_fields_d0")     cloud_pot_fields_d0_    = param.as_double();
-            else if (name == "laser_pot_fields_k_rej")  laser_pot_fields_k_rej_ = param.as_double();
-            else if (name == "cloud_pot_fields_k_rej")  cloud_pot_fields_k_rej_ = param.as_double();
-            else if (name == "no_sensor_data_timeout")  no_sensor_data_timeout_ = param.as_double();
-
-            else if (name == "cloud_points_threshold")  cloud_threshold_    = param.as_int();
-            else if (name == "cloud_downsampling")      cloud_downsampling_ = param.as_int();
-            else if (name == "lidar_points_threshold")  lidar_threshold_    = param.as_int();
-            else if (name == "lidar_downsampling")      lidar_downsampling_ = param.as_int();
-
-            else if (name == "point_cloud_topic") point_cloud_topic_ = param.as_string();
-            else if (name == "laser_scan_topic")  laser_scan_topic_  = param.as_string();
-            else if (name == "base_link_name")    base_link_name_    = param.as_string();
-
-            else {
-                result.successful = false;
-                result.reason = "Unsupported parameter: " + name;
-                RCLCPP_WARN(this->get_logger(), "PotentialFields.-> Attempted to update unsupported parameter: %s", name.c_str());
-                break;
-            }
-        }
-
-        return result;
+  bool prepare_observation(
+    const std_msgs::msg::Header & header, SensorState & sensor,
+    Eigen::Affine3d & result)
+  {
+    sensor.last_message = Clock::now();
+    const rclcpp::Time stamp(header.stamp, get_clock()->get_clock_type());
+    const double age = (now() - stamp).seconds();
+    if (header.frame_id.empty()) {sensor.rejection = "empty_sensor_frame";return false;}
+    if (stamp.nanoseconds() == 0 || age > timeout_ || age < -future_tolerance_) {
+      std::ostringstream reason;
+      reason << "sensor_stamp_age=" << age << "s (allowed -" << future_tolerance_ << ".." <<
+        timeout_ << "s)";
+      sensor.rejection = reason.str();return false;
     }
-
-    std::string make_name(const std::string &suffix) const
-    {
-        // Ensure suffix starts with "/"
-        std::string sfx = suffix;
-        if (!sfx.empty() && sfx.front() != '/')
-            sfx = "/" + sfx;
-
-        std::string name;
-
-        if (use_namespace_) {
-            // Use node namespace prefix
-            name = this->get_namespace() + sfx;
-
-            // Avoid accidental double slash (e.g., when namespace is "/")
-            if (name.size() > 1 && name[0] == '/' && name[1] == '/')
-                name.erase(0, 1);
-        } else {
-            // Use global namespace (no node namespace prefix)
-            name = sfx;
-        }
-
-        return name;
+    sensor.measurement_time = Clock::now() - std::chrono::duration_cast<Clock::duration>(
+      std::chrono::duration<double>(std::max(0.0, age)));
+    try {
+      const auto transform = tf_buffer_.lookupTransform(
+        base_frame_, header.frame_id, stamp,
+        rclcpp::Duration::from_seconds(tf_timeout_));
+      result = tf2::transformToEigen(transform.transform);
+      sensor.rejection.clear();return true;
+    } catch (const tf2::TransformException & error) {
+      sensor.rejection = std::string("exact_tf: ") + error.what();
+      if (!allow_tf_fallback_) {return false;}
     }
-
-    // Wait for transforms 
-    void wait_for_transforms(const std::string &target_frame, const std::string &source_frame)
-    {
-        RCLCPP_INFO(this->get_logger(),
-                    "PotentialFields.-> Waiting for transform from '%s' to '%s'...", source_frame.c_str(), target_frame.c_str());
-
-        rclcpp::Time start_time = this->now();
-        rclcpp::Duration timeout = rclcpp::Duration::from_seconds(10.0); 
-
-        bool transform_ok = false;
-
-        while (rclcpp::ok() && (this->now() - start_time) < timeout) {
-            try {
-                tf_buffer_.lookupTransform(
-                    target_frame,
-                    source_frame,
-                    tf2::TimePointZero,
-                    tf2::durationFromSec(0.1)
-                );
-                transform_ok = true;
-                break;
-            } catch (const tf2::TransformException& ex) {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                                    "PotentialFields.-> Still waiting for transform: %s", ex.what());
-            }
-
-            rclcpp::sleep_for(std::chrono::milliseconds(200));
-        }
-
-        if (!transform_ok) {
-            RCLCPP_WARN(this->get_logger(),
-                        "PotentialFields.-> Timeout while waiting for transform from '%s' to '%s'.",
-                        source_frame.c_str(), target_frame.c_str());
-        } else {
-            RCLCPP_INFO(this->get_logger(),
-                        "PotentialFields.-> Transform from '%s' to '%s' is now available.",
-                        source_frame.c_str(), target_frame.c_str());
-        }
+    try {
+      const auto transform = tf_buffer_.lookupTransform(
+        base_frame_, header.frame_id,
+        tf2::TimePointZero);
+      const rclcpp::Time tf_stamp(transform.header.stamp, get_clock()->get_clock_type());
+      const double delta = std::abs((stamp - tf_stamp).seconds());
+      if (tf_stamp.nanoseconds() != 0 && delta > tf_max_age_) {
+        std::ostringstream reason;
+        reason << "stale_tf_fallback: " << header.frame_id << " -> " << base_frame_ << " delta=" <<
+          delta << "s limit=" << tf_max_age_ << "s";
+        sensor.rejection = reason.str();return false;
+      }
+      result = tf2::transformToEigen(transform.transform);
+      sensor.rejection.clear();
+      if (get_parameter("debug").as_bool()) {
+        RCLCPP_INFO_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "Using recent TF fallback: %s -> %s, delta=%.3f s",
+          header.frame_id.c_str(), base_frame_.c_str(), delta);
+      }
+      return true;
+    } catch (const tf2::TransformException & error) {
+      sensor.rejection = std::string("tf_unavailable: ") + error.what();return false;
     }
+  }
 
-    //############
-    // Callback functions
-    void callback_point_cloud(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
+  void subscribe_cloud()
+  {
+    sensors_[1].received = Clock::time_point{};
+    // Reception stays in the control group and only replaces the latest frame.
+    // Dense point clouds must never hold up LiDAR or the safety heartbeat.
+    const auto generation = cloud_generation_;
+    cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+      cloud_topic_,
+      rclcpp::SensorDataQoS(),
+      [this, generation](sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (generation != cloud_generation_ || !enabled_ || !cloud_enabled_) {return;}
+        pending_cloud_ = cloud;
+        sensors_[1].last_message = Clock::now();
+      });
+  }
+
+  void process_cloud()
+  {
+    sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud;
+    SensorState sensor;
+    uint64_t generation;
+    double direction, angular;
     {
-        try 
-        {
-            no_data_cloud_counter_ = 0;
-            collision_risk_cloud_ = check_collision_risk_with_cloud(msg, rejection_force_cloud_.x, rejection_force_cloud_.y);
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "PotentialFields.-> Error processing callback_point_cloud: %s", e.what());
-        }
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (!enabled_ || !cloud_enabled_ || !pending_cloud_) {return;}
+      cloud = std::move(pending_cloud_);
+      generation = cloud_generation_;
+      sensor = sensors_[1];
+      direction = direction_;angular = angular_;
     }
+    const auto started = Clock::now();
+    const auto previous_valid = sensor.received;
+    const auto previous_force = sensor.force;
+    const bool previous_risk = sensor.risk;
+    const double previous_limit = sensor.speed_limit;
+    // Keep early validation returns local so every rejection is committed too.
+    const auto process = [&]() {
 
-    void callback_lidar(const sensor_msgs::msg::LaserScan::SharedPtr msg)
+        Eigen::Affine3d tf;
+        if (!prepare_observation(cloud->header, sensor, tf)) {return;}
+        if (cloud->width == 0 || cloud->height == 0 || cloud->point_step == 0 ||
+          cloud->row_step < static_cast<uint64_t>(cloud->width) * cloud->point_step ||
+          cloud->data.size() < static_cast<uint64_t>(cloud->row_step) * cloud->height)
+        {
+          sensor.rejection = "invalid_cloud_layout";return;
+        }
+        std::array<uint32_t, 3> offsets{};
+        for (size_t i = 0; i < 3; ++i) {
+          const std::string name = i == 0 ? "x" : (i == 1 ? "y" : "z");
+          const auto field =
+            std::find_if(
+            cloud->fields.begin(), cloud->fields.end(), [&name](const auto & f) {
+              return f.name == name;
+            });
+          if (field == cloud->fields.end() ||
+            field->datatype != sensor_msgs::msg::PointField::FLOAT32 ||
+            field->count != 1 ||
+            static_cast<uint64_t>(field->offset) + sizeof(float) > cloud->point_step)
+          {
+            sensor.rejection = "unsupported_cloud_field_" + name;return;
+          }
+          offsets[i] = field->offset;
+        }
+        std::vector<Eigen::Vector3d> points;
+        points.reserve(
+          (static_cast<uint64_t>(cloud->width) * cloud->height + sensor.stride - 1) /
+          sensor.stride);
+        const uint16_t endian_test = 1;
+        const bool host_big = *reinterpret_cast<const uint8_t *>(&endian_test) == 0;
+        for (size_t i = 0; i < static_cast<uint64_t>(cloud->width) * cloud->height;
+          i += sensor.stride)
+        {
+          const size_t offset = (i / cloud->width) * cloud->row_step + (i % cloud->width) *
+            cloud->point_step;
+          std::array<float, 3> xyz;
+          for (size_t axis = 0; axis < 3; ++axis) {
+            std::array<uint8_t, 4> bytes;
+            std::memcpy(bytes.data(), cloud->data.data() + offset + offsets[axis], 4);
+            if (host_big != cloud->is_bigendian) {std::reverse(bytes.begin(), bytes.end());}
+            std::memcpy(&xyz[axis], bytes.data(), 4);
+          }
+          const Eigen::Vector3d p(xyz[0], xyz[1], xyz[2]);
+          if (p.allFinite()) {points.push_back(tf * p);}
+        }
+        evaluate_points(points, sensor, direction, angular);
+
+      };
+    process();
+    const double elapsed = std::chrono::duration<double>(Clock::now() - started).count();
+    const double age =
+      (now() - rclcpp::Time(cloud->header.stamp, get_clock()->get_clock_type())).seconds();
+    if (sensor.received != previous_valid && age > timeout_) {
+      sensor.received = previous_valid;
+      sensor.force = previous_force;sensor.risk = previous_risk;sensor.speed_limit = previous_limit;
+      sensor.image.release();
+      std::ostringstream reason;
+      reason << "cloud_processing_overrun: duration=" << elapsed << "s sensor_age=" << age << "s";
+      sensor.rejection = reason.str();
+    }
+    if (elapsed > std::min(0.1, timeout_ * 0.5)) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Cloud processing slow: %.3f s, %llu points; LiDAR and monitor run independently",
+        elapsed, static_cast<unsigned long long>(cloud->width) * cloud->height);
+    }
     {
-        try 
-        {
-            no_data_lidar_counter_ = 0;
-            collision_risk_lidar_ = check_collision_risk_with_lidar(msg, rejection_force_lidar_.x, rejection_force_lidar_.y);
-            
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "PotentialFields.-> Error processing callback_lidar: %s", e.what());
-        }
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      // A stopped/restarted sensor must not accept an older in-flight result.
+      if (generation == cloud_generation_ && enabled_ && cloud_enabled_) {
+        sensor.last_message = sensors_[1].last_message;
+        sensors_[1] = std::move(sensor);
+      }
     }
+  }
 
-    void callback_enable(const std_msgs::msg::Bool::SharedPtr msg)
+  void evaluate_points(
+    const std::vector<Eigen::Vector3d> & points, SensorState & sensor,
+    double direction, double angular)
+  {
+    int obstacles = 0, count = 0;
+    sensor.force = geometry_msgs::msg::Vector3();
+    const double c = std::cos(direction), s = std::sin(direction);
+    const double stop_radius = footprint_ + margin_;
+    const double critical_radius = footprint_ + critical_margin_;
+    std::vector<double> clearances;
+    clearances.reserve(points.size());
+    cv::Mat image;
+    if (get_parameter("show_image").as_bool()) {image = cv::Mat::zeros(300, 300, CV_8UC1);}
+    for (const auto & p : points) {
+      if (!p.allFinite() || p.z() < sensor.min_z || p.z() > sensor.max_z) {continue;}
+      const double along = c * p.x() + s * p.y(), across = -s * p.x() + c * p.y(),
+        distance = std::hypot(p.x(), p.y());
+      // A swept circle uses actual lateral clearance; the full braking zone
+      // limits speed instead of being interpreted as an immediate collision.
+      if (distance <= 0.10) {continue;}
+      if (along >= 0.0 && std::abs(across) < stop_radius) {
+        clearances.push_back(
+          along -
+          std::sqrt(std::max(0.0, stop_radius * stop_radius - across * across)));
+      }
+      const bool danger = (along >= 0.0 && distance < critical_radius) ||
+        (std::abs(angular) > 0.02 && distance < critical_radius);
+      if (danger) {++obstacles;}
+      if (distance > 0.10 && distance < sensor.radius && along > sensor.min_x &&
+        along < sensor.max_x &&
+        across > sensor.min_y && across < sensor.max_y)
+      {
+        const double force = sensor.gain *
+          std::sqrt(std::max(0.0, 1.0 / distance - 1.0 / sensor.radius));
+        sensor.force.x -= force * p.x() / distance;sensor.force.y -= force * p.y() / distance;
+        ++count;
+      }
+      if (!image.empty()) {
+        const int ix = 150 + static_cast<int>(across * 100),
+          iy = 299 - static_cast<int>(along * 100);
+        if (ix >= 0 && ix < image.cols && iy >= 0 && iy < image.rows) {
+          image.at<uint8_t>(iy, ix) = danger ? 255 : 100;
+        }
+      }
+    }
+    if (count > 0) {sensor.force.x /= count;sensor.force.y /= count;}
+    sensor.critical_points = obstacles;
+    sensor.risk = obstacles > sensor.threshold;
+    sensor.speed_limit = std::numeric_limits<double>::infinity();
+    sensor.clearance = std::numeric_limits<double>::infinity();
+    // Require the same amount of sensor support as collision detection; a
+    // single isolated cloud point must not force an unrelated slowdown.
+    if (clearances.size() > static_cast<size_t>(sensor.threshold)) {
+      auto supported = clearances.begin() + sensor.threshold;
+      std::nth_element(clearances.begin(), supported, clearances.end());
+      sensor.clearance = std::max(0.0, *supported);
+      const double age =
+        std::max(
+        0.0,
+        std::chrono::duration<double>(Clock::now() - sensor.measurement_time).count());
+      const double reaction = std::max(reaction_time_, age + 0.03);
+      const double term = deceleration_ * reaction;
+      sensor.speed_limit =
+        std::max(0.0, std::sqrt(term * term + 2.0 * deceleration_ * sensor.clearance) - term);
+    }
+    sensor.received = sensor.measurement_time;
+    sensor.image = std::move(image);
+  }
+
+  void publish_fields()
+  {
+    if (!enabled_) {return;}
+    std::array<SensorState, 2> sensors;
     {
-        try 
-        {
-            enable_ = msg->data;
-
-            if (enable_) {
-                std::stringstream ss;
-                ss << "PotentialFields.->Starting detection using: ";
-                if (use_lidar_) ss << "lidar ";
-                if (use_cloud_) ss << "point_cloud";
-                RCLCPP_INFO(this->get_logger(), "%s", ss.str().c_str());
-
-                if (use_cloud_ && !sub_cloud_) {
-                    sub_cloud_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                        point_cloud_topic_, rclcpp::SensorDataQoS(),
-                        std::bind(&PotentialFieldsNode::callback_point_cloud, this, std::placeholders::_1));
-                }
-
-                if (use_lidar_ && !sub_lidar_) {
-                    sub_lidar_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-                        laser_scan_topic_, rclcpp::SensorDataQoS(),
-                        std::bind(&PotentialFieldsNode::callback_lidar, this, std::placeholders::_1));
-                }
-            }
-            else {
-                RCLCPP_INFO(this->get_logger(), "PotentialFields.->Stopping obstacle detection...");
-
-                if (sub_cloud_) {
-                    sub_cloud_.reset();
-                    collision_risk_cloud_ = false;
-                }
-
-                if (sub_lidar_) {
-                    sub_lidar_.reset();
-                    collision_risk_lidar_ = false;
-                }
-            }
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "PotentialFields.-> Error processing callback_enable: %s", e.what());
-        }
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      sensors = sensors_;
     }
-
-    void callback_enable_cloud(const std_msgs::msg::Bool::SharedPtr msg)
-    {
-        try 
-        {
-            bool enable = msg->data;
-            if (enable && use_cloud_) {
-                std::stringstream ss;
-                ss << "PotentialFields.->Starting detection using point_cloud";
-                RCLCPP_INFO(this->get_logger(), "%s", ss.str().c_str());
-
-                if (!sub_cloud_){
-                    sub_cloud_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                        point_cloud_topic_, rclcpp::SensorDataQoS(),
-                        std::bind(&PotentialFieldsNode::callback_point_cloud, this, std::placeholders::_1));
-                    }
-            }
-            else if (use_cloud_) {
-                RCLCPP_INFO(this->get_logger(), "PotentialFields.->Stopping obstacle detection with point cloud...");
-
-                if (sub_cloud_) {
-                    sub_cloud_.reset();
-                    collision_risk_cloud_ = false;
-                }
-            }
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "PotentialFields.-> Error processing callback_enable: %s", e.what());
+    const auto tick = Clock::now();
+    geometry_msgs::msg::Vector3 force;
+    bool risk = false, ready = true;
+    double speed_limit = std::numeric_limits<double>::infinity();
+    std::ostringstream unavailable;
+    for (size_t i = 0; i < 2; ++i) {
+      if ((i == 0 && !use_lidar_) || (i == 1 && (!use_cloud_ || !cloud_enabled_))) {continue;}
+      const auto & sensor = sensors[i];
+      if (sensor.received == Clock::time_point{} ||
+        std::chrono::duration<double>(tick - sensor.received).count() > timeout_)
+      {
+        ready = false;
+        unavailable << (i == 0 ? " lidar=" : " cloud=") << (i == 0 ? laser_topic_ : cloud_topic_);
+        if (sensor.last_message == Clock::time_point{}) {unavailable << " no_messages";} else {
+          unavailable << " received_age=" << std::chrono::duration<double>(
+            tick - sensor.last_message).count() << "s";
+          if (sensor.received == Clock::time_point{}) {
+            unavailable << " no_valid_observation";
+          } else {
+            unavailable << " valid_age=" <<
+              std::chrono::duration<double>(tick - sensor.received).count() << "s";
+          }
+          if (!sensor.rejection.empty()) {unavailable << " reason=" << sensor.rejection;}
         }
+        continue;
+      }
+      if (!sensor.image.empty() && get_parameter("show_image").as_bool()) {
+        cv::imshow(i == 0 ? "Potential fields LiDAR" : "Potential fields cloud", sensor.image);
+        cv::waitKey(1);
+      }
+      risk = risk || sensor.risk;
+      speed_limit = std::min(speed_limit, sensor.speed_limit);
+      force.x += sensor.force.x;force.y += sensor.force.y;
     }
-
-    void callback_cmd_vel(const geometry_msgs::msg::Twist::SharedPtr msg)
-    {
-        try 
-        {
-            current_speed_linear_  = msg->linear.x;
-            current_speed_angular_ = msg->angular.z;
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "PotentialFields.-> Error processing callback_cmd_vel: %s", e.what());
-        }
+    if (!ready) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(),
+        *get_clock(), 2000, "Obstacle sensors not ready:%s", unavailable.str().c_str());
     }
-
-    void callback_goal_path(const nav_msgs::msg::Path::SharedPtr msg)
-    {
-        try 
-        {
-            if (!msg->poses.empty()) {
-                global_goal_x_ = msg->poses.back().pose.position.x;
-                global_goal_y_ = msg->poses.back().pose.position.y;
-            }  
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "PotentialFields.-> Error processing callback_goal_path: %s", e.what());
-        }
+    const double scale = std::min(1.0, max_force_ / std::max(1e-9, std::hypot(force.x, force.y)));
+    const double alpha = 1.0 - std::exp(-0.03 / filter_time_);
+    filtered_.x += alpha * (force.x * scale - filtered_.x);
+    filtered_.y += alpha * (force.y * scale - filtered_.y);
+    if (ready && risk && !previous_risk_) {
+      RCLCPP_WARN(
+        get_logger(), "Critical obstacle: commanded_speed=%.3f m/s, radius=%.3f m, lidar_points=%d threshold=%d, cloud_points=%d threshold=%d; speed_limit=%.3f m/s",
+        speed_, footprint_ + critical_margin_, sensors[0].critical_points, sensors[0].threshold,
+        sensors[1].critical_points, sensors[1].threshold, speed_limit);
     }
+    previous_risk_ = ready && risk;
+    std_msgs::msg::Float32 limit;limit.data = ready ? speed_limit : 0.0;speed_limit_pub_->publish(
+      limit);
+    std_msgs::msg::Bool readiness;readiness.data = ready;ready_pub_->publish(readiness);
+    std_msgs::msg::Bool collision;collision.data = risk;risk_pub_->publish(collision);
+    force_pub_->publish(
+      get_parameter(
+        "use_pot_fields").as_bool() ? filtered_ : geometry_msgs::msg::Vector3());
+    visualization_msgs::msg::MarkerArray markers;
+    visualization_msgs::msg::Marker arrow;
+    arrow.header.frame_id = base_frame_;arrow.header.stamp = now();arrow.ns = "pot_fields";
+    arrow.id = 0;
+    arrow.type = visualization_msgs::msg::Marker::ARROW;
+    arrow.action = visualization_msgs::msg::Marker::ADD;
+    arrow.pose.orientation.w = 1.0;arrow.scale.x = 0.03;arrow.scale.y = 0.06;arrow.scale.z = 0.06;
+    arrow.color.r = 1.0;arrow.color.a = 1.0;
+    geometry_msgs::msg::Point end;end.x = filtered_.x;end.y = filtered_.y;
+    arrow.points = {geometry_msgs::msg::Point(), end};markers.markers.push_back(arrow);
+    markers_pub_->publish(markers);
+  }
 
-
-    //############
-    //Potential Fields additional functions
-    bool check_collision_risk_with_lidar(
-        const sensor_msgs::msg::LaserScan::SharedPtr msg,
-        double &rejection_force_x,
-        double &rejection_force_y)
-    {
-        if (current_speed_linear_ <= 0.0 && !debug_) {
-            return false;
-        }
-
-        float optimal_x = get_search_distance(laser_max_x_); 
-        int obstacle_count = 0;
-        int force_count = 0;
-        rejection_force_x = 0.0;
-        rejection_force_y = 0.0;
-
-        // Get transform to base_link
-        geometry_msgs::msg::TransformStamped transform_stamped;
-        try {
-            transform_stamped = tf_buffer_.lookupTransform(
-                base_link_name_,  // target frame
-                msg->header.frame_id,  // source frame
-                tf2::TimePointZero);
-        } catch (const tf2::TransformException &ex) {
-            RCLCPP_WARN(this->get_logger(), "PotentialFields.-> TF lookup failed: %s", ex.what());
-            return false;
-        }
-        Eigen::Affine3d tf = tf2::transformToEigen(transform_stamped.transform);
-
-        for (size_t i = 0; i < msg->ranges.size(); i += lidar_downsampling_) {
-            float angle = msg->angle_min + i * msg->angle_increment;
-            float range = msg->ranges[i];
-            if (!std::isfinite(range) || range < 0.10f || range < msg->range_min || range > msg->range_max) continue;
-
-            Eigen::Vector3d v(range * cos(angle), range * sin(angle), 0);
-            v = tf * v;
-
-            if (v.x() > laser_min_x_ && v.x() < optimal_x &&
-                v.y() > laser_collision_min_y_ && v.y() < laser_collision_max_y_ &&
-                v.z() > laser_min_z_ && v.z() < laser_max_z_)
-            {
-                obstacle_count++;
-            }
-
-            double distance = v.norm();
-            if (distance < laser_pot_fields_d0_) {
-                double force_mag = laser_pot_fields_k_rej_ * std::sqrt(1.0 / distance - 1.0 / laser_pot_fields_d0_);
-                rejection_force_x -= force_mag * v.x() / distance;
-                rejection_force_y -= force_mag * v.y() / distance;
-                force_count++;
-            }
-        }
-
-        if (force_count > 0) {
-            rejection_force_x /= force_count;
-            rejection_force_y /= force_count;
-        } else {
-            rejection_force_x = 0.0;
-            rejection_force_y = 0.0;
-        }
-
-        return obstacle_count > lidar_threshold_;
-    }
-
-    bool check_collision_risk_with_cloud(
-        const sensor_msgs::msg::PointCloud2::SharedPtr msg,
-        double& rejection_force_x,
-        double& rejection_force_y)
-    {
-        if (current_speed_linear_ <= 0.0 && !(debug_||show_img_)) {
-            return false;
-        }
-
-        float optimal_x = get_search_distance(cloud_max_x_);
-        int obstacle_count = 0;
-        int force_count = 0;
-        rejection_force_x = 0;
-        rejection_force_y = 0;
-
-        // Setup OpenCV mask
-        int w = msg->width;
-        int h = msg->height;
-        cv::Mat mask = cv::Mat::zeros(h, w, CV_8UC1);
-
-        // Get transform to base_link
-        geometry_msgs::msg::TransformStamped transform_stamped;
-        try {
-            transform_stamped = tf_buffer_.lookupTransform(
-                base_link_name_,  // target frame
-                msg->header.frame_id,  // source frame
-                tf2::TimePointZero);
-        } catch (const tf2::TransformException &ex) {
-            RCLCPP_WARN(this->get_logger(), "PotentialFields.-> TF lookup failed: %s", ex.what());
-            return false;
-        }
-        Eigen::Affine3d tf = tf2::transformToEigen(transform_stamped.transform);
-
-        // Iterate through point cloud data
-        const unsigned char* p = msg->data.data();
-        for (size_t i = 0; i < msg->width * msg->height;
-            i += cloud_downsampling_, p += cloud_downsampling_ * msg->point_step)
-        {
-            float x = *reinterpret_cast<const float*>(p);
-            float y = *reinterpret_cast<const float*>(p + 4);
-            float z = *reinterpret_cast<const float*>(p + 8);
-
-            Eigen::Vector3d v(x, y, z);
-            v = tf * v;
-
-            if (v.x() > cloud_min_x_ && v.x() < optimal_x &&
-                v.y() > cloud_collision_min_y_ && v.y() < cloud_collision_max_y_ &&
-                v.z() > cloud_min_z_ && v.z() < cloud_max_z_)
-            {
-                obstacle_count++;
-            }
-
-            if (//v.norm() < cloud_pot_fields_d0_ &&
-                v.x() > cloud_min_x_ && v.x() < cloud_max_x_ &&
-                v.y() > cloud_min_y_ && v.y() < cloud_max_y_ &&
-                v.z() > cloud_min_z_ && v.z() < cloud_max_z_)
-            {
-                mask.data[i] = 255;
-                float force_mag = cloud_pot_fields_k_rej_ * std::sqrt(1.0 / v.norm() - 1.0 / cloud_pot_fields_d0_);
-
-                if (!std::isnan(force_mag)) {
-                    rejection_force_x -= force_mag * v.x() / v.norm();
-                    rejection_force_y -= force_mag * v.y() / v.norm();
-                    force_count++;
-                }
-            }
-        }
-
-        rejection_force_x = (force_count > 0) ? rejection_force_x / force_count : 0.0;
-        rejection_force_y = (force_count > 0) ? rejection_force_y / force_count : 0.0;
-
-        if(show_img_){
-            cv::imshow("POTENTIAL FIELDS OBSTACLE", mask);
-            cv::waitKey(30);
-        }
-
-        return obstacle_count > cloud_threshold_;
-    }
-
-    float get_search_distance(float max_x)
-    {
-        float robot_x, robot_y, robot_a;
-        get_robot_position_wrt_map(robot_x, robot_y, robot_a);
-        // Use both map axes so the search window shrinks only with the real
-        // robot-to-goal distance. The old expression used dx twice.
-        float dist_to_goal = sqrt(pow(global_goal_x_ - robot_x, 2) + pow(global_goal_y_ - robot_y, 2));
-        if(dist_to_goal < max_x)
-            return dist_to_goal;
-        return max_x;
-    }
-
-    void get_robot_position_wrt_map(float &robot_x, float &robot_y, float &robot_t)
-    {
-        try
-        {
-            geometry_msgs::msg::TransformStamped transformStamped =
-                tf_buffer_.lookupTransform("map", base_link_name_, tf2::TimePointZero);
-
-            robot_x = transformStamped.transform.translation.x;
-            robot_y = transformStamped.transform.translation.y;
-
-            tf2::Quaternion q(
-                transformStamped.transform.rotation.x,
-                transformStamped.transform.rotation.y,
-                transformStamped.transform.rotation.z,
-                transformStamped.transform.rotation.w);
-
-            double roll, pitch, yaw;
-            tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-            robot_t = static_cast<float>(yaw);
-
-            return;
-        }
-        catch (const tf2::TransformException &ex)
-        {
-            //RCLCPP_WARN(this->get_logger(), "PotentialFields.-> TF Exception: %s", ex.what());
-            robot_x = robot_y = robot_t = 0.0f;
-            return;
-        }
-    }
-
-    visualization_msgs::msg::MarkerArray get_force_arrow_markers(
-        const geometry_msgs::msg::Vector3& f1,
-        const geometry_msgs::msg::Vector3& f2)
-    {
-        visualization_msgs::msg::MarkerArray markers;
-        visualization_msgs::msg::Marker marker;
-
-        marker.header.frame_id = base_link_name_;
-        marker.header.stamp = this->get_clock()->now();
-        marker.ns = "pot_fields";
-        marker.type = visualization_msgs::msg::Marker::ARROW;
-        marker.action = visualization_msgs::msg::Marker::ADD;
-        marker.pose.orientation.w = 1.0;
-        marker.scale.x = 0.07;
-        marker.scale.y = 0.1;
-        marker.scale.z = 0.1;
-
-        geometry_msgs::msg::Point origin;
-        origin.x = 0.0;
-        origin.y = 0.0;
-        origin.z = 0.0;
-
-        // Force 1 marker (blue)
-        marker.id = 0;
-        marker.points.clear();
-        marker.points.push_back(origin);
-        geometry_msgs::msg::Point p1;
-        p1.x = (10.0 / laser_pot_fields_k_rej_) * f1.x;
-        p1.y = (10.0 / laser_pot_fields_k_rej_) * f1.y;
-        p1.z = 0;
-        marker.points.push_back(p1);
-        marker.color.a = 1.0;
-        marker.color.r = 0.0;
-        marker.color.g = 0.0;
-        marker.color.b = 1.0;
-        markers.markers.push_back(marker);
-
-        // Force 2 marker (green)
-        marker.id = 1;
-        marker.points.clear();
-        marker.points.push_back(origin);
-        geometry_msgs::msg::Point p2;
-        p2.x = (10.0 / laser_pot_fields_k_rej_) * f2.x;
-        p2.y = (10.0 / laser_pot_fields_k_rej_) * f2.y;
-        p2.z = 0;
-        marker.points.push_back(p2);
-        marker.color.r = 0.0;
-        marker.color.g = 0.5;
-        marker.color.b = 0.0;
-        markers.markers.push_back(marker);
-
-        // Total force marker (red)
-        marker.id = 2;
-        marker.points.clear();
-        marker.points.push_back(origin);
-        geometry_msgs::msg::Point p3;
-        p3.x = (10.0 / laser_pot_fields_k_rej_) * (f1.x + f2.x);
-        p3.y = (10.0 / laser_pot_fields_k_rej_) * (f1.y + f2.y);
-        p3.z = 0;
-        marker.points.push_back(p3);
-        marker.color.r = 1.0;
-        marker.color.g = 0.0;
-        marker.color.b = 0.0;
-        markers.markers.push_back(marker);
-
-        return markers;
-    }
-
-    //############
-    //Potential Fields main processing
-    void potential_fields_processing() 
-    {
-        try
-        {
-            if (!enable_) {
-                return;
-            }
-
-            if (use_pot_fields_) {
-                geometry_msgs::msg::Vector3 msg_rejection_force;
-                msg_rejection_force.x = rejection_force_lidar_.x + rejection_force_cloud_.x;
-                msg_rejection_force.y = rejection_force_lidar_.y + rejection_force_cloud_.y;
-
-                if (rejection_force_lidar_.y > 0 && rejection_force_cloud_.y > 0) {
-                    msg_rejection_force.x = (rejection_force_lidar_.x + rejection_force_cloud_.x) / 2.0;
-                    msg_rejection_force.y = (rejection_force_lidar_.y + rejection_force_cloud_.y) / 2.0;
-                }
-
-                pub_pot_fields_rejection_->publish(msg_rejection_force);
-                pub_pot_fields_markers_->publish(get_force_arrow_markers(rejection_force_lidar_, rejection_force_cloud_));
-            }
-
-            // Publish collision risk status
-            std_msgs::msg::Bool msg_collision_risk;
-            msg_collision_risk.data = collision_risk_lidar_ || collision_risk_cloud_;
-            pub_collision_risk_->publish(msg_collision_risk);
-
-            collision_risk_lidar_ = false;
-            collision_risk_cloud_ = false;
-        } 
-        catch (const std::exception& e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "PotentialFields.-> Error in PotentialFields processing: %s", e.what());
-        }
-    }
-
+  tf2_ros::Buffer tf_buffer_;
+  tf2_ros::TransformListener tf_listener_;
+  std::array<SensorState, 2> sensors_;
+  std::mutex state_mutex_;
+  sensor_msgs::msg::PointCloud2::ConstSharedPtr pending_cloud_;
+  uint64_t cloud_generation_ = 0;
+  rclcpp::CallbackGroup::SharedPtr cloud_group_;
+  std::string base_frame_, laser_topic_, cloud_topic_;
+  bool use_lidar_, use_cloud_, enabled_ = false, cloud_enabled_ = true;
+  bool allow_tf_fallback_;
+  double future_tolerance_, tf_timeout_, tf_max_age_;
+  bool previous_risk_ = false;
+  double reaction_time_, critical_margin_;
+  double timeout_, footprint_, margin_, deceleration_, max_force_, filter_time_;
+  double speed_ = 0.0, angular_ = 0.0, direction_ = 0.0;
+  geometry_msgs::msg::Vector3 filtered_;
+  rclcpp::TimerBase::SharedPtr timer_, cloud_timer_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr speed_limit_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr risk_pub_, ready_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr force_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr enable_sub_, cloud_enable_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr intent_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr laser_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
 };
 
-int main(int argc, char **argv)
+int main(int argc, char ** argv)
 {
-    rclcpp::init(argc, argv);
-    auto node = std::make_shared<PotentialFieldsNode>();
-    //rclcpp::spin(node);
-    rclcpp::executors::MultiThreadedExecutor executor;
-    executor.add_node(node);
-    executor.spin();
-
-    rclcpp::shutdown();
-    
-    return 0;
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<PotentialFieldsNode>();
+  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions{}, 2);
+  executor.add_node(node);
+  executor.spin();
+  rclcpp::shutdown();
+  return 0;
 }

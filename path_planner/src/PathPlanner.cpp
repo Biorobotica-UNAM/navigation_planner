@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <queue>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -240,18 +242,131 @@ PlanResult planSegments(
         result.goal_relocated = i + 1 == stops.size() &&
             std::hypot(segment.poses.back().pose.position.x - stops[i].position.x,
                        segment.poses.back().pose.position.y - stops[i].position.y) > geometry_epsilon;
-        Path smoothed = PathPlanner::SmoothPath(
-            segment, static_cast<float>(options.smooth_alpha),
-            static_cast<float>(options.smooth_beta),
-            // Soft costs guide A*; smoothing may cross their contours.
-            // The inflated collision map still validates every crossed cell.
-            static_cast<float>(options.smooth_tolerance), &map, options.allow_unknown);
+        Path smoothed;
+        Grid alternate_costs = costs;
+        Grid clearance_map = map;
+        const Grid* shortcut_map = &map;
+        const GridGeometry geometry(map);
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::duration<double>(options.smoothing_time_budget_sec);
+        bool accepted = false;
+        for (int attempt = 0; attempt < options.smoothing_retry_limit; ++attempt)
+        {
+            if (std::chrono::steady_clock::now() >= deadline)
+                break;
+            // A second geometry is searched after the first smoothing schedule.
+            // Penalize the previous route in soft costs; never erase hard obstacles.
+            if (attempt == options.smoothing_retry_limit / 2 && attempt > 0)
+            {
+                for (const auto& pose : segment.poses)
+                {
+                    int gx, gy;
+                    if (!geometry.worldToCell(pose.pose.position.x, pose.pose.position.y, gx, gy))
+                        continue;
+                    for (int y = std::max(0, gy - 2); y <= std::min(geometry.height - 1, gy + 2); ++y)
+                        for (int x = std::max(0, gx - 2); x <= std::min(geometry.width - 1, gx + 2); ++x)
+                        {
+                            auto& cost = alternate_costs.data[static_cast<size_t>(y) * geometry.width + x];
+                            cost = static_cast<int8_t>(std::min(90, std::max(0, static_cast<int>(cost)) + 2));
+                        }
+                }
+                // Reserve turning room for the alternate search. This extra
+                // clearance is optional; the real collision map is unchanged.
+                const double radius = std::min(0.6, 1.0 / options.max_path_curvature + 2.0 * geometry.resolution);
+                const int reach = static_cast<int>(std::ceil(radius / geometry.resolution));
+                for (int y = 0; y < geometry.height; ++y)
+                    for (int x = 0; x < geometry.width; ++x)
+                    {
+                        if (map.data[static_cast<size_t>(y) * geometry.width + x] <= 0)
+                            continue;
+                        for (int yy = std::max(0, y-reach); yy <= std::min(geometry.height-1, y+reach); ++yy)
+                            for (int xx = std::max(0, x-reach); xx <= std::min(geometry.width-1, x+reach); ++xx)
+                                if (std::hypot(xx-x, yy-y) * geometry.resolution <= radius)
+                                    clearance_map.data[static_cast<size_t>(yy) * geometry.width + xx] = 100;
+                    }
+                Path alternate;
+                PlanStatus status;
+                if (PathPlanner::AStar(clearance_map, alternate_costs, current_start, stops[i],
+                                      options.diagonal_paths, alternate, segment_options, &status))
+                {
+                    segment = std::move(alternate);
+                    shortcut_map = &clearance_map;
+                }
+            }
+            // Remove grid stair steps with collision-checked line-of-sight links.
+            // Vary the shortcut reach between retries, then resample uniformly.
+            Path sparse;
+            sparse.header = segment.header;
+            sparse.poses.push_back(segment.poses.front());
+            for (size_t from = 0; from + 1 < segment.poses.size();)
+            {
+                size_t next = from + 1;
+                const size_t reach = std::min(segment.poses.size() - 1, from + static_cast<size_t>(40 - 8 * (attempt % 4)));
+                for (size_t to = reach; to > from + 1; --to)
+                {
+                    if (std::chrono::steady_clock::now() >= deadline)
+                        break;
+                    Path link;
+                    link.header = segment.header;
+                    link.poses = {segment.poses[from], segment.poses[to]};
+                    if (validatePathSegments(link, *shortcut_map, options.allow_unknown))
+                    {
+                        next = to;
+                        break;
+                    }
+                }
+                sparse.poses.push_back(segment.poses[next]);
+                from = next;
+            }
+            Path sampled;
+            sampled.header = sparse.header;
+            sampled.poses.push_back(sparse.poses.front());
+            const double spacing = std::max(0.02, std::min(0.05, geometry.resolution));
+            for (size_t j = 1; j < sparse.poses.size(); ++j)
+            {
+                const auto& a = sparse.poses[j-1].pose.position;
+                const auto& b = sparse.poses[j].pose.position;
+                const int count = std::max(1, static_cast<int>(std::ceil(std::hypot(b.x-a.x, b.y-a.y) / spacing)));
+                for (int step = 1; step <= count; ++step)
+                {
+                    auto pose = sparse.poses[j];
+                    const double t = static_cast<double>(step) / count;
+                    pose.pose.position.x = a.x + t * (b.x-a.x);
+                    pose.pose.position.y = a.y + t * (b.y-a.y);
+                    sampled.poses.push_back(pose);
+                }
+            }
+            const double data_weight = options.smooth_alpha * std::pow(0.5, attempt % 4);
+            smoothed = PathPlanner::SmoothPath(sampled, static_cast<float>(data_weight),
+                static_cast<float>(options.smooth_beta), static_cast<float>(options.smooth_tolerance),
+                &map, options.allow_unknown);
+            if (validatePathSegments(smoothed, map, options.allow_unknown) &&
+                (!options.require_smooth_path || PathPlanner::IsSmooth(smoothed,
+                    options.max_path_curvature, options.max_path_heading_step)))
+            {
+                accepted = true;
+                break;
+            }
+        }
+        if (!accepted)
+        {
+            result.status = PlanStatus::NoSmoothPath;
+            result.path.poses.clear();
+            return result;
+        }
         auto first = smoothed.poses.begin();
         // Every segment starts at the endpoint already appended by the previous one.
         if (!result.path.poses.empty() && first != smoothed.poses.end())
             ++first;
         result.path.poses.insert(result.path.poses.end(), first, smoothed.poses.end());
         current_start = segment.poses.back().pose;
+    }
+    if (options.require_smooth_path && !PathPlanner::IsSmooth(result.path,
+        options.max_path_curvature, options.max_path_heading_step))
+    {
+        result.status = PlanStatus::NoSmoothPath;
+        result.path.poses.clear();
+        return result;
     }
     result.status = PlanStatus::Success;
     finishPath(result.path);
@@ -475,6 +590,10 @@ Path PathPlanner::SmoothPath(
          cost_map->info.origin != collision_map->info.origin ||
          cost_map->data.size() != collision_map->data.size())))
         throw std::invalid_argument("Cost map requires matching collision geometry");
+    const double scale = std::min(1.0, 0.9 / std::max(1e-9,
+        static_cast<double>(weight_data) + 2.0 * weight_smooth));
+    weight_data *= scale;
+    weight_smooth *= scale;
     const double threshold = static_cast<double>(tolerance) * path.poses.size();
     if (path.poses.size() >= 3)
     {
@@ -509,6 +628,38 @@ Path PathPlanner::SmoothPath(
     return result;
 }
 
+bool PathPlanner::IsSmooth(const Path& path, double max_curvature, double max_heading_step)
+{
+    if (path.poses.empty() || !std::isfinite(max_curvature) || max_curvature <= 0.0 ||
+        !std::isfinite(max_heading_step) || max_heading_step <= 0.0)
+        return false;
+    double previous_heading = 0.0, previous_length = 0.0;
+    bool have_heading = false;
+    for (size_t i = 0; i < path.poses.size(); ++i)
+    {
+        const auto& p = path.poses[i].pose.position;
+        if (!std::isfinite(p.x) || !std::isfinite(p.y))
+            return false;
+        if (i == 0)
+            continue;
+        const auto& a = path.poses[i-1].pose.position;
+        const double length = std::hypot(p.x-a.x, p.y-a.y);
+        if (length < 1e-8)
+            continue;
+        const double heading = std::atan2(p.y-a.y, p.x-a.x);
+        if (have_heading)
+        {
+            const double turn = std::abs(std::remainder(heading-previous_heading, 2.0*M_PI));
+            if (turn > max_heading_step || turn / ((length+previous_length)*0.5) > max_curvature)
+                return false;
+        }
+        previous_heading = heading;
+        previous_length = length;
+        have_heading = true;
+    }
+    return true;
+}
+
 PlanResult PathPlanner::Plan(
     const Grid& map, const Grid& cost_map, const Pose& start_pose, const Pose& goal_pose,
     const PlanOptions& options, const std::vector<Pose>& via_points)
@@ -517,7 +668,11 @@ PlanResult PathPlanner::Plan(
     try
     {
         const GridGeometry geometry(map);
-        if (!std::isfinite(options.escape_clear_radius) || options.escape_clear_radius < 0.0 ||
+        if (options.smoothing_retry_limit < 1 || options.smoothing_retry_limit > 64 ||
+            !std::isfinite(options.smoothing_time_budget_sec) || options.smoothing_time_budget_sec <= 0.0 ||
+            !std::isfinite(options.max_path_curvature) || options.max_path_curvature <= 0.0 ||
+            !std::isfinite(options.max_path_heading_step) || options.max_path_heading_step <= 0.0 ||
+            !std::isfinite(options.escape_clear_radius) || options.escape_clear_radius < 0.0 ||
             !std::isfinite(options.online_behind_clearance) || options.online_behind_clearance < 0.0 ||
             !std::isfinite(options.smooth_alpha) || options.smooth_alpha < 0.0 || options.smooth_alpha > 1.0 ||
             !std::isfinite(options.smooth_beta) || options.smooth_beta < 0.0 || options.smooth_beta > 1.0 ||
@@ -558,51 +713,11 @@ PlanResult PathPlanner::Plan(
         if (result.status == PlanStatus::Success || result.status == PlanStatus::InvalidInput)
             return result;
 
-        bool used_escape = false;
-        if (options.escape_clear_radius > 0.0 && failed_segment == 0 &&
-            (result.status == PlanStatus::StartBlocked || result.status == PlanStatus::NoPath))
-        {
-            if (working == &map)
-                modified = map;
-            working = &modified;
-            int cx, cy;
-            geometry.worldToCell(start_pose.position.x, start_pose.position.y, cx, cy);
-            const int reach = static_cast<int>(std::min(
-                std::ceil(options.escape_clear_radius / geometry.resolution),
-                static_cast<double>(std::max(geometry.width, geometry.height))));
-            for (int gy = std::max(0, cy - reach); gy <= std::min(geometry.height - 1, cy + reach); ++gy)
-            {
-                for (int gx = std::max(0, cx - reach); gx <= std::min(geometry.width - 1, cx + reach); ++gx)
-                {
-                    const auto point = geometry.cellCenter(gx, gy);
-                    const size_t index = static_cast<size_t>(gy) * geometry.width + gx;
-                    if (std::hypot(point.x - start_pose.position.x, point.y - start_pose.position.y) >
-                            options.escape_clear_radius ||
-                        (options.disable_rear_path_plan && point.x < -options.online_behind_clearance))
-                        continue;
-                    // Preserve unknown cells and the configured rear boundary.
-                    if (modified.data[index] > 0)
-                        modified.data[index] = 0;
-                }
-            }
-            // Clear the occupied start cell even when its centre is beyond a tiny radius.
-            const size_t start = static_cast<size_t>(cy) * geometry.width + cx;
-            if (modified.data[start] > 0 &&
-                (!options.disable_rear_path_plan ||
-                 geometry.cellCenter(cx, cy).x >= -options.online_behind_clearance))
-                modified.data[start] = 0;
-            used_escape = true;
-            result = planSegments(*working, cost_map, start_pose, stops, options, 0.0, failed_segment);
-            result.used_escape = true;
-            if (result.status == PlanStatus::Success)
-                return result;
-        }
         if (options.goal_tolerance_m > 0.0 && failed_segment + 1 == stops.size() &&
             (result.status == PlanStatus::GoalBlocked || result.status == PlanStatus::NoPath))
         {
             result = planSegments(*working, cost_map, start_pose, stops, options,
                                   options.goal_tolerance_m, failed_segment);
-            result.used_escape = used_escape;
         }
         return result;
     }

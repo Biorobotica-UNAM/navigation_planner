@@ -11,6 +11,17 @@
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>rcl_interfaces</test_depend>
+  <test_depend>actionlib_msgs</test_depend>
+  <test_depend>geometry_msgs</test_depend>
+  <test_depend>nav_msgs</test_depend>
+  <test_depend>sensor_msgs</test_depend>
+  <test_depend>std_msgs</test_depend>
+  <test_depend>tf2_ros_py</test_depend>
+  <test_depend>simple_move</test_depend>
+  <test_depend>mvn_pln</test_depend>
+  <test_depend>potential_fields</test_depend>
 
   <exec_depend>launch</exec_depend>
 <exec_depend>launch_ros</exec_depend>

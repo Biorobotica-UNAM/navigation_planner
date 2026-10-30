@@ -55,7 +55,7 @@
 
   <!-- ===== Map Augmenter ===== -->
   <arg name="augmenter_cost_radius"                   default="0.90"/>
-  <arg name="dynamic_obstacle_inflation_radius"       default="0.25"/>
+  <arg name="dynamic_obstacle_inflation_radius"       default="0.15"/>
 
   <arg name="augmenter_use_online"                     default="false"/>
   <arg name="use_prohibition_map"                      default="true"/>
@@ -131,10 +131,56 @@
   <arg name="control_beta"                            default="0.6"/>
   <arg name="move_head"                               default="True"/>
 
+  <!-- ===== Coordinated motion (metres, radians, seconds) ===== -->
+  <arg name="motion_mode"                             default="omni"/>
+  <arg name="linear_acceleration"                     default="0.3"/>
+  <arg name="angular_acceleration"                    default="0.8"/>
+  <arg name="linear_jerk"                             default="1.5"/>
+  <arg name="angular_jerk"                            default="4.0"/>
+  <arg name="fine_dist_tolerance"                     default="0.03"/>
+  <arg name="angle_tolerance"                         default="0.05"/>
+  <arg name="lookahead_min_m"                         default="0.20"/>
+  <arg name="lookahead_max_m"                         default="0.60"/>
+  <arg name="lookahead_time_sec"                      default="0.6"/>
+  <arg name="initial_alignment_fraction"              default="0.10"/>
+  <arg name="final_alignment_fraction"                default="0.10"/>
+  <!-- Match the installed head controller limits; runtime move_head defaults to true. -->
+  <arg name="head_pan_min"                            default="-3.14"/>
+  <arg name="head_pan_max"                            default="1.74"/>
+  <arg name="head_tilt"                               default="-0.5"/>
+  <arg name="head_alignment_tolerance"                default="0.15"/>
+  <arg name="head_feedback_timeout_sec"               default="0.5"/>
+  <arg name="head_alignment_timeout_sec"              default="10.0"/>
+  <arg name="max_path_deviation_m"                    default="0.35"/>
+  <arg name="deviation_persistence_sec"               default="0.5"/>
+  <arg name="progress_timeout_sec"                    default="8.0"/>
+  <arg name="navigation_sensor_timeout_sec"           default="0.5"/>
+  <arg name="navigation_tf_timeout_sec"               default="0.5"/>
+
+  <!-- ===== Navigation coordination ===== -->
+  <arg name="plan_request_timeout_sec"                default="5.0"/>
+  <arg name="replan_period_sec"                       default="1.0"/>
+  <arg name="navigation_map_timeout_sec"              default="3.0"/>
+  <arg name="controller_timeout_sec"                  default="2.0"/>
+  <arg name="path_check_horizon_m"                    default="2.0"/>
+
+  <!-- ===== Strict path quality ===== -->
+  <arg name="require_smooth_path"                     default="true"/>
+  <arg name="smoothing_retry_limit"                   default="8"/>
+  <arg name="smoothing_time_budget_sec"               default="1.0"/>
+  <arg name="max_path_curvature"                      default="4.0"/>
+  <arg name="max_path_heading_step"                   default="0.35"/>
+
   <!-- ===== Potential Fields ===== -->
+  <arg name="collision_footprint_radius"              default="0.30"/>
+  <arg name="collision_reaction_time_sec"              default="0.10"/>
+  <arg name="collision_critical_margin"                default="0.02"/>
+  <arg name="collision_stop_margin"                   default="0.08"/>
+  <arg name="repulsion_max_speed"                     default="0.15"/>
+  <arg name="repulsion_filter_time_sec"               default="0.15"/>
   <arg name="pot_fields_debug"                        default="False"/>
   <arg name="show_image"                              default="False"/>
-  <arg name="laser_pot_fields_d0"                     default="0.35"/>
+  <arg name="laser_pot_fields_d0"                     default="0.75"/>
   <arg name="laser_pot_fields_k_rej"                  default="0.40"/>
   <arg name="cloud_pot_fields_d0"                     default="0.80"/>
   <arg name="cloud_pot_fields_k_rej"                  default="0.20"/>
@@ -293,12 +339,17 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
-    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="use_sim_time"                             value="$(var use_sim_time)"/>
     <param name="allow_unknown"                            value="$(var allow_unknown)"/>
     <param name="unknown_cost"                             value="$(var unknown_cost)"/>
     <param name="smooth_alpha"                             value="$(var smooth_alpha)"/>
     <param name="smooth_beta"                              value="$(var smooth_beta)"/>
     <param name="smooth_tolerance"                         value="$(var smooth_tolerance)"/>
+    <param name="require_smooth_path"                      value="$(var require_smooth_path)"/>
+    <param name="smoothing_retry_limit"                    value="$(var smoothing_retry_limit)"/>
+    <param name="smoothing_time_budget_sec"                value="$(var smoothing_time_budget_sec)"/>
+    <param name="max_path_curvature"                       value="$(var max_path_curvature)"/>
+    <param name="max_path_heading_step"                    value="$(var max_path_heading_step)"/>
     <param name="escape_clear_radius"                      value="$(var escape_clear_radius)"/>
     <param name="goal_relocation_radius"                   value="$(var goal_relocation_radius)"/>
     <param name="disable_rear_path_plan"                   value="$(var disable_rear_path_plan)"/>
@@ -306,8 +357,8 @@
     <param name="map_refresh_period_sec"                   value="$(var planner_map_refresh_period_sec)"/>
     <param name="map_request_timeout_sec"                  value="$(var planner_map_request_timeout_sec)"/>
     <param name="map_pair_retry_limit"                     value="$(var planner_map_pair_retry_limit)"/>
-    <param name="use_namespace"     value="$(var use_namespace)"/>
-    <param name="diagonal_paths"    value="$(var diagonal_paths)"/>
+    <param name="use_namespace"                            value="$(var use_namespace)"/>
+    <param name="diagonal_paths"                           value="$(var diagonal_paths)"/>
   </node>
 
   <!-- ================================================================== -->
@@ -328,6 +379,35 @@
     <param name="use_pot_fields"                value="$(var use_pot_fields)"/>
     <param name="base_link_name"                value="$(var base_link_name)"/>
     <remap from="/cmd_vel"                      to="$(var cmd_vel_topic)"/>
+    <param name="motion_mode"                   value="$(var motion_mode)"/>
+    <param name="linear_acceleration"           value="$(var linear_acceleration)"/>
+    <param name="angular_acceleration"          value="$(var angular_acceleration)"/>
+    <param name="linear_jerk"                   value="$(var linear_jerk)"/>
+    <param name="angular_jerk"                  value="$(var angular_jerk)"/>
+    <param name="fine_dist_tolerance"           value="$(var fine_dist_tolerance)"/>
+    <param name="angle_tolerance"               value="$(var angle_tolerance)"/>
+    <param name="lookahead_min_m"               value="$(var lookahead_min_m)"/>
+    <param name="lookahead_max_m"               value="$(var lookahead_max_m)"/>
+    <param name="lookahead_time_sec"            value="$(var lookahead_time_sec)"/>
+    <param name="initial_alignment_fraction"    value="$(var initial_alignment_fraction)"/>
+    <param name="final_alignment_fraction"      value="$(var final_alignment_fraction)"/>
+    <param name="head_pan_min"                  value="$(var head_pan_min)"/>
+    <param name="head_pan_max"                  value="$(var head_pan_max)"/>
+    <param name="head_tilt"                     value="$(var head_tilt)"/>
+    <param name="head_alignment_tolerance"      value="$(var head_alignment_tolerance)"/>
+    <param name="head_feedback_timeout_sec"     value="$(var head_feedback_timeout_sec)"/>
+    <param name="head_alignment_timeout_sec"    value="$(var head_alignment_timeout_sec)"/>
+    <param name="max_path_deviation_m"          value="$(var max_path_deviation_m)"/>
+    <param name="deviation_persistence_sec"     value="$(var deviation_persistence_sec)"/>
+    <param name="progress_timeout_sec"          value="$(var progress_timeout_sec)"/>
+    <param name="repulsion_max_speed"           value="$(var repulsion_max_speed)"/>
+    <param name="sensor_timeout_sec"            value="$(var navigation_sensor_timeout_sec)"/>
+    <param name="tf_timeout_sec"                value="$(var navigation_tf_timeout_sec)"/>
+    <param name="map_timeout_sec"               value="$(var navigation_map_timeout_sec)"/>
+    <remap from="/hardware/head/goal_pose"             to="/$(var namespace_hardware)/head/goal_pose"/>
+    <remap from="/hardware/head/current_pose"          to="/$(var namespace_hardware)/head/current_pose"/>
+    <param name="use_sim_time"                  value="$(var use_sim_time)"/>
+    <param name="collision_reaction_time_sec"   value="$(var collision_reaction_time_sec)"/>
   </node>
 
   <!-- ================================================================== -->
@@ -371,6 +451,20 @@
     <param name="point_cloud_topic"             value="$(var point_cloud_topic)"/>
     <param name="laser_scan_topic"              value="$(var laser_scan_topic)"/>
     <remap from="/cmd_vel"                      to="$(var cmd_vel_topic)"/>
+    <param name="base_link_name"                value="$(var base_link_name)"/>
+    <param name="collision_footprint_radius"    value="$(var collision_footprint_radius)"/>
+    <param name="collision_stop_margin"         value="$(var collision_stop_margin)"/>
+    <param name="repulsion_max_speed"           value="$(var repulsion_max_speed)"/>
+    <param name="repulsion_filter_time_sec"     value="$(var repulsion_filter_time_sec)"/>
+    <param name="collision_deceleration"        value="$(var linear_acceleration)"/>
+    <param name="no_sensor_data_timeout"        value="$(var navigation_sensor_timeout_sec)"/>
+    <param name="use_sim_time"                  value="$(var use_sim_time)"/>
+    <param name="sensor_future_tolerance_sec"   value="$(var sensor_future_tolerance_sec)"/>
+    <param name="tf_timeout_sec"                value="$(var detector_tf_timeout_sec)"/>
+    <param name="tf_allow_latest_fallback"      value="$(var tf_allow_latest_fallback)"/>
+    <param name="tf_fallback_max_age_sec"       value="$(var tf_fallback_max_age_sec)"/>
+    <param name="collision_reaction_time_sec"   value="$(var collision_reaction_time_sec)"/>
+    <param name="collision_critical_margin"     value="$(var collision_critical_margin)"/>
   </node>
 
   <node name="publish_enable"
@@ -393,10 +487,19 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
-    <param name="use_namespace"  value="$(var use_namespace)"/>
-    <param name="patience"       value="$(var mvn_pln_patience)"/>
-    <param name="base_link_name" value="$(var base_link_name)"/>
+    <param name="use_namespace"            value="$(var use_namespace)"/>
+    <param name="patience"                 value="$(var mvn_pln_patience)"/>
+    <param name="base_link_name"           value="$(var base_link_name)"/>
     <remap from="nav_control/goal" to="move_base_simple/goal"/>
+    <param name="plan_request_timeout_sec" value="$(var plan_request_timeout_sec)"/>
+    <param name="replan_period_sec"        value="$(var replan_period_sec)"/>
+    <param name="controller_timeout_sec"   value="$(var controller_timeout_sec)"/>
+    <param name="path_check_horizon_m"     value="$(var path_check_horizon_m)"/>
+    <param name="goal_position_tolerance_m" value="$(var fine_dist_tolerance)"/>
+    <param name="goal_angle_tolerance_rad" value="$(var angle_tolerance)"/>
+    <param name="tf_timeout_sec"           value="$(var navigation_tf_timeout_sec)"/>
+    <param name="map_timeout_sec"          value="$(var navigation_map_timeout_sec)"/>
+    <param name="use_sim_time"             value="$(var use_sim_time)"/>
   </node>
 
 

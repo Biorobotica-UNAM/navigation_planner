@@ -63,6 +63,11 @@ public:
         declare_parameter<double>("smooth_alpha", 0.1);
         declare_parameter<double>("smooth_beta", 0.9);
         declare_parameter<double>("smooth_tolerance", 0.00001);
+        declare_parameter<bool>("require_smooth_path", true);
+        declare_parameter<int>("smoothing_retry_limit", 8);
+        declare_parameter<double>("smoothing_time_budget_sec", 1.0);
+        declare_parameter<double>("max_path_curvature", 4.0);
+        declare_parameter<double>("max_path_heading_step", 0.35);
         declare_parameter<double>("escape_clear_radius", 0.6);
         declare_parameter<double>("goal_relocation_radius", 1.0);
         declare_parameter<bool>("disable_rear_path_plan", false);
@@ -75,7 +80,11 @@ public:
 
         // Validate overrides before advertising services.
         const auto initial = readOptions();
-        if (!std::isfinite(initial.unknown_cost) || initial.unknown_cost < 0.0 ||
+        if (initial.smoothing_retry_limit < 1 || initial.smoothing_retry_limit > 64 ||
+            !std::isfinite(initial.smoothing_time_budget_sec) || initial.smoothing_time_budget_sec <= 0.0 ||
+            !std::isfinite(initial.max_path_curvature) || initial.max_path_curvature <= 0.0 ||
+            !std::isfinite(initial.max_path_heading_step) || initial.max_path_heading_step <= 0.0 ||
+            !std::isfinite(initial.unknown_cost) || initial.unknown_cost < 0.0 ||
             !std::isfinite(initial.smooth_alpha) || initial.smooth_alpha < 0.0 || initial.smooth_alpha > 1.0 ||
             !std::isfinite(initial.smooth_beta) || initial.smooth_beta < 0.0 || initial.smooth_beta > 1.0 ||
             !std::isfinite(initial.smooth_tolerance) || initial.smooth_tolerance < 1e-12 ||
@@ -135,6 +144,11 @@ private:
         options.smooth_alpha = get_parameter("smooth_alpha").as_double();
         options.smooth_beta = get_parameter("smooth_beta").as_double();
         options.smooth_tolerance = get_parameter("smooth_tolerance").as_double();
+        options.require_smooth_path = get_parameter("require_smooth_path").as_bool();
+        options.smoothing_retry_limit = get_parameter("smoothing_retry_limit").as_int();
+        options.smoothing_time_budget_sec = get_parameter("smoothing_time_budget_sec").as_double();
+        options.max_path_curvature = get_parameter("max_path_curvature").as_double();
+        options.max_path_heading_step = get_parameter("max_path_heading_step").as_double();
         options.escape_clear_radius = get_parameter("escape_clear_radius").as_double();
         options.goal_tolerance_m = get_parameter("goal_relocation_radius").as_double();
         options.disable_rear_path_plan = get_parameter("disable_rear_path_plan").as_bool();
@@ -159,12 +173,21 @@ private:
                 else if (name == "smooth_alpha") candidate.smooth_alpha = parameter.as_double();
                 else if (name == "smooth_beta") candidate.smooth_beta = parameter.as_double();
                 else if (name == "smooth_tolerance") candidate.smooth_tolerance = parameter.as_double();
+                else if (name == "require_smooth_path") candidate.require_smooth_path = parameter.as_bool();
+                else if (name == "smoothing_retry_limit") candidate.smoothing_retry_limit = parameter.as_int();
+                else if (name == "smoothing_time_budget_sec") candidate.smoothing_time_budget_sec = parameter.as_double();
+                else if (name == "max_path_curvature") candidate.max_path_curvature = parameter.as_double();
+                else if (name == "max_path_heading_step") candidate.max_path_heading_step = parameter.as_double();
                 else if (name == "escape_clear_radius") candidate.escape_clear_radius = parameter.as_double();
                 else if (name == "goal_relocation_radius") candidate.goal_tolerance_m = parameter.as_double();
                 else if (name == "disable_rear_path_plan") candidate.disable_rear_path_plan = parameter.as_bool();
                 else if (name == "online_behind_clearance") candidate.online_behind_clearance = parameter.as_double();
             }
-            if (!std::isfinite(candidate.unknown_cost) || candidate.unknown_cost < 0.0 ||
+            if (candidate.smoothing_retry_limit < 1 || candidate.smoothing_retry_limit > 64 ||
+            !std::isfinite(candidate.smoothing_time_budget_sec) || candidate.smoothing_time_budget_sec <= 0.0 ||
+            !std::isfinite(candidate.max_path_curvature) || candidate.max_path_curvature <= 0.0 ||
+            !std::isfinite(candidate.max_path_heading_step) || candidate.max_path_heading_step <= 0.0 ||
+            !std::isfinite(candidate.unknown_cost) || candidate.unknown_cost < 0.0 ||
                 !std::isfinite(candidate.smooth_alpha) || candidate.smooth_alpha < 0.0 || candidate.smooth_alpha > 1.0 ||
                 !std::isfinite(candidate.smooth_beta) || candidate.smooth_beta < 0.0 || candidate.smooth_beta > 1.0 ||
                 !std::isfinite(candidate.smooth_tolerance) || candidate.smooth_tolerance < 1e-12 ||
@@ -343,7 +366,8 @@ private:
                                         request->start.pose, request->goal.pose, options);
         if (result.status != PlanStatus::Success)
         {
-            RCLCPP_WARN(get_logger(), "Planning failed with status %d.", static_cast<int>(result.status));
+            RCLCPP_WARN(get_logger(), "Planning failed with status %d%s.", static_cast<int>(result.status),
+                        result.status == PlanStatus::NoSmoothPath ? ": no collision-free path meets smoothness limits" : "");
             return;
         }
         response->plan = std::move(result.path);

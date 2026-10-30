@@ -1,1165 +1,737 @@
-#include "rclcpp/rclcpp.hpp"
-#include "rcl_interfaces/msg/set_parameters_result.hpp"
+// ----- ROS 2 -----
+#include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 
-// Message types
-#include "geometry_msgs/msg/pose2_d.hpp"
-#include "geometry_msgs/msg/twist.hpp"
-#include "geometry_msgs/msg/vector3.hpp"
-#include "nav_msgs/msg/path.hpp"
-#include "std_msgs/msg/float32.hpp"
-#include "std_msgs/msg/float32_multi_array.hpp"
-#include "std_msgs/msg/float64_multi_array.hpp"
-#include "std_msgs/msg/bool.hpp"
-#include "std_msgs/msg/empty.hpp"
-#include "actionlib_msgs/msg/goal_status.hpp"
+// ----- ROS 2 messages -----
+#include <actionlib_msgs/msg/goal_status.hpp>
+#include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/vector3.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/empty.hpp>
+#include <std_msgs/msg/float32.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
-// TF2 (Transform listener)
-#include "tf2_ros/transform_listener.h"
-#include "tf2_ros/buffer.h"
-#include "tf2/exceptions.h"
-#include "geometry_msgs/msg/transform_stamped.hpp"
-
-// Action messages (used less directly in ROS 2; here for compatibility)
-#include "action_msgs/msg/goal_status.hpp"
-
-// Standard
-#include <iostream>
-#include <vector>
-#include <exception>
+// ----- C++ standard library -----
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
-#include <sstream>
+#include <limits>
+#include <functional>
+#include <memory>
+#include <stdexcept>
+#include <utility>
 #include <string>
-///
-
-#define RATE 30
-
-enum class SM_STATE{
-    INIT,
-    WAITING_FOR_TASK,
-    GOAL_POSE_ACCEL,
-    GOAL_POSE_CRUISE,
-    GOAL_POSE_DECCEL,
-    GOAL_POSE_CORRECT_ANGLE,
-    GOAL_POSE_FINISH,
-    GOAL_POSE_FAILED,
-    GOAL_PATH_ACCEL,
-    GOAL_PATH_CRUISE,
-    GOAL_PATH_DECCEL,
-    GOAL_PATH_FINISH,
-    GOAL_PATH_FAILED,
-    COLLISION_RISK,
-};
-
+#include <vector>
 
 class SimpleMoveNode : public rclcpp::Node
 {
+  using Path = nav_msgs::msg::Path;
+  using Status = actionlib_msgs::msg::GoalStatus;
+  using Clock = std::chrono::steady_clock;
+
 public:
-    SimpleMoveNode() : Node("simple_move_node"), tf_buffer_(this->get_clock()), tf_listener_(tf_buffer_)
-    {
-        //############
-        // Declare parameters with default values
-        this->declare_parameter<bool>("use_namespace",          false);
-        this->declare_parameter<float>("max_linear_speed",      0.3f);
-        this->declare_parameter<float>("min_linear_speed",      0.05f);
-        this->declare_parameter<float>("max_angular_speed",     1.0f);
-        this->declare_parameter<float>("final_angle_max_angular_speed", 0.35f);
-        this->declare_parameter<float>("control_alpha",         0.6548f);
-        this->declare_parameter<float>("control_beta",          0.2f);
-        this->declare_parameter<float>("linear_acceleration",   0.1f);
-        this->declare_parameter<float>("fine_dist_tolerance",   0.03f);
-        this->declare_parameter<float>("coarse_dist_tolerance", 0.2f);
-        this->declare_parameter<float>("angle_tolerance",       0.05f);
-
-        this->declare_parameter<bool>("move_head", true);
-        this->declare_parameter<bool>("use_pot_fields", false);
-        // Disabled by default: immediate abort/replan is smoother than
-        // rotating in place when collision_risk flickers near obstacles.
-        this->declare_parameter<bool>("allow_rotation_on_collision", false);
-        this->declare_parameter<float>("rotation_collision_angle_threshold", 0.35f);
-        this->declare_parameter<float>("rotation_collision_angular_speed", 0.45f);
-        this->declare_parameter<std::string>("base_link_name", "base_footprint");
-        this->declare_parameter<std::string>("odom_name", "odom");
-
-        // Initialize internal variables from declared parameters
-        this->get_parameter("use_namespace",         use_namespace_);
-        this->get_parameter("max_linear_speed",      max_linear_speed_);
-        this->get_parameter("min_linear_speed",      min_linear_speed_);
-        this->get_parameter("max_angular_speed",     max_angular_speed_);
-        this->get_parameter("final_angle_max_angular_speed", final_angle_max_angular_speed_);
-        final_angle_max_angular_speed_ = std::max(0.05f, final_angle_max_angular_speed_);
-        this->get_parameter("control_alpha",         alpha_);
-        this->get_parameter("control_beta",          beta_);
-        this->get_parameter("linear_acceleration",   linear_acceleration_);
-        linear_acceleration_ = std::max(0.01f, linear_acceleration_);
-        this->get_parameter("fine_dist_tolerance",   fine_dist_tolerance_);
-        this->get_parameter("coarse_dist_tolerance", coarse_dist_tolerance_);
-        this->get_parameter("angle_tolerance",       angle_tolerance_);
-
-        this->get_parameter("move_head",             move_head_);
-        this->get_parameter("use_pot_fields",        use_pot_fields_);
-        this->get_parameter("allow_rotation_on_collision", allow_rotation_on_collision_);
-        this->get_parameter("rotation_collision_angle_threshold", rotation_collision_angle_threshold_);
-        this->get_parameter("rotation_collision_angular_speed", rotation_collision_angular_speed_);
-        this->get_parameter("base_link_name",        base_link_name_);
-        this->get_parameter("odom_name",             odom_name_);
-
-        // Setup parameter change callback
-        param_callback_handle_ = this->add_on_set_parameters_callback(
-            std::bind(&SimpleMoveNode::on_parameter_change, this, std::placeholders::_1));
-
-        //############
-        // Publishers
-        pub_cmd_vel_        = this->create_publisher<geometry_msgs::msg::Twist>(
-            "/cmd_vel", 
-            rclcpp::QoS(10).transient_local());
-        pub_goal_reached_   = this->create_publisher<actionlib_msgs::msg::GoalStatus>(
-            make_name("/simple_move/goal_reached"), 
-            rclcpp::QoS(10).transient_local());
-        pub_head_goal_pose_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
-            "/hardware/head/goal_pose", 
-            rclcpp::QoS(10).durability_volatile());
-
-        //############
-        // Subscribers
-        //// stop
-        sub_generalStop_ = this->create_subscription<std_msgs::msg::Empty>(
-            make_name("/stop"), 
-            rclcpp::SensorDataQoS(), 
-            std::bind(&SimpleMoveNode::callback_general_stop, this, std::placeholders::_1));
-
-        sub_navCtrlStop_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/navigation_ctrl/stop"), 
-            rclcpp::SensorDataQoS(), 
-            std::bind(&SimpleMoveNode::callback_navigation_stop, this, std::placeholders::_1));
-
-        sub_navSimpleMvStop_ = this->create_subscription<std_msgs::msg::Empty>(
-            make_name("/simple_move/stop"), 
-            rclcpp::SensorDataQoS(), 
-            std::bind(&SimpleMoveNode::callback_simple_move_stop, this, std::placeholders::_1));
-
-        //// goal
-        sub_goalDistance_ = this->create_subscription<std_msgs::msg::Float32>(
-            make_name("/simple_move/goal_dist"), 
-            rclcpp::SensorDataQoS(), 
-            std::bind(&SimpleMoveNode::callback_goal_dist, this, std::placeholders::_1));
-        
-        sub_goalDistAngle_ = this->create_subscription<std_msgs::msg::Float32MultiArray>(
-            make_name("/simple_move/goal_dist_angle"), 
-            rclcpp::SensorDataQoS(), 
-            std::bind(&SimpleMoveNode::callback_goal_dist_angle, this, std::placeholders::_1));
-
-        sub_goalPath_ = this->create_subscription<nav_msgs::msg::Path>(
-            make_name("/simple_move/goal_path"), 
-            rclcpp::SensorDataQoS(), 
-            std::bind(&SimpleMoveNode::callback_goal_path, this, std::placeholders::_1));
-
-        //// motion
-        sub_moveLateral_ = this->create_subscription<std_msgs::msg::Float32>(
-            make_name("/simple_move/goal_dist_lateral"), 
-            rclcpp::SensorDataQoS(), 
-            std::bind(&SimpleMoveNode::callback_move_lateral, this, std::placeholders::_1));
-            
-        sub_collisionRisk_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/potential_fields/collision_risk"), 
-            rclcpp::SensorDataQoS(), 
-            std::bind(&SimpleMoveNode::callback_collision_risk, this, std::placeholders::_1));
-
-        sub_moveHeadBypass_ = this->create_subscription<std_msgs::msg::Bool>(
-            make_name("/camera_obstacles/bypass"),
-            rclcpp::SensorDataQoS(),
-            std::bind(&SimpleMoveNode::callback_move_head_bypass, this, std::placeholders::_1));
-
-        sub_rejectionForce_ = this->create_subscription<geometry_msgs::msg::Vector3>(
-            make_name("/potential_fields/pf_rejection_force"), 
-            rclcpp::SensorDataQoS(), 
-            std::bind(&SimpleMoveNode::callback_rejection_force, this, std::placeholders::_1));
-
-        sub_bypass_ = this->create_subscription<std_msgs::msg::Bool>(
-        "/navigation/camera_obstacles/bypass", rclcpp::QoS(10),
-        [this](const std_msgs::msg::Bool::SharedPtr msg) { this->camera_bypass_ = msg->data; });
-        
-        //############
-        // Wait for transforms
-        wait_for_transforms("map", base_link_name_);
-        wait_for_transforms(odom_name_, base_link_name_);
-
-        // Simple Move main processing
-        processing_timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(30),
-            std::bind(&SimpleMoveNode::simple_move_processing, this));
-
-        RCLCPP_INFO(this->get_logger(), "SimpleMove.-> SimpleMoveNode is ready.");
+  SimpleMoveNode()
+  : Node("simple_move_node"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
+  {
+    rcl_interfaces::msg::ParameterDescriptor startup;
+    startup.read_only = true;
+    startup.description = "Configured at startup.";
+    const bool namespaced = declare_parameter<bool>("use_namespace", false, startup);
+    base_frame_ = declare_parameter<std::string>("base_link_name", "base_link", startup);
+    odom_frame_ = declare_parameter<std::string>("odom_name", "odom", startup);
+    declare_parameter<std::string>("motion_mode", "omni");
+    declare_parameter<bool>("move_head", true);
+    declare_parameter<bool>("use_pot_fields", false);
+    // Existing launch arguments remain accepted for relative-motion clients.
+    declare_parameter<double>("control_alpha", 0.6548, startup);
+    declare_parameter<double>("control_beta", 0.2, startup);
+    const std::vector<std::pair<std::string, double>> settings = {
+      {"max_linear_speed", 0.3}, {"min_linear_speed", 0.05},
+      {"max_angular_speed", 1.0}, {"final_angle_max_angular_speed", 0.35},
+      {"linear_acceleration", 0.3}, {"angular_acceleration", 0.8},
+      {"linear_jerk", 1.5}, {"angular_jerk", 4.0},
+      {"fine_dist_tolerance", 0.03}, {"coarse_dist_tolerance", 0.2},
+      {"angle_tolerance", 0.05}, {"lookahead_min_m", 0.20},
+      {"lookahead_max_m", 0.60}, {"lookahead_time_sec", 0.6},
+      {"initial_alignment_fraction", 0.10}, {"final_alignment_fraction", 0.10},
+      {"head_pan_min", -3.14}, {"head_pan_max", 1.74}, {"head_tilt", -0.5},
+      {"head_alignment_tolerance", 0.15}, {"head_feedback_timeout_sec", 0.5},
+      {"head_alignment_timeout_sec", 10.0}, {"sensor_timeout_sec", 0.5},
+      {"map_timeout_sec", 3.0}, {"tf_timeout_sec", 0.5}, {"max_path_deviation_m", 0.35},
+      {"deviation_persistence_sec", 0.5}, {"progress_timeout_sec", 8.0},
+      {"collision_reaction_time_sec", 0.10}, {"repulsion_max_speed", 0.15}};
+    for (const auto & setting : settings) {
+      rcl_interfaces::msg::ParameterDescriptor descriptor;
+      descriptor.description =
+        "Navigation control setting; distances in metres, angles in radians, times in seconds.";
+      declare_parameter<double>(setting.first, setting.second, descriptor);
     }
-
-private:
-    //############
-    // State variables
-    bool use_namespace_   = false;
-    float goal_distance_  = 0;
-    float goal_angle_     = 0;
-    bool  new_pose_       = false;
-    bool  new_path_       = false;
-    bool  collision_risk_ = false;
-    bool  move_lat_       = false;
-    bool  stop_           = false;
-
-    float robot_x_ = 0;
-    float robot_y_ = 0;
-    float robot_t_ = 0;
-    float goal_x_ = 0;
-    float goal_y_ = 0;
-    float goal_t_ = 0;
-    float global_goal_x_ = 0;
-    float global_goal_y_ = 0;
-
-    tf2_ros::Buffer tf_buffer_;
-    tf2_ros::TransformListener tf_listener_;
-
-    nav_msgs::msg::Path           goal_path_;
-    geometry_msgs::msg::Vector3   rejection_force_;
-
-    // Internal parameter values
-    float max_linear_speed_;
-    float min_linear_speed_;
-    float max_angular_speed_;
-    float final_angle_max_angular_speed_;
-    float alpha_;
-    float beta_;
-    float linear_acceleration_;
-    float fine_dist_tolerance_;
-    float coarse_dist_tolerance_;
-    float angle_tolerance_;
-
-    bool move_head_;
-    bool use_pot_fields_;
-    bool allow_rotation_on_collision_;
-    float rotation_collision_angle_threshold_;
-    float rotation_collision_angular_speed_;
-    std::string base_link_name_;
-    std::string odom_name_;
-
-    // Simple Move processing variables
-    actionlib_msgs::msg::GoalStatus msg_goal_reached;
-
-    SM_STATE state = SM_STATE::INIT;
-    float current_linear_speed = 0;
-    size_t prev_pose_idx = 0;
-    size_t next_pose_idx = 0;
-    float temp_k = 0;
-    int attempts = 0;
-    float global_error = 0;
-
-    bool camera_bypass_ = false;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_bypass_;
-
-
-    //############
-    // Publishers
-    rclcpp::Publisher<actionlib_msgs::msg::GoalStatus>::SharedPtr   pub_goal_reached_;
-    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr         pub_cmd_vel_;
-    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr  pub_head_goal_pose_;
-
-    //############
-    // Subscribers
-    //// stop
-    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_generalStop_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_navCtrlStop_;
-    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr sub_navSimpleMvStop_;
-
-    //// goal
-    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sub_goalDistance_;
-    rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr sub_goalDistAngle_;
-    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr sub_goalPath_;
-
-    //// motion
-    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sub_moveLateral_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_collisionRisk_;
-    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_moveHeadBypass_;
-    rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr sub_rejectionForce_;
-
-    //############
-    // Parameter callback handle
-    OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
-
-    // Main processing loop
-    rclcpp::TimerBase::SharedPtr processing_timer_;
-
-    //############
-    // Runtime parameter update callback
-    rcl_interfaces::msg::SetParametersResult on_parameter_change(
-        const std::vector<rclcpp::Parameter> &params)
-    {
+    const auto validate = [this](const std::vector<rclcpp::Parameter> & changes) {
         rcl_interfaces::msg::SetParametersResult result;
         result.successful = true;
-
-        for (const auto &param : params)
-        {
-            if (param.get_name()      == "use_namespace")         use_namespace_           = param.as_bool();
-            else if (param.get_name() == "max_linear_speed")      max_linear_speed_        = param.as_double();
-            else if (param.get_name() == "min_linear_speed")      min_linear_speed_        = param.as_double();
-            else if (param.get_name() == "max_angular_speed")     max_angular_speed_       = param.as_double();
-            else if (param.get_name() == "final_angle_max_angular_speed") final_angle_max_angular_speed_ = std::max(0.05, param.as_double());
-            else if (param.get_name() == "control_alpha")         alpha_                   = param.as_double();
-            else if (param.get_name() == "control_beta")          beta_                    = param.as_double();
-            else if (param.get_name() == "linear_acceleration")   linear_acceleration_     = std::max(0.01, param.as_double());
-            else if (param.get_name() == "fine_dist_tolerance")   fine_dist_tolerance_     = param.as_double();
-            else if (param.get_name() == "coarse_dist_tolerance") coarse_dist_tolerance_   = param.as_double();
-            else if (param.get_name() == "angle_tolerance")       angle_tolerance_         = param.as_double();
-
-            else if (param.get_name() == "move_head")             move_head_               = param.as_bool();
-            else if (param.get_name() == "use_pot_fields")        use_pot_fields_          = param.as_bool();
-            else if (param.get_name() == "allow_rotation_on_collision") allow_rotation_on_collision_ = param.as_bool();
-            else if (param.get_name() == "rotation_collision_angle_threshold") rotation_collision_angle_threshold_ = param.as_double();
-            else if (param.get_name() == "rotation_collision_angular_speed") rotation_collision_angular_speed_ = param.as_double();
-            else if (param.get_name() == "base_link_name")        base_link_name_          = param.as_string();
-            else if (param.get_name() == "odom_name")             odom_name_               = param.as_string();
-
-            else {
-                result.successful = false;
-                result.reason = "SimpleMove.-> Unsupported parameter: " + param.get_name();
-                RCLCPP_WARN(this->get_logger(), "SimpleMove.-> Attempted to update unsupported parameter: %s", param.get_name().c_str());
-                break;
+        try {
+          for (const auto & p : changes) {
+            if (p.get_name() == "motion_mode") {
+              if (p.as_string() != "omni" && p.as_string() != "differential") {
+                throw std::invalid_argument("motion_mode must be omni or differential");
+              }
+            } else if (p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+              if (!std::isfinite(p.as_double()) ||
+                (p.get_name() != "head_pan_min" && p.get_name() != "head_tilt" &&
+                p.as_double() <= 0.0))
+              {
+                throw std::invalid_argument("Control limits must be finite and positive");
+              }
             }
+          }
+          const auto value = [this, &changes](const std::string & name) {
+              for (const auto & p : changes) {if (p.get_name() == name) {return p.as_double();}}
+              return get_parameter(name).as_double();
+            };
+          if (value("head_pan_min") >= value("head_pan_max") ||
+            value("head_pan_min") > 0.0 || value("head_pan_max") < 0.0 ||
+            value("lookahead_min_m") > value("lookahead_max_m") ||
+            value("min_linear_speed") > value("max_linear_speed") ||
+            value("initial_alignment_fraction") > 0.5 || value("final_alignment_fraction") > 0.5)
+          {
+            throw std::invalid_argument("Inconsistent control limits");
+          }
+        } catch (const std::exception & error) {
+          result.successful = false;
+          result.reason = error.what();
         }
-
+        // Read committed parameters in the timer; rejected batches never mutate control state.
         return result;
-    }
-
-    std::string make_name(const std::string &suffix) const
-    {
-        // Ensure suffix starts with "/"
-        std::string sfx = suffix;
-        if (!sfx.empty() && sfx.front() != '/')
-            sfx = "/" + sfx;
-
-        std::string name;
-
-        if (use_namespace_) {
-            // Use node namespace prefix
-            name = this->get_namespace() + sfx;
-
-            // Avoid accidental double slash (e.g., when namespace is "/")
-            if (name.size() > 1 && name[0] == '/' && name[1] == '/')
-                name.erase(0, 1);
-        } else {
-            // Use global namespace (no node namespace prefix)
-            name = sfx;
+      };
+    parameter_callback_ = add_on_set_parameters_callback(validate);
+    std::vector<rclcpp::Parameter> initial;
+    for (const auto & setting : settings) {initial.push_back(get_parameter(setting.first));}
+    initial.push_back(get_parameter("motion_mode"));
+    initial.push_back(get_parameter("control_alpha"));
+    initial.push_back(get_parameter("control_beta"));
+    const auto validation = validate(initial);
+    if (!validation.successful) {throw std::invalid_argument(validation.reason);}
+    std::string prefix = namespaced ? get_namespace() : "";
+    if (prefix == "/") {prefix.clear();}
+    const auto control = prefix + "/simple_move/";
+    cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+    fields_enable_pub_ = create_publisher<std_msgs::msg::Bool>(
+      prefix + "/potential_fields/enable",
+      10);
+    status_pub_ = create_publisher<Status>(
+      control + "goal_reached", rclcpp::QoS(
+        10).transient_local());
+    head_pub_ = create_publisher<std_msgs::msg::Float64MultiArray>("/hardware/head/goal_pose", 10);
+    intent_pub_ = create_publisher<geometry_msgs::msg::Vector3>(control + "motion_direction", 10);
+    map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>(
+      prefix + "/augmented_map", rclcpp::QoS(1).transient_local(),
+      [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr grid) {
+        const auto & q = grid->info.origin.orientation;
+        const double norm = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+        if (grid->header.frame_id == "map" && grid->info.width > 0 && grid->info.height > 0 &&
+        std::isfinite(grid->info.resolution) && grid->info.resolution > 0.0 &&
+        std::isfinite(grid->info.origin.position.x) &&
+        std::isfinite(grid->info.origin.position.y) &&
+        std::isfinite(norm) && std::abs(norm - 1.0) < 1e-5 && std::abs(q.x) < 1e-8 &&
+        std::abs(q.y) < 1e-8 &&
+        static_cast<uint64_t>(grid->info.width) * grid->info.height == grid->data.size())
+        {
+          map_ = grid;map_received_ = Clock::now();
         }
-
-        return name;
-    }
-
-    // Wait for transforms 
-    void wait_for_transforms(const std::string &target_frame, const std::string &source_frame)
-    {
-        RCLCPP_INFO(this->get_logger(),
-                    "SimpleMove.-> Waiting for transform from '%s' to '%s'...", source_frame.c_str(), target_frame.c_str());
-
-        rclcpp::Time start_time = this->now();
-        rclcpp::Duration timeout = rclcpp::Duration::from_seconds(10.0); 
-
-        bool transform_ok = false;
-
-        while (rclcpp::ok() && (this->now() - start_time) < timeout) {
-            try {
-                tf_buffer_.lookupTransform(
-                    target_frame,
-                    source_frame,
-                    tf2::TimePointZero,
-                    tf2::durationFromSec(0.1)
-                );
-                transform_ok = true;
-                break;
-            } catch (const tf2::TransformException& ex) {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                                    "SimpleMove.-> Still waiting for transform: %s", ex.what());
+      });
+    path_sub_ = create_subscription<Path>(
+      control + "goal_path", 10,
+      [this](Path::ConstSharedPtr path) {start_motion(*path, false);});
+    head_sub_ = create_subscription<std_msgs::msg::Float64MultiArray>(
+      "/hardware/head/current_pose", rclcpp::SensorDataQoS(),
+      [this](std_msgs::msg::Float64MultiArray::ConstSharedPtr msg) {
+        if (msg->data.size() >= 2 && std::isfinite(msg->data[0])) {
+          head_pan_ = msg->data[0]; head_received_ = Clock::now();
+        }
+      });
+    speed_limit_sub_ = create_subscription<std_msgs::msg::Float32>(
+      prefix + "/potential_fields/speed_limit", rclcpp::SensorDataQoS(),
+      [this](std_msgs::msg::Float32::ConstSharedPtr message) {
+        if (!std::isnan(message->data) && message->data >= 0.0f) {
+          obstacle_speed_limit_ = message->data;speed_limit_received_ = Clock::now();
+        }
+      });
+    ready_sub_ = create_subscription<std_msgs::msg::Bool>(
+      prefix + "/potential_fields/ready", rclcpp::SensorDataQoS(),
+      [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
+        fields_ready_ = msg->data;ready_received_ = Clock::now();
+      });
+    risk_sub_ = create_subscription<std_msgs::msg::Bool>(
+      prefix + "/potential_fields/collision_risk",
+      rclcpp::SensorDataQoS(), [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
+        collision_ = msg->data; risk_received_ = Clock::now();
+      });
+    force_sub_ = create_subscription<geometry_msgs::msg::Vector3>(
+      prefix + "/potential_fields/pf_rejection_force",
+      rclcpp::SensorDataQoS(), [this](geometry_msgs::msg::Vector3::ConstSharedPtr msg) {
+        if (std::isfinite(msg->x) && std::isfinite(msg->y)) {
+          force_ = *msg; force_received_ = Clock::now();
+        }
+      });
+    bypass_sub_ = create_subscription<std_msgs::msg::Bool>(
+      prefix + "/camera_obstacles/bypass", 10,
+      [this](std_msgs::msg::Bool::ConstSharedPtr msg) {head_bypass_ = msg->data;});
+    for (const auto & topic : {prefix + "/stop", prefix + "/navigation/stop", control + "stop"}) {
+      stop_subs_.push_back(
+        create_subscription<std_msgs::msg::Empty>(
+          topic, 10,
+          [this](std_msgs::msg::Empty::ConstSharedPtr) {
+            if (active_) {
+              finish(Status::ABORTED, "stop_received");
             }
-
-            rclcpp::sleep_for(std::chrono::milliseconds(200));
+          }));
+    }
+    nav_stop_sub_ = create_subscription<std_msgs::msg::Bool>(
+      prefix + "/navigation_ctrl/stop", 10,
+      [this](std_msgs::msg::Bool::ConstSharedPtr msg) {
+        if (msg->data && active_) {
+          finish(Status::ABORTED, "stop_received");
         }
+      });
+    for (const auto & topic : {"goal_dist", "goal_dist_lateral"}) {
+      distance_subs_.push_back(
+        create_subscription<std_msgs::msg::Float32>(
+          control + topic, 10,
+          [this, topic](std_msgs::msg::Float32::ConstSharedPtr msg) {
+            start_relative(msg->data, 0.0, std::string(topic) == "goal_dist_lateral");
+          }));
+    }
+    relative_sub_ = create_subscription<std_msgs::msg::Float32MultiArray>(
+      control + "goal_dist_angle", 10,
+      [this](std_msgs::msg::Float32MultiArray::ConstSharedPtr msg) {
+        if (msg->data.size() == 2) {start_relative(msg->data[0], msg->data[1], false);}
+      });
+    timer_ =
+      create_wall_timer(
+      std::chrono::milliseconds(30),
+      std::bind(&SimpleMoveNode::process_motion, this));
+  }
 
-        if (!transform_ok) {
-            RCLCPP_WARN(this->get_logger(),
-                        "SimpleMove.-> Timeout while waiting for transform from '%s' to '%s'.",
-                        source_frame.c_str(), target_frame.c_str());
-        } else {
-            RCLCPP_INFO(this->get_logger(),
-                        "SimpleMove.-> Transform from '%s' to '%s' is now available.",
-                        source_frame.c_str(), target_frame.c_str());
+private:
+  void start_relative(double distance, double angle, bool lateral)
+  {
+    if (!std::isfinite(distance) || !std::isfinite(angle)) {return;}
+    if (lateral && get_parameter("motion_mode").as_string() == "differential") {
+      finish(Status::ABORTED, "lateral_motion_requires_omni"); return;
+    }
+    try {
+      const auto tf = tf_buffer_.lookupTransform(odom_frame_, base_frame_, tf2::TimePointZero);
+      const auto & q = tf.transform.rotation;
+      const double yaw =
+        std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+      Path path;
+      path.header.frame_id = odom_frame_;
+      path.header.stamp = now();
+      geometry_msgs::msg::PoseStamped pose;
+      pose.pose.position.x = tf.transform.translation.x;
+      pose.pose.position.y = tf.transform.translation.y;
+      pose.pose.orientation = q;
+      path.poses.push_back(pose);
+      pose.pose.position.x += distance * std::cos(yaw + angle + (lateral ? M_PI / 2.0 : 0.0));
+      pose.pose.position.y += distance * std::sin(yaw + angle + (lateral ? M_PI / 2.0 : 0.0));
+      pose.pose.orientation.z = std::sin((yaw + angle) / 2.0);
+      pose.pose.orientation.w = std::cos((yaw + angle) / 2.0);
+      pose.pose.orientation.x = pose.pose.orientation.y = 0.0;
+      path.poses.push_back(pose);
+      start_motion(path, true);
+      reverse_ = distance < 0.0 && !lateral;
+    } catch (const tf2::TransformException & error) {
+      finish(Status::ABORTED, "relative_goal_tf_unavailable");
+      RCLCPP_WARN(get_logger(), "%s", error.what());
+    }
+  }
+
+  void start_motion(const Path & path, bool relative)
+  {
+    if (active_) {finish(Status::ABORTED, "preempted");}
+    status_.goal_id.id = relative ? "-1" : std::to_string(path.header.stamp.sec) + "." +
+      std::to_string(path.header.stamp.nanosec);
+    status_.goal_id.stamp = path.header.stamp;
+    if (path.poses.empty() || path.header.frame_id.empty()) {
+      finish(Status::ABORTED, "invalid_path"); return;
+    }
+    for (const auto & pose : path.poses) {
+      const auto & p = pose.pose.position;
+      const auto & q = pose.pose.orientation;
+      const double norm = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+      if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(norm) ||
+        std::abs(norm - 1.0) > 1e-3 ||
+        (!pose.header.frame_id.empty() && pose.header.frame_id != path.header.frame_id))
+      {
+        finish(Status::ABORTED, "invalid_path"); return;
+      }
+    }
+    path_ = path;
+    lengths_.assign(path.poses.size(), 0.0);
+    for (size_t i = 1; i < path.poses.size(); ++i) {
+      lengths_[i] = lengths_[i - 1] + std::hypot(
+        path.poses[i].pose.position.x - path.poses[i - 1].pose.position.x,
+        path.poses[i].pose.position.y - path.poses[i - 1].pose.position.y);
+    }
+    active_ = true;
+    relative_ = relative;
+    reverse_ = false;
+    initialized_ = false;
+    final_heading_ = 0.0;
+    for (size_t i = path.poses.size(); i > 1; --i) {
+      const auto & a = path.poses[i - 2].pose.position;
+      const auto & b = path.poses[i - 1].pose.position;
+      if (std::hypot(b.x - a.x, b.y - a.y) > 1e-8) {
+        final_heading_ = std::atan2(b.y - a.y, b.x - a.x);break;
+      }
+    }
+    progress_ = best_progress_ = 0.0;
+    velocity_.fill(0.0); acceleration_.fill(0.0);
+    started_ = progress_time_ = head_wait_ = last_tick_ = Clock::now();
+    deviation_since_ = Clock::time_point{};
+    status_.status = Status::ACTIVE;
+    status_.text = "tracking_path";
+    status_pub_->publish(status_);
+  }
+
+  void finish(uint8_t code, const std::string & reason)
+  {
+    active_ = false;
+    velocity_.fill(0.0); acceleration_.fill(0.0);
+    cmd_pub_->publish(geometry_msgs::msg::Twist());
+    if (relative_ && get_parameter("use_pot_fields").as_bool()) {
+      std_msgs::msg::Bool enable;enable.data = false;fields_enable_pub_->publish(enable);
+    }
+    status_.status = code;
+    status_.text = reason;
+    status_pub_->publish(status_);
+    RCLCPP_INFO(get_logger(), "Motion %s: %s", status_.goal_id.id.c_str(), reason.c_str());
+  }
+
+  void process_motion()
+  {
+    if (!active_) {return;}
+    const auto tick = Clock::now();
+    if (std::chrono::duration<double>(tick - last_feedback_).count() >= 0.2) {
+      status_.status = Status::ACTIVE;
+      status_pub_->publish(status_);
+      last_feedback_ = tick;
+    }
+    const double dt = std::clamp(
+      std::chrono::duration<double>(
+        tick - last_tick_).count(), 0.001, 0.1);
+    last_tick_ = tick;
+    // A single mutually-exclusive callback group serializes goals, parameters and control.
+    const auto parameters = get_parameters(
+      {"max_linear_speed", "max_angular_speed", "linear_acceleration",
+        "angular_acceleration", "linear_jerk", "angular_jerk", "fine_dist_tolerance",
+        "angle_tolerance",
+        "head_pan_min", "head_pan_max", "head_alignment_tolerance", "sensor_timeout_sec"});
+    const double vmax = parameters[0].as_double(), wmax = parameters[1].as_double();
+    const double amax = parameters[2].as_double(), angular_accel = parameters[3].as_double();
+    const double tolerance = parameters[6].as_double(), angle_tolerance = parameters[7].as_double();
+    const double pan_min = parameters[8].as_double(), pan_max = parameters[9].as_double();
+    const double head_tolerance = parameters[10].as_double(),
+      sensor_timeout = parameters[11].as_double();
+    const bool omni = get_parameter("motion_mode").as_string() == "omni";
+    const bool use_head = get_parameter("move_head").as_bool() && !head_bypass_;
+    const bool use_fields = get_parameter("use_pot_fields").as_bool();
+    if (omni != last_omni_) {velocity_.fill(0.0); acceleration_.fill(0.0); last_omni_ = omni;}
+    if (relative_ && use_fields &&
+      std::chrono::duration<double>(tick - last_fields_enable_).count() >= 0.2)
+    {
+      std_msgs::msg::Bool enable;enable.data = true;fields_enable_pub_->publish(enable);
+      last_fields_enable_ = tick;
+    }
+    double x, y, yaw;
+    try {
+      const auto tf = tf_buffer_.lookupTransform(
+        path_.header.frame_id, base_frame_,
+        tf2::TimePointZero);
+      const auto stamp = rclcpp::Time(tf.header.stamp, get_clock()->get_clock_type());
+      if (stamp.nanoseconds() != 0 &&
+        std::abs((now() - stamp).seconds()) > get_parameter("tf_timeout_sec").as_double())
+      {
+        throw std::runtime_error("Stale robot transform");
+      }
+      x = tf.transform.translation.x; y = tf.transform.translation.y;
+      const auto & q = tf.transform.rotation;
+      yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    } catch (const std::exception & error) {
+      finish(Status::ABORTED, "robot_tf_unavailable");
+      RCLCPP_WARN(get_logger(), "%s", error.what()); return;
+    }
+    const auto & destination = path_.poses.back().pose;
+    const auto & q = destination.orientation;
+    const double final_yaw =
+      std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    const double final_error = std::remainder(final_yaw - yaw, 2.0 * M_PI);
+    const double distance = std::hypot(destination.position.x - x, destination.position.y - y);
+    if (!initialized_) {initial_yaw_ = yaw; initialized_ = true;}
+    if (use_fields && (speed_limit_received_ < started_ ||
+      std::chrono::duration<double>(tick - speed_limit_received_).count() > sensor_timeout ||
+      !fields_ready_ || ready_received_ < started_ || risk_received_ < started_ ||
+      std::chrono::duration<double>(tick - ready_received_).count() > sensor_timeout ||
+      std::chrono::duration<double>(tick - risk_received_).count() > sensor_timeout))
+    {
+      cmd_pub_->publish(geometry_msgs::msg::Twist());
+      velocity_.fill(0.0); acceleration_.fill(0.0);
+      RCLCPP_WARN_THROTTLE(
+        get_logger(),
+        *get_clock(), 2000,
+        "Waiting for obstacle monitor: ready=%s, ready_message_age=%.3f s, risk_message_age=%.3f s (-1 means no message)",
+        fields_ready_ ? "true" : "false",
+        ready_received_ ==
+        Clock::time_point{} ? -1.0 : std::chrono::duration<double>(tick - ready_received_).count(),
+        risk_received_ ==
+        Clock::time_point{} ? -1.0 : std::chrono::duration<double>(tick - risk_received_).count());
+      if (std::chrono::duration<double>(tick - started_).count() > 2.0) {
+        finish(Status::ABORTED, "obstacle_data_stale");
+      }
+      return;
+    }
+    if (distance <= tolerance && std::abs(final_error) <= angle_tolerance) {
+      finish(Status::SUCCEEDED, "pose_reached"); return;
+    }
+    if (std::chrono::duration<double>(tick - started_).count() >
+      lengths_.back() / vmax * 6.0 + 2.0 * M_PI / wmax * 3.0 + 30.0)
+    {
+      finish(Status::ABORTED, "motion_timeout"); return;
+    }
+    double nearest = std::numeric_limits<double>::infinity();
+    size_t segment = 0;
+    double projected = progress_;
+    // Restrict projection to a local arc-length window so crossings cannot skip a loop.
+    for (size_t i = 1; i < path_.poses.size(); ++i) {
+      if (lengths_[i] < progress_ - 0.2 || lengths_[i - 1] > progress_ + 1.0) {continue;}
+      const auto & a = path_.poses[i - 1].pose.position;
+      const auto & b = path_.poses[i].pose.position;
+      const double dx = b.x - a.x, dy = b.y - a.y, square = dx * dx + dy * dy;
+      const double t = square > 1e-12 ? std::clamp(
+        ((x - a.x) * dx + (y - a.y) * dy) / square, 0.0,
+        1.0) : 0.0;
+      const double error = std::hypot(x - a.x - t * dx, y - a.y - t * dy);
+      if (error < nearest) {
+        nearest = error; projected = lengths_[i - 1] + t * std::sqrt(square); segment = i;
+      }
+    }
+    progress_ = std::max(progress_, projected);
+    if (nearest > get_parameter("max_path_deviation_m").as_double() && path_.poses.size() > 1) {
+      if (deviation_since_ == Clock::time_point{}) {deviation_since_ = tick;}
+      if (std::chrono::duration<double>(tick - deviation_since_).count() >
+        get_parameter("deviation_persistence_sec").as_double())
+      {
+        finish(Status::ABORTED, "path_deviation"); return;
+      }
+    } else {deviation_since_ = Clock::time_point{};}
+    const double lookahead = std::clamp(
+      get_parameter("lookahead_min_m").as_double() +
+      std::hypot(velocity_[0], velocity_[1]) * get_parameter("lookahead_time_sec").as_double(),
+      get_parameter("lookahead_min_m").as_double(), get_parameter("lookahead_max_m").as_double());
+    const double target_s = std::min(lengths_.back(), progress_ + lookahead);
+    double target_x = destination.position.x, target_y = destination.position.y;
+    double tangent = std::atan2(target_y - y, target_x - x);
+    for (size_t i = std::max(size_t{1}, segment); i < path_.poses.size(); ++i) {
+      if (lengths_[i] + 1e-9 < target_s) {continue;}
+      const auto & a = path_.poses[i - 1].pose.position;
+      const auto & b = path_.poses[i].pose.position;
+      const double t = (target_s - lengths_[i - 1]) / std::max(1e-9, lengths_[i] - lengths_[i - 1]);
+      target_x = a.x + t * (b.x - a.x); target_y = a.y + t * (b.y - a.y);
+      tangent = std::atan2(b.y - a.y, b.x - a.x); break;
+    }
+    double direction = std::atan2(target_y - y, target_x - x);
+    const double remaining = std::max(distance, lengths_.back() - progress_);
+    const double final_turn = std::abs(std::remainder(final_yaw - final_heading_, 2.0 * M_PI));
+    const double base_window = std::max(
+      get_parameter("final_alignment_fraction").as_double() * lengths_.back(), 2.0 * tolerance);
+    const double turn_time = std::max(
+      {final_turn / (0.6 * wmax),
+        std::sqrt(2.0 * final_turn / angular_accel),
+        std::cbrt(6.0 * final_turn / parameters[5].as_double())});
+    const double final_window = std::max(
+      base_window, std::min(
+        vmax, std::sqrt(
+          amax * base_window)) * turn_time);
+    const double approach_speed = std::min(vmax, 0.5 * final_window / std::max(0.1, turn_time));
+    const double approach_limit = std::sqrt(
+      approach_speed * approach_speed +
+      2.0 * amax * std::max(0.0, remaining - tolerance - final_window));
+    double speed = std::min(vmax, std::sqrt(amax * remaining));
+    speed = std::min(speed, 1.5 * distance);
+    const double curvature = 2.0 * std::abs(std::sin(tangent - direction)) / std::max(
+      0.05,
+      lookahead);
+    const double curve_limit = std::min(
+      std::sqrt(amax / std::max(1e-6, curvature)), wmax / std::max(
+        1e-6, curvature));
+    speed = std::min(speed, curve_limit);
+    if (distance > tolerance) {
+      speed = std::min(curve_limit, std::max(get_parameter("min_linear_speed").as_double(), speed));
+    }
+    if (omni && !relative_ && final_turn > angle_tolerance) {
+      speed = std::min(speed, approach_limit);
+    }
+    speed *=
+      std::exp(
+      -get_parameter("control_alpha").as_double() *
+      std::pow(std::remainder(tangent - direction, 2.0 * M_PI), 2));
+    double vx = speed * std::cos(direction - yaw), vy = speed * std::sin(direction - yaw);
+    if (use_fields &&
+      std::chrono::duration<double>(tick - force_received_).count() < sensor_timeout)
+    {
+      const double limit = get_parameter("repulsion_max_speed").as_double();
+      const double scale = std::min(1.0, limit / std::max(1e-9, std::hypot(force_.x, force_.y)));
+      vx += scale * force_.x; vy += scale * force_.y;
+      if (std::hypot(vx, vy) > 1e-5) {direction = yaw + std::atan2(vy, vx);}
+    }
+    double yaw_feedforward = 0.0;
+    const double initial_fraction = get_parameter("initial_alignment_fraction").as_double();
+    double blend = std::clamp(
+      progress_ / std::max(
+        0.01,
+        initial_fraction * lengths_.back()), 0.0, 1.0);
+    const double initial_phase = blend;
+    blend = blend * blend * (3.0 - 2.0 * blend);
+    double desired_yaw = initial_yaw_ + blend * std::remainder(tangent - initial_yaw_, 2.0 * M_PI);
+    // Complete the angular profile at the positional tolerance boundary.
+    // A fixed distance window avoids chasing a shrinking window while braking.
+    double final_blend = std::clamp(
+      1.0 - std::max(
+        0.0,
+        remaining - tolerance) / final_window, 0.0, 1.0);
+    const double final_phase = final_blend;
+    final_blend = final_blend * final_blend * (3.0 - 2.0 * final_blend);
+    desired_yaw += final_blend * std::remainder(final_yaw - desired_yaw, 2.0 * M_PI);
+    if (omni && !relative_) {
+      // Bound translational progress by the angular rate required by the yaw
+      // profile. Short routes slow down instead of exhausting the first/last
+      // ten percent before the base can turn.
+      const double initial_slope = 6.0 * initial_phase * (1.0 - initial_phase) *
+        std::abs(std::remainder(tangent - initial_yaw_, 2.0 * M_PI)) /
+        std::max(0.01, initial_fraction * lengths_.back());
+      const double final_slope = 6.0 * final_phase * (1.0 - final_phase) *
+        std::abs(std::remainder(final_yaw - tangent, 2.0 * M_PI)) / std::max(0.01, final_window);
+      yaw_feedforward = (
+        (1.0 - final_blend) * 6.0 * initial_phase * (1.0 - initial_phase) *
+        std::remainder(
+          tangent - initial_yaw_,
+          2.0 * M_PI) / std::max(0.01, initial_fraction * lengths_.back()) +
+        6.0 * final_phase * (1.0 - final_phase) *
+        std::remainder(final_yaw - tangent, 2.0 * M_PI) / std::max(0.01, final_window)
+        ) * std::hypot(velocity_[0], velocity_[1]);
+      const double yaw_error = std::abs(std::remainder(desired_yaw - yaw, 2.0 * M_PI));
+      const double limited_speed =
+        std::min(
+        {vmax, final_turn > angle_tolerance ? approach_limit : vmax,
+          0.6 * wmax / std::max(1e-6, initial_slope + final_slope)});
+      const double scale = std::min(
+        {1.0, limited_speed / std::max(1e-6, std::hypot(vx, vy)),
+          0.2 / std::max(0.2, yaw_error)});
+      vx *= scale;vy *= scale;
+    }
+    double heading_error = std::remainder(direction - yaw - (reverse_ ? M_PI : 0.0), 2.0 * M_PI);
+    if (relative_) {desired_yaw = final_yaw;}
+    const double angular_gain = 1.0 / std::max(0.05, get_parameter("control_beta").as_double());
+    double angular = std::clamp(
+      yaw_feedforward + angular_gain * std::remainder(
+        desired_yaw - yaw,
+        2.0 * M_PI), -wmax, wmax);
+    if (!omni) {
+      angular = std::clamp(angular_gain * heading_error, -wmax, wmax);
+      vx = (reverse_ ? -1.0 : 1.0) * std::hypot(vx, vy) * std::max(0.0, std::cos(heading_error));
+      vy = 0.0;
+    }
+    if (distance <= tolerance) {
+      vx = vy = 0.0;
+      const double limit = get_parameter("final_angle_max_angular_speed").as_double();
+      angular = std::clamp(2.0 * final_error, -limit, limit);
+    }
+    bool head_blocked = false;
+    if (use_head && distance > tolerance) {
+      const double pan = std::remainder(direction - yaw, 2.0 * M_PI);
+      const double clamped = std::clamp(pan, pan_min, pan_max);
+      std_msgs::msg::Float64MultiArray goal;
+      goal.data = {clamped, get_parameter("head_tilt").as_double()};
+      head_pub_->publish(goal);
+      const bool fresh = head_received_ != Clock::time_point{} &&
+      std::chrono::duration<double>(tick - head_received_).count() <= get_parameter(
+        "head_feedback_timeout_sec").as_double();
+      head_blocked = !fresh ||
+        std::abs(std::remainder(pan - head_pan_, 2.0 * M_PI)) > head_tolerance;
+      if (head_blocked) {
+        if (progress_ < 0.001 && std::abs(pan - clamped) > 0.01) {initial_yaw_ = yaw;}
+        vx = vy = 0.0;
+        angular = fresh && std::abs(pan - clamped) >
+          0.01 ? std::clamp(2.0 * (pan - clamped), -wmax, wmax) : 0.0;
+        if (std::chrono::duration<double>(tick - head_wait_).count() >
+          get_parameter("head_alignment_timeout_sec").as_double())
+        {
+          finish(Status::ABORTED, "head_alignment_timeout"); return;
         }
-    }
-
-
-    //############
-    //Simple Move callbacks
-    void callback_general_stop(const std_msgs::msg::Empty::SharedPtr msg) 
-	{
-		(void) msg;
-		try 
-		{
-		    std::cout << "SimpleMove.-> General Stop signal received" << std::endl;
-		    stop_     = true;
-		    new_pose_ = false;
-		    new_path_ = false;
-		    move_lat_ = false;
-		} 
-		catch (const std::exception &e) 
-		{
-		    RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_general_stop: %s", e.what());
-		}
-	}
-
-	    void callback_navigation_stop(const std_msgs::msg::Bool::SharedPtr msg) 
-		{
-			try 
-			{
-			    if (msg->data) {
-			        std::cout << "SimpleMove.-> Navigation Stop signal received" << std::endl;
-			        stop_     = true;
-			        new_pose_ = false;
-		        new_path_ = false;
-		        move_lat_ = false;
-		    }
-		} 
-		catch (const std::exception &e) 
-		{
-		    RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_navigation_stop: %s", e.what());
-		}
-	}
-
-    void callback_simple_move_stop(const std_msgs::msg::Empty::SharedPtr msg) 
+      } else {head_wait_ = tick;}
+    } else {head_wait_ = tick;}
+    if (progress_ > best_progress_ + 0.02 || distance <= tolerance || head_blocked) {
+      best_progress_ = progress_; progress_time_ = tick;
+    } else if (std::chrono::duration<double>(tick - progress_time_).count() >
+      get_parameter("progress_timeout_sec").as_double())
     {
-        (void) msg;
-        try 
-        {
-            std::cout << "SimpleMove.-> Simple move stop signal received" << std::endl;
-            stop_     = true;
-            new_pose_ = false;
-            new_path_ = false;
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_simple_move_stop: %s", e.what());
-        }
+      finish(Status::ABORTED, "no_progress"); return;
     }
-
-    void callback_goal_dist(const std_msgs::msg::Float32::SharedPtr msg) 
-    {
-        try 
-        {
-            std::cout << "SimpleMove.-> New move received: goal dist= " << msg->data << std::endl;     
-            goal_distance_ = msg->data;
-            goal_angle_    = 0;
-            new_pose_ = true;
-            new_path_ = false;
-            move_lat_ = false;
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_goal_dist: %s", e.what());
-        }
+    geometry_msgs::msg::Vector3 intent;
+    intent.x = std::cos(direction - yaw); intent.y = std::sin(direction - yaw);
+    intent_pub_->publish(intent);
+    if (use_fields && collision_) {finish(Status::ABORTED, "collision_risk"); return;}
+    const double magnitude = std::hypot(vx, vy);
+    const double translation_limit = use_fields ? std::min(vmax, obstacle_speed_limit_) : vmax;
+    if (magnitude > translation_limit) {
+      vx *= translation_limit / magnitude;vy *= translation_limit / magnitude;
     }
-
-    void callback_goal_dist_angle(const std_msgs::msg::Float32MultiArray::SharedPtr msg) 
-    {
-        try 
-        {
-            std::cout << "SimpleMove.-> New move received: goal dist= " << msg->data[0] << " and goal angle= " << msg->data[1] << std::endl;
-            goal_distance_ = msg->data[0];
-            goal_angle_    = msg->data[1];
-            new_pose_ = true;
-            new_path_ = false;
-            move_lat_ = false;
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_goal_dist_angle: %s", e.what());
-        }
+    std::array<double, 3> target{vx, vy, angular};
+    for (size_t i = 0; i < 3; ++i) {
+      const double a = i == 2 ? angular_accel : amax;
+      const double jerk = parameters[i == 2 ? 5 : 4].as_double();
+      const double requested = std::clamp((target[i] - velocity_[i]) / dt, -a, a);
+      acceleration_[i] += std::clamp(requested - acceleration_[i], -jerk * dt, jerk * dt);
+      const double next = velocity_[i] + acceleration_[i] * dt;
+      if ((target[i] - velocity_[i]) * (target[i] - next) <= 0.0) {
+        velocity_[i] = target[i]; acceleration_[i] = 0.0;
+      } else {velocity_[i] = next;}
     }
-
-    void callback_goal_path(const nav_msgs::msg::Path::SharedPtr msg) 
-    {
-        try 
-        {
-	            std::cout << "SimpleMove.-> New path received with " << msg->poses.size()
-	                    << " points. Stamp= " << msg->header.stamp.sec << "s, Frame="  << msg->header.frame_id
-	                    << std::endl;
-	            move_lat_ = false;
-            if (msg->poses.size() <= 0)
-            {
-                new_pose_ = false;
-                new_path_ = false;   
-            }else{
-                goal_path_ = *msg;
-                new_pose_ = false;
-                new_path_ = true;
-            }
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_goal_path: %s", e.what());
-        }
+    // Do not translate while the camera is aligning; emergency stops bypass smoothing.
+    if (head_blocked || distance <= tolerance) {
+      velocity_[0] = velocity_[1] = acceleration_[0] = acceleration_[1] = 0.0;
     }
+    if (head_blocked && std::abs(angular) < 1e-9) {velocity_[2] = acceleration_[2] = 0.0;}
+    if (!omni) {velocity_[1] = acceleration_[1] = 0.0;}
+    const double limited_speed = std::hypot(velocity_[0], velocity_[1]);
+    if (limited_speed > translation_limit) {
+      velocity_[0] *= translation_limit / limited_speed;
+      velocity_[1] *= translation_limit / limited_speed;
+    }
+    velocity_[2] = std::clamp(velocity_[2], -wmax, wmax);
+    geometry_msgs::msg::Twist command;
+    command.linear.x = velocity_[0]; command.linear.y = velocity_[1];
+    command.angular.z = velocity_[2];
+    if (path_.header.frame_id == "map" && !local_motion_is_free(x, y, yaw, command)) {
+      finish(Status::ABORTED, "local_trajectory_blocked");return;
+    }
+    cmd_pub_->publish(command);
+  }
 
-    void callback_move_lateral(const std_msgs::msg::Float32::SharedPtr msg) 
+  // Check the actual limited command, including repulsion, over its braking
+  // horizon in the already-inflated grid. A half-cell guard covers sampling
+  // at grid corners without adding another robot footprint.
+  bool local_motion_is_free(
+    double x, double y, double yaw,
+    const geometry_msgs::msg::Twist & command) const
+  {
+    if (!map_ || std::chrono::duration<double>(Clock::now() - map_received_).count() >
+      get_parameter("map_timeout_sec").as_double()) {return false;}
+    const auto stamp = rclcpp::Time(map_->header.stamp, get_clock()->get_clock_type());
+    if (stamp.nanoseconds() != 0 &&
+      std::abs((now() - stamp).seconds()) > get_parameter("map_timeout_sec").as_double())
     {
-        try 
+      return false;
+    }
+    const auto & info = map_->info;
+    const auto & q = info.origin.orientation;
+    const double map_yaw = std::atan2(2.0 * q.w * q.z, 1.0 - 2.0 * q.z * q.z);
+    const double c = std::cos(map_yaw), s = std::sin(map_yaw);
+    const double speed = std::hypot(command.linear.x, command.linear.y);
+    const double reaction = get_parameter("collision_reaction_time_sec").as_double();
+    const double deceleration = get_parameter("linear_acceleration").as_double();
+    const double angular_deceleration = get_parameter("angular_acceleration").as_double();
+    const double horizon = reaction + speed / deceleration;
+    const double dt = std::min(0.03, info.resolution / (4.0 * std::max(0.01, speed)));
+    for (double t = 0.0; t <= horizon; t += dt) {
+      const double gx = (c * (x - info.origin.position.x) + s * (y - info.origin.position.y)) /
+        info.resolution;
+      const double gy = (-s * (x - info.origin.position.x) + c * (y - info.origin.position.y)) /
+        info.resolution;
+      if (!std::isfinite(gx) || !std::isfinite(gy) || gx < 0 || gy < 0 || gx >= info.width ||
+        gy >= info.height) {return false;}
+      const int ix = static_cast<int>(std::floor(gx)), iy = static_cast<int>(std::floor(gy));
+      for (int cy = std::max(0, iy - 1); cy <= std::min(static_cast<int>(info.height) - 1, iy + 1);
+        ++cy)
+      {
+        for (int cx = std::max(0, ix - 1); cx <= std::min(static_cast<int>(info.width) - 1, ix + 1);
+          ++cx)
         {
-            goal_distance_ = msg->data;
-            goal_angle_    = 0;
-            new_pose_ = true;
-            new_path_ = false;
-            move_lat_ = true;
-        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_move_lateral: %s", e.what());
-        }
-    }
-
-	    void callback_collision_risk(const std_msgs::msg::Bool::SharedPtr msg) 
-	    {
-	        try 
-	        {
-	            collision_risk_ = msg->data;
-	        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_collision_risk: %s", e.what());
-        }
-    }
-
-    void callback_move_head_bypass(const std_msgs::msg::Bool::SharedPtr msg)
-    {
-        try
-        {
-            move_head_ = !msg->data;
-            RCLCPP_INFO(this->get_logger(),
-                        "SimpleMove.-> Move head %s by camera obstacles bypass.",
-                        move_head_ ? "enabled" : "disabled");
-        }
-        catch (const std::exception &e)
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_move_head_bypass: %s", e.what());
-        }
-    }
-
-    void callback_rejection_force(const geometry_msgs::msg::Vector3::SharedPtr msg) 
-    {
-        try 
-	        {
-	            rejection_force_ = *msg;
-	        } 
-        catch (const std::exception &e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error processing callback_rejection_force: %s", e.what());
-        }
-    }
-
-
-    //############
-    //Simple Move additional functions
-	    geometry_msgs::msg::Twist calculate_speeds( float robot_x, float robot_y, float robot_t,
-                                                float goal_x, float goal_y,
-                                                float min_linear_speed, float max_linear_speed, float angular_speed, 
-                                                float alpha, float beta,
-                                                bool backwards, bool move_lat, 
-                                                bool use_pot_fields=false,  double rejection_force_y=0.0)
-    {
-        float angle_error = 0;
-        if(backwards) angle_error = (atan2(robot_y - goal_y, robot_x -goal_x)-robot_t);
-        else angle_error = (atan2(goal_y - robot_y, goal_x - robot_x)-robot_t);
-        if(angle_error >   M_PI) angle_error -= 2*M_PI;
-        if(angle_error <= -M_PI) angle_error += 2*M_PI;
-        if(move_lat) angle_error -= M_PI/2;
-        if(angle_error <= -M_PI) angle_error += 2*M_PI;
-        if(backwards) max_linear_speed *= -1;
-        
-        geometry_msgs::msg::Twist result;
-        if(move_lat)
-            result.linear.y   = max_linear_speed  * exp(-(angle_error * angle_error) / (alpha));
-        else result.linear.x  = max_linear_speed  * exp(-(angle_error * angle_error) / (alpha));
-        result.angular.z = angular_speed * (2 / (1 + exp(-angle_error / beta)) - 1);
-
-        if(fabs(result.linear.x) < min_linear_speed)
-            result.linear.x = 0;
-        if(fabs(result.linear.y) < min_linear_speed)
-            result.linear.y = 0;
-        
-        if(use_pot_fields && !move_lat) result.linear.y = rejection_force_y;
-        
-	        return result;
-	    }
-
-    bool should_apply_potential_fields() const
-    {
-        return use_pot_fields_ && collision_risk_;
-    }
-
-    geometry_msgs::msg::Twist calculate_speeds( float robot_angle, float goal_angle, float angular_speed, float beta)
-    {
-        float angle_error = goal_angle - robot_angle;
-        if(angle_error >   M_PI) angle_error -= 2*M_PI;
-        if(angle_error <= -M_PI) angle_error += 2*M_PI;
-
-        geometry_msgs::msg::Twist result;
-        result.linear.x  = 0;
-        result.angular.z = angular_speed * (2 / (1 + exp(-angle_error / beta)) - 1);
-        
-        return result;
-    }
-
-    float get_heading_error_to_current_path_goal() const
-    {
-        float angle_error = atan2(goal_y_ - robot_y_, goal_x_ - robot_x_) - robot_t_;
-        if(angle_error >   M_PI) angle_error -= 2*M_PI;
-        if(angle_error <= -M_PI) angle_error += 2*M_PI;
-        return angle_error;
-    }
-
-    bool try_rotate_in_place_on_collision(const char * state_label)
-    {
-        if (!allow_rotation_on_collision_)
+          const double dx = std::max({double(cx) - gx, 0.0, gx - double(cx + 1)});
+          const double dy = std::max({double(cy) - gy, 0.0, gy - double(cy + 1)});
+          if (std::hypot(
+              dx,
+              dy) <= 0.5 && map_->data[static_cast<size_t>(cy) * info.width + cx] != 0)
+          {
             return false;
-
-        get_robot_position_wrt_map();
-        get_next_goal_from_path(prev_pose_idx, next_pose_idx);
-
-        const float angle_error = get_heading_error_to_current_path_goal();
-        if (fabs(angle_error) < rotation_collision_angle_threshold_)
-            return false;
-
-        // Optional recovery for narrow passages: rotate in place only when an
-        // operator explicitly enables it, because flickering obstacle reports
-        // can otherwise make the base oscillate.
-        const float angular_speed = std::min(max_angular_speed_, rotation_collision_angular_speed_);
-        pub_cmd_vel_->publish(calculate_speeds(robot_t_, robot_t_ + angle_error, angular_speed, beta_));
-        if(move_head_ && !camera_bypass_) {
-            pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
+          }
         }
-
-        current_linear_speed = 0;
-
-        RCLCPP_WARN_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            2000,
-            "SimpleMove.-> Collision risk in %s, rotating in place to recover. heading_error=%.2f",
-            state_label,
-            angle_error);
-        return true;
+      }
+      const double scale = speed >
+        1e-9 ? std::clamp(
+        1.0 - deceleration * std::max(
+          0.0,
+          t + 0.5 * dt - reaction) / speed, 0.0,
+        1.0) : 0.0;
+      x += (std::cos(yaw) * command.linear.x - std::sin(yaw) * command.linear.y) * dt * scale;
+      y += (std::sin(yaw) * command.linear.x + std::cos(yaw) * command.linear.y) * dt * scale;
+      const double angular_scale = std::abs(command.angular.z) > 1e-9 ?
+        std::clamp(
+        1.0 - angular_deceleration *
+        std::max(0.0, t + 0.5 * dt - reaction) / std::abs(command.angular.z), 0.0, 1.0) : 0.0;
+      yaw += command.angular.z * dt * angular_scale;
     }
+    return true;
+  }
 
-	    bool get_robot_position_wrt_map()
-    {
-        try
-        {
-            geometry_msgs::msg::TransformStamped transformStamped =
-                tf_buffer_.lookupTransform("map", base_link_name_, tf2::TimePointZero);
-
-            robot_x_ = transformStamped.transform.translation.x;
-            robot_y_ = transformStamped.transform.translation.y;
-
-            tf2::Quaternion q(
-                transformStamped.transform.rotation.x,
-                transformStamped.transform.rotation.y,
-                transformStamped.transform.rotation.z,
-                transformStamped.transform.rotation.w);
-
-            double roll, pitch, yaw;
-            tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-            robot_t_ = static_cast<float>(yaw);
-
-            return true;
-        }
-	        catch (const tf2::TransformException &ex)
-	        {
-	            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                                    "SimpleMove.-> map TF lookup failed (%s -> map): %s",
-                                    base_link_name_.c_str(), ex.what());
-	            return false;
-	        }
-    }
-
-    bool get_robot_position_wrt_odom()
-    {
-        try
-        {
-            geometry_msgs::msg::TransformStamped transformStamped =
-                tf_buffer_.lookupTransform(odom_name_, base_link_name_, tf2::TimePointZero);
-
-            robot_x_ = transformStamped.transform.translation.x;
-            robot_y_ = transformStamped.transform.translation.y;
-
-            tf2::Quaternion q(
-                transformStamped.transform.rotation.x,
-                transformStamped.transform.rotation.y,
-                transformStamped.transform.rotation.z,
-                transformStamped.transform.rotation.w);
-
-            double roll, pitch, yaw;
-            tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-            robot_t_ = static_cast<float>(yaw);
-
-            return true;
-        }
-	        catch (const tf2::TransformException &ex)
-	        {
-	            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                                    "SimpleMove.-> odom TF lookup failed (%s -> %s): %s",
-                                    base_link_name_.c_str(), odom_name_.c_str(), ex.what());
-	            return false;
-	        }
-    }
-
-    bool get_goal_position_wrt_odom()
-    {
-        try
-        {
-            geometry_msgs::msg::TransformStamped transformStamped =
-                tf_buffer_.lookupTransform(odom_name_, base_link_name_, tf2::TimePointZero);
-
-            float robot_x = transformStamped.transform.translation.x;
-            float robot_y = transformStamped.transform.translation.y;
-
-            tf2::Quaternion q(
-                transformStamped.transform.rotation.x,
-                transformStamped.transform.rotation.y,
-                transformStamped.transform.rotation.z,
-                transformStamped.transform.rotation.w);
-
-            double roll, pitch, yaw;
-            tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-            float robot_t = static_cast<float>(yaw);
-
-            goal_t_ = robot_t + goal_angle_;
-            if(goal_t_ >   M_PI) goal_t_ -= 2*M_PI;
-            if(goal_t_ <= -M_PI) goal_t_ += 2*M_PI;
-            
-            goal_x_ = robot_x + goal_distance_ * cos(robot_t + goal_angle_ + (move_lat_?M_PI/2:0));
-            goal_y_ = robot_y + goal_distance_ * sin(robot_t + goal_angle_ + (move_lat_?M_PI/2:0));
-
-            return true;
-        }
-        catch (const tf2::TransformException &ex)
-        {
-            //RCLCPP_WARN(this->get_logger(), "SimpleMove.-> TF Exception: %s", ex.what());
-            return false;
-        }
-    }
-    
-    float get_path_total_distance(nav_msgs::msg::Path& path)
-    {
-        float dist = 0;
-        for(size_t i=1; i < path.poses.size(); i++)
-            dist += sqrt(pow(path.poses[i].pose.position.x - path.poses[i-1].pose.position.x,2) +
-                        pow(path.poses[i].pose.position.y - path.poses[i-1].pose.position.y,2));
-        return dist;
-    }
-
-    void fail_path(const std::string & reason)
-    {
-        // Keep the failure reason in GoalStatus.text so mvn_pln can distinguish
-        // a real obstacle from a path-tracking timeout.
-        msg_goal_reached.text = reason;
-        std::cout << "SimpleMove.-> FAILED path traking. Reason: " << reason << std::endl;
-        state = SM_STATE::INIT;
-        msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::ABORTED;
-        pub_goal_reached_->publish(msg_goal_reached);
-        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-        current_linear_speed = 0;
-    }
-
-    void get_next_goal_from_path(size_t& last_pose_idx, size_t& next_pose_idx)
-    {
-        if(next_pose_idx >= goal_path_.poses.size()) next_pose_idx = goal_path_.poses.size() - 1;
-        float prev_goal_x = goal_path_.poses[last_pose_idx].pose.position.x;
-        float prev_goal_y = goal_path_.poses[last_pose_idx].pose.position.y;
-        float robot_error_x = robot_x_ - prev_goal_x;
-        float robot_error_y = robot_y_ - prev_goal_y;
-        float error = 0;
-        do
-        {
-            goal_x_ = goal_path_.poses[next_pose_idx].pose.position.x;
-            goal_y_ = goal_path_.poses[next_pose_idx].pose.position.y;
-            float path_vector_x = goal_x_ - prev_goal_x;
-            float path_vector_y = goal_y_ - prev_goal_y;
-            float path_vector_mag = sqrt(path_vector_x*path_vector_x + path_vector_y*path_vector_y);
-            path_vector_x = path_vector_mag > 0 ? path_vector_x / path_vector_mag : 0;
-            path_vector_y = path_vector_mag > 0 ? path_vector_y / path_vector_mag : 0;
-            float scalar_projection = robot_error_x*path_vector_x + robot_error_y*path_vector_y;
-            //Error is not euclidean distance, but it is measured projected on the current path segment
-            error = path_vector_mag - scalar_projection;
-            if(error < 0.25)
-                last_pose_idx = next_pose_idx;
-        }while(error < 0.25 && ++next_pose_idx < goal_path_.poses.size());
-    }
-
-    std_msgs::msg::Float64MultiArray get_next_goal_head_angles(size_t next_pose_idx)
-    {
-        std_msgs::msg::Float64MultiArray msg;
-
-        if (camera_bypass_) {
-            // If camera bypass is active, keep the head fixed at a neutral position
-            msg.data.push_back(0.0); // pan
-            msg.data.push_back(0.0); // tilt
-            return msg;
-        }
-        
-        size_t idx = next_pose_idx + 5 >=  goal_path_.poses.size() - 1 ? goal_path_.poses.size() - 1 : next_pose_idx + 5;
-        float goal_x = goal_path_.poses[idx].pose.position.x;
-        float goal_y = goal_path_.poses[idx].pose.position.y;
-        float angle = atan2(goal_y - robot_y_, goal_x - robot_x_) - robot_t_;
-        if(angle >   M_PI) angle -= 2*M_PI;
-        if(angle <= -M_PI) angle += 2*M_PI;
-        msg.data.push_back(angle);
-        msg.data.push_back(-1.0);
-        return msg;
-    }
-
-
-    //############
-    //Simple Move main processing
-    void simple_move_processing() 
-    {
-        try
-        {
-            if(stop_)
-            {
-                stop_ = false;
-                state = SM_STATE::INIT;
-                collision_risk_ = false;
-                msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::ABORTED;
-                msg_goal_reached.text = "stop_received";
-                pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                pub_goal_reached_->publish(msg_goal_reached);
-            }
-            if(new_pose_ || new_path_)
-                state = SM_STATE::WAITING_FOR_TASK;
-
-            switch(state)
-            {
-            case SM_STATE::INIT:
-                std::cout << "SimpleMove.-> Low level control ready. Waiting for new goal. " << std::endl;
-                collision_risk_ = false;
-                state = SM_STATE::WAITING_FOR_TASK;
-                break;
-            
-            
-            case SM_STATE::WAITING_FOR_TASK:
-                if(new_pose_)
-                {
-                    collision_risk_ = false;
-                    get_goal_position_wrt_odom();
-                    state = SM_STATE::GOAL_POSE_ACCEL;
-                    new_pose_ = false;
-                    msg_goal_reached.goal_id.id = "-1";
-                    msg_goal_reached.text.clear();
-                    attempts = (int)((fabs(goal_distance_)*5)/max_linear_speed_*RATE + fabs(goal_angle_*5)/max_angular_speed_*RATE + RATE*5);
-                }
-                if(new_path_)
-                {
-                    collision_risk_ = false;
-                    state = SM_STATE::GOAL_PATH_ACCEL;
-                    new_path_ = false;
-                    prev_pose_idx = 0;
-                    next_pose_idx = 0;
-                    global_goal_x_ = goal_path_.poses[goal_path_.poses.size() - 1].pose.position.x;
-                    global_goal_y_ = goal_path_.poses[goal_path_.poses.size() - 1].pose.position.y;
-                    std::stringstream ss;
-                    ss << goal_path_.header.stamp.sec;
-                    ss >> msg_goal_reached.goal_id.id;
-                    const float path_total_distance = get_path_total_distance(goal_path_);
-                    attempts = (int)(path_total_distance/max_linear_speed_*4*RATE + 5*RATE);
-                    msg_goal_reached.text.clear();
-                    RCLCPP_INFO(
-                        this->get_logger(),
-                        "SimpleMove.-> Path tracking budget: distance=%.2f m max_speed=%.2f m/s attempts=%d timeout=%.1f s",
-                        path_total_distance,
-                        max_linear_speed_,
-                        attempts,
-                        static_cast<double>(attempts) / RATE);
-                }
-                break;
-
-            
-            case SM_STATE::GOAL_POSE_ACCEL:
-                get_robot_position_wrt_odom();
-                global_error = sqrt((goal_x_ - robot_x_)*(goal_x_ - robot_x_) + (goal_y_ - robot_y_)*(goal_y_ - robot_y_));
-
-                if(global_error < fine_dist_tolerance_)
-                    state = SM_STATE::GOAL_POSE_CORRECT_ANGLE;
-                else if(global_error < current_linear_speed*current_linear_speed/linear_acceleration_)
-                {
-                    state = SM_STATE::GOAL_POSE_DECCEL;
-                    temp_k = current_linear_speed/sqrt(global_error);
-                }
-                else if(current_linear_speed >= max_linear_speed_)
-                {
-                    state = SM_STATE::GOAL_POSE_CRUISE;
-                    current_linear_speed = max_linear_speed_;
-                }
-                if(--attempts <= 0)
-                {
-                    state = SM_STATE::GOAL_POSE_FAILED;
-                    std::cout << "SimpleMove.-> Timeout exceeded while trying to reach goal position. Current state: GOAL_POSE_ACCEL." << std::endl;
-                }
-	                {
-                        auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-	                                                min_linear_speed_, current_linear_speed, max_angular_speed_, 
-	                                                alpha_*2, beta_/4, goal_distance_ < 0, move_lat_);
-	                    pub_cmd_vel_->publish(cmd);
-                    }
-	                current_linear_speed += linear_acceleration_/RATE;
-	                break;
-                
-            case SM_STATE::GOAL_POSE_CRUISE:
-                get_robot_position_wrt_odom();
-                global_error = sqrt((goal_x_ - robot_x_)*(goal_x_ - robot_x_) + (goal_y_ - robot_y_)*(goal_y_ - robot_y_));
-                if(global_error < fine_dist_tolerance_)
-                    state = SM_STATE::GOAL_POSE_CORRECT_ANGLE;
-                else if(global_error < current_linear_speed*current_linear_speed/linear_acceleration_)
-                {
-                    state = SM_STATE::GOAL_POSE_DECCEL;
-                    temp_k = current_linear_speed/sqrt(global_error);
-                }
-                if(--attempts <= 0)
-                {
-                    state = SM_STATE::GOAL_POSE_FAILED;
-                    std::cout << "SimpleMove.-> Timeout exceeded while trying to reach goal position. Current state: GOAL_POSE_CRUISE." << std::endl;
-                }
-	                {
-                        auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-	                                                min_linear_speed_, current_linear_speed, max_angular_speed_,
-	                                                alpha_*2, beta_/4, goal_distance_ < 0, move_lat_);
-	                    pub_cmd_vel_->publish(cmd);
-                    }
-	                break;
-
-            case SM_STATE::GOAL_POSE_DECCEL:
-                get_robot_position_wrt_odom();
-                global_error = sqrt((goal_x_ - robot_x_)*(goal_x_ - robot_x_) + (goal_y_ - robot_y_)*(goal_y_ - robot_y_));
-
-                if(global_error < fine_dist_tolerance_)
-                        state = SM_STATE::GOAL_POSE_CORRECT_ANGLE;
-                if(--attempts <= 0)
-                {
-                    state = SM_STATE::GOAL_POSE_FAILED;
-                    std::cout << "SimpleMove.-> Timeout exceeded while trying to reach goal position. Current state: GOAL_POSE_DECCEL." << std::endl;
-                }
-                current_linear_speed = temp_k * sqrt(global_error);
-                if(current_linear_speed < min_linear_speed_) current_linear_speed = min_linear_speed_;
-	                {
-                        auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-	                                                min_linear_speed_, current_linear_speed, max_angular_speed_,
-	                                                alpha_*2, beta_/4, goal_distance_ < 0, move_lat_,
-	                                                should_apply_potential_fields(), rejection_force_.y);
-	                    pub_cmd_vel_->publish(cmd);
-                    }
-	                break;
-
-            case SM_STATE::GOAL_POSE_CORRECT_ANGLE:
-                get_robot_position_wrt_odom();
-                global_error = (goal_t_ - robot_t_);
-                if (global_error > M_PI) global_error-=2*M_PI;
-                if (global_error <= -M_PI) global_error+=2*M_PI;
-                global_error = fabs(global_error);
-                if(global_error < angle_tolerance_)
-                    state = SM_STATE::GOAL_POSE_FINISH;
-                pub_cmd_vel_->publish(calculate_speeds(robot_t_, goal_t_, final_angle_max_angular_speed_, beta_/4));
-                if(--attempts <= 0)
-                {
-                    state = SM_STATE::GOAL_POSE_FAILED;
-                    std::cout << "SimpleMove.-> Timeout exceeded while trying to reach goal position. Current state: GOAL_POSE_CORRECT_ANGLE." << std::endl;
-                }   
-                break;
-
-            case SM_STATE::GOAL_POSE_FINISH:
-                std::cout << "SimpleMove.-> Successful move with dist=" << goal_distance_ << " angle=" << goal_angle_ << std::endl;
-                state = SM_STATE::INIT;
-                msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::SUCCEEDED;
-                pub_goal_reached_->publish(msg_goal_reached);
-                pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                current_linear_speed = 0;
-                break;
-
-            case SM_STATE::GOAL_POSE_FAILED:
-                std::cout << "SimpleMove.-> FAILED move with dist=" << goal_distance_ << " angle=" << goal_angle_ << std::endl;
-                state = SM_STATE::INIT;
-                msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::ABORTED;
-                msg_goal_reached.text = "pose_failed";
-                pub_goal_reached_->publish(msg_goal_reached);
-                pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                current_linear_speed = 0;
-                break;
-
-            case SM_STATE::GOAL_PATH_ACCEL:
-                if(collision_risk_)
-                {
-                    if (!try_rotate_in_place_on_collision("GOAL_PATH_ACCEL"))
-                    {
-                        state = SM_STATE::GOAL_PATH_FAILED;
-                        msg_goal_reached.text = "collision_risk";
-                        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                        std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
-                    }
-                }
-                else{
-                    get_robot_position_wrt_map();
-                    get_next_goal_from_path(prev_pose_idx, next_pose_idx);
-                    global_error = sqrt((global_goal_x_ - robot_x_)*(global_goal_x_ - robot_x_) + (global_goal_y_ - robot_y_)*(global_goal_y_- robot_y_));
-
-                    if(global_error < coarse_dist_tolerance_)
-                    {
-                        state = SM_STATE::GOAL_PATH_FINISH;
-                    }
-                    else if(global_error < current_linear_speed*current_linear_speed/linear_acceleration_)
-                    {
-                        state = SM_STATE::GOAL_PATH_DECCEL;
-                        temp_k = current_linear_speed/sqrt(global_error);
-                    }
-                    else if(current_linear_speed >= max_linear_speed_)
-                    {
-                        state = SM_STATE::GOAL_PATH_CRUISE;
-                        current_linear_speed = max_linear_speed_;
-                    }
-                    if(--attempts <= 0)
-                    {
-                        state = SM_STATE::GOAL_PATH_FAILED;
-                        msg_goal_reached.text = "timeout_path_accel";
-                        std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state: GOAL_PATH_ACCEL."<<std::endl;
-                    }
-	                    auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-	                                                min_linear_speed_, current_linear_speed, max_angular_speed_,
-	                                                alpha_, beta_, false, move_lat_,
-	                                                should_apply_potential_fields(), rejection_force_.y);
-	                    pub_cmd_vel_->publish(cmd);
-                    if(move_head_ && !camera_bypass_) {
-                        pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
-                    }
-
-                    current_linear_speed += linear_acceleration_/RATE;
-                }
-                break;
-
-            case SM_STATE::GOAL_PATH_CRUISE:
-                if(collision_risk_)
-                {
-                    if (!try_rotate_in_place_on_collision("GOAL_PATH_CRUISE"))
-                    {
-                        state = SM_STATE::GOAL_PATH_FAILED;
-                        msg_goal_reached.text = "collision_risk";
-                        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                        std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
-                    }
-                }
-                else
-                {
-                    get_robot_position_wrt_map();
-                    get_next_goal_from_path(prev_pose_idx, next_pose_idx);
-                    global_error = sqrt((global_goal_x_ - robot_x_)*(global_goal_x_ - robot_x_) + (global_goal_y_ - robot_y_)*(global_goal_y_ - robot_y_));
-                    if(global_error < coarse_dist_tolerance_)
-                        state = SM_STATE::GOAL_PATH_FINISH;
-                    else if(global_error < current_linear_speed*current_linear_speed/linear_acceleration_)
-                    {
-                        state = SM_STATE::GOAL_PATH_DECCEL;
-                        temp_k = current_linear_speed/sqrt(global_error);
-                    }
-                    if(--attempts <= 0)
-                    {
-                        state = SM_STATE::GOAL_PATH_FAILED;
-                        msg_goal_reached.text = "timeout_path_cruise";
-                        std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state: GOAL_PATH_CRUISE."<<std::endl;
-                    }
-	                    auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-	                                                min_linear_speed_, current_linear_speed, max_angular_speed_, 
-	                                                alpha_, beta_, false, move_lat_,
-	                                                should_apply_potential_fields(), rejection_force_.y);
-	                    pub_cmd_vel_->publish(cmd);
-                    if(move_head_ && !camera_bypass_) {
-                        pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
-                    }
-                }
-                break;
-
-            case SM_STATE::GOAL_PATH_DECCEL:
-                if(collision_risk_)
-                {
-                    if (!try_rotate_in_place_on_collision("GOAL_PATH_DECCEL"))
-                    {
-                        state = SM_STATE::GOAL_PATH_FAILED;
-                        msg_goal_reached.text = "collision_risk";
-                        pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                        std::cout << "SimpleMove.-> WARNING! Collision risk detected!!!!!" << std::endl;
-                    }
-                }
-                else
-                {
-                    get_robot_position_wrt_map();
-                    get_next_goal_from_path(prev_pose_idx, next_pose_idx);
-                    global_error = sqrt((global_goal_x_ - robot_x_)*(global_goal_x_ - robot_x_) + (global_goal_y_ - robot_y_)*(global_goal_y_ - robot_y_));
-                    if(global_error < coarse_dist_tolerance_)
-                        state = SM_STATE::GOAL_PATH_FINISH;
-                    if(--attempts <= 0)
-                    {
-                        state = SM_STATE::GOAL_PATH_FAILED;
-                        msg_goal_reached.text = "timeout_path_deccel";
-                        std::cout<<"SimpleMove.-> Timeout exceeded while trying to reach goal path. Current state:GOAL_PATH_DECCEL."<<std::endl;
-                    }
-                    current_linear_speed = temp_k * sqrt(global_error);
-                    if(current_linear_speed < min_linear_speed_) current_linear_speed = min_linear_speed_;
-	                    auto cmd = calculate_speeds(robot_x_, robot_y_, robot_t_, goal_x_, goal_y_, 
-	                                                min_linear_speed_, current_linear_speed, max_angular_speed_,
-	                                                alpha_, beta_, false, move_lat_,
-	                                                should_apply_potential_fields(), rejection_force_.y);
-	                    pub_cmd_vel_->publish(cmd);
-                    if(move_head_ && !camera_bypass_) {
-                        pub_head_goal_pose_->publish(get_next_goal_head_angles(next_pose_idx));
-                    }
-                }
-                break;
-
-            case SM_STATE::GOAL_PATH_FINISH:
-                std::cout << "SimpleMove.-> Path succesfully followed." << std::endl;
-                state = SM_STATE::INIT;
-                msg_goal_reached.status = actionlib_msgs::msg::GoalStatus::SUCCEEDED;
-                msg_goal_reached.text = "path_reached";
-                pub_goal_reached_->publish(msg_goal_reached);
-                pub_cmd_vel_->publish(geometry_msgs::msg::Twist());
-                current_linear_speed = 0;
-                break;
-
-            case SM_STATE::GOAL_PATH_FAILED:
-                if (msg_goal_reached.text.empty())
-                    msg_goal_reached.text = "path_failed_unknown";
-                fail_path(msg_goal_reached.text);
-                break;
-
-            default:
-                std::cout<<"SimpleMove.-> A VERY STUPID PERSON PROGRAMMED THIS SHIT. APOLOGIES FOR THE INCONVINIENCE :'(" << std::endl;
-                return;
-            }
-
-        } 
-        catch (const std::exception& e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "SimpleMove.-> Error in SimpleMove processing: %s", e.what());
-        }
-    }
-
+  tf2_ros::Buffer tf_buffer_;
+  tf2_ros::TransformListener tf_listener_;
+  std::string base_frame_, odom_frame_;
+  Path path_;
+  Status status_;
+  std::vector<double> lengths_;
+  std::array<double, 3> velocity_{}, acceleration_{};
+  double progress_ = 0.0, best_progress_ = 0.0, initial_yaw_ = 0.0, head_pan_ = 0.0,
+    final_heading_ = 0.0;
+  bool active_ = false, relative_ = false, reverse_ = false, initialized_ = false;
+  bool head_bypass_ = false, collision_ = false, fields_ready_ = false, last_omni_ = true;
+  double obstacle_speed_limit_ = 0.0;
+  Clock::time_point speed_limit_received_;
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr speed_limit_sub_;
+  geometry_msgs::msg::Vector3 force_;
+  Clock::time_point started_, progress_time_, head_wait_, last_tick_, deviation_since_;
+  Clock::time_point risk_received_, force_received_, head_received_, last_feedback_, map_received_,
+    last_fields_enable_, ready_received_;
+  nav_msgs::msg::OccupancyGrid::ConstSharedPtr map_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
+  OnSetParametersCallbackHandle::SharedPtr parameter_callback_;
+  rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr intent_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr fields_enable_pub_;
+  rclcpp::Publisher<Status>::SharedPtr status_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr head_pub_;
+  rclcpp::Subscription<Path>::SharedPtr path_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr head_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr risk_sub_, ready_sub_, bypass_sub_,
+    nav_stop_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr force_sub_;
+  std::vector<rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr> stop_subs_;
+  std::vector<rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr> distance_subs_;
+  rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr relative_sub_;
 };
 
-int main(int argc, char **argv)
+int main(int argc, char ** argv)
 {
-    rclcpp::init(argc, argv);
-    auto node = std::make_shared<SimpleMoveNode>();
-    //rclcpp::spin(node);
-    rclcpp::executors::MultiThreadedExecutor executor;
-    executor.add_node(node);
-    executor.spin();
-
-    rclcpp::shutdown();
-    
-    return 0;
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<SimpleMoveNode>());
+  rclcpp::shutdown();
+  return 0;
 }

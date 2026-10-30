@@ -13,7 +13,8 @@ enum class PlanStatus
     OutsideMap,
     StartBlocked,
     GoalBlocked,
-    NoPath
+    NoPath,
+    NoSmoothPath
 };
 
 struct PlanOptions
@@ -28,6 +29,11 @@ struct PlanOptions
     double smooth_alpha = 0.1;
     double smooth_beta = 0.9;
     double smooth_tolerance = 0.00001;
+    bool require_smooth_path = true;
+    int smoothing_retry_limit = 8;
+    double smoothing_time_budget_sec = 1.0;
+    double max_path_curvature = 4.0;
+    double max_path_heading_step = 0.35;
 };
 
 struct PlanResult
@@ -60,6 +66,10 @@ public:
         const geometry_msgs::msg::Pose& goal_pose,
         const PlanOptions& options = {},
         const std::vector<geometry_msgs::msg::Pose>& via_points = {});
+
+    // Geometric acceptance is independent of whether smoothing changed points.
+    static bool IsSmooth(const nav_msgs::msg::Path& path,
+                         double max_curvature, double max_heading_step);
 
     // Optional cost_map preserves the original local segment cost ceiling.
     // Revert to the input path if smoothing violates collision or cost limits.
