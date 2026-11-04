@@ -13,12 +13,23 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
     std::cout << "PathCalculator.-> Calculating by A* from " << start_pose.position.x << "  ";
     std::cout << start_pose.position.y << "  to " << goal_pose.position.x << "  " << goal_pose.position.y << std::endl;
 
+    const int map_width = static_cast<int>(map.info.width);
+    const int map_height = static_cast<int>(map.info.height);
+    auto is_valid_cell = [map_width, map_height](int x, int y) {
+        return x >= 0 && y >= 0 && x < map_width && y < map_height;
+    };
+
     int idx_start_x;
     int idx_start_y;
     int idx_goal_x;
     int idx_goal_y;
     idx_start_y = (int)((start_pose.position.y - map.info.origin.position.y)/map.info.resolution);
     idx_start_x = (int)((start_pose.position.x - map.info.origin.position.x)/map.info.resolution);
+    if (!is_valid_cell(idx_start_x, idx_start_y))
+    {
+        std::cout << "PathPlanner.->Start point is outside map bounds!!!!" << std::endl;
+        return false;
+    }
     int idx_start = idx_start_y*map.info.width + idx_start_x;
 
     idx_goal_y  = (int)((goal_pose.position.y  - map.info.origin.position.y)/map.info.resolution);
@@ -36,12 +47,16 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
     
     int MAX_GOAL_UPDATE = 16; //points on circle
     double angle_increment = 2 * M_PI / (MAX_GOAL_UPDATE - 1);
-    while (map.data[idx_goal] != 0 && loop_count < 4)
+    while ((!is_valid_cell(idx_goal_x, idx_goal_y) || map.data[idx_goal] != 0) && loop_count < 4)
     {
         double angle = count * angle_increment;
-        idx_goal_y  = _idx_goal_y + radius * cos(angle);
-        idx_goal_x  = _idx_goal_x + radius * sin(angle);
-        idx_goal  = idx_goal_y *map.info.width + idx_goal_x;
+        const double radius_cells = radius / map.info.resolution;
+        idx_goal_y  = _idx_goal_y + static_cast<int>(std::lround(radius_cells * std::cos(angle)));
+        idx_goal_x  = _idx_goal_x + static_cast<int>(std::lround(radius_cells * std::sin(angle)));
+        if (is_valid_cell(idx_goal_x, idx_goal_y))
+        {
+            idx_goal = idx_goal_y * map.info.width + idx_goal_x;
+        }
 	
         count++;
         if (count == MAX_GOAL_UPDATE)
@@ -53,7 +68,7 @@ bool PathPlanner::AStar(const nav_msgs::msg::OccupancyGrid &map,
     }
 
 
-    if(map.data[idx_goal] != 0)
+    if(!is_valid_cell(idx_goal_x, idx_goal_y) || map.data[idx_goal] != 0)
     {
         std::cout << "PathPlanner.->Goal point is inside non-free space!!!!" << std::endl;
         return false;
