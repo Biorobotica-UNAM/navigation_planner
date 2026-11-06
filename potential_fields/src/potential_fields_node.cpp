@@ -5,6 +5,7 @@
 // ----- ROS 2 messages -----
 #include <geometry_msgs/msg/twist.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
+#include <geometry_msgs/msg/point_stamped.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -26,6 +27,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <map>
+#include <tuple>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -46,6 +49,8 @@ class PotentialFieldsNode : public rclcpp::Node
     Clock::time_point received, last_message, measurement_time;
     std::string rejection = "no_messages";
     cv::Mat image;
+    std::shared_ptr<const std::vector<Eigen::Vector3d>> points;
+    Eigen::Affine3d observation_pose = Eigen::Affine3d::Identity();
   };
 
 public:
@@ -56,6 +61,7 @@ public:
     startup.read_only = true;startup.description = "Configured at startup.";
     const bool namespaced = declare_parameter<bool>("use_namespace", false, startup);
     base_frame_ = declare_parameter<std::string>("base_link_name", "base_link", startup);
+    odom_frame_ = declare_parameter<std::string>("odom_frame", "odom", startup);
     declare_parameter<bool>("debug", false);
     declare_parameter<bool>("show_image", false);
     declare_parameter<bool>("use_pot_fields", false);
@@ -68,13 +74,39 @@ public:
     tf_timeout_ = declare_parameter<double>("tf_timeout_sec", 0.03, startup);
     allow_tf_fallback_ = declare_parameter<bool>("tf_allow_latest_fallback", true, startup);
     tf_max_age_ = declare_parameter<double>("tf_fallback_max_age_sec", 0.2, startup);
-    footprint_ = declare_parameter<double>("collision_footprint_radius", 0.30, startup);
+    footprint_ = declare_parameter<double>("collision_footprint_radius", 0.23, startup);
     margin_ = declare_parameter<double>("collision_stop_margin", 0.08, startup);
     reaction_time_ = declare_parameter<double>("collision_reaction_time_sec", 0.10, startup);
     critical_margin_ = declare_parameter<double>("collision_critical_margin", 0.02, startup);
     deceleration_ = declare_parameter<double>("collision_deceleration", 0.3, startup);
     max_force_ = declare_parameter<double>("repulsion_max_speed", 0.15, startup);
     filter_time_ = declare_parameter<double>("repulsion_filter_time_sec", 0.15, startup);
+    cloud_min_range_ = declare_parameter<double>("cloud_min_range", 0.0, startup);
+    cloud_max_range_ = declare_parameter<double>("cloud_max_range", 5.0, startup);
+    cloud_sensor_frame_ = declare_parameter<std::string>("cloud_sensor_frame", "", startup);
+    evidence_resolution_ = declare_parameter<double>("obstacle_evidence_resolution", 0.05, startup);
+    evidence_min_points_ = declare_parameter<int>("cloud_min_points_per_cell", 2, startup);
+    self_radius_ = declare_parameter<double>("self_obstacle_ignore_radius", footprint_, startup);
+    self_height_ = declare_parameter<double>("self_obstacle_ignore_max_z", 0.30, startup);
+    self_boxes_ = declare_parameter<std::vector<double>>("self_filter_boxes", {}, startup);
+    if (!std::isfinite(cloud_min_range_) || cloud_min_range_ < 0.0 ||
+      !std::isfinite(cloud_max_range_) || cloud_max_range_ <= cloud_min_range_ ||
+      !std::isfinite(self_radius_) || self_radius_ < 0.0 || !std::isfinite(self_height_) ||
+      self_boxes_.size() % 6 != 0 || !std::isfinite(evidence_resolution_) ||
+      evidence_resolution_ <= 0.0 || evidence_min_points_ < 1)
+    {
+      throw std::invalid_argument("Invalid cloud range or self filter");
+    }
+    for (size_t i = 0; i < self_boxes_.size(); i += 6) {
+      for (size_t axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(self_boxes_[i + axis]) ||
+          !std::isfinite(self_boxes_[i + axis + 3]) ||
+          self_boxes_[i + axis] >= self_boxes_[i + axis + 3])
+        {
+          throw std::invalid_argument("Invalid self_filter_boxes bounds");
+        }
+      }
+    }
     if (!std::isfinite(reaction_time_) || reaction_time_ <= 0.0 ||
       !std::isfinite(critical_margin_) || critical_margin_ < 0.0 || critical_margin_ > margin_ ||
       !std::isfinite(future_tolerance_) || future_tolerance_ < 0.0 ||
@@ -131,6 +163,10 @@ public:
     ready_pub_ = create_publisher<std_msgs::msg::Bool>(prefix + "/potential_fields/ready", 10);
     force_pub_ = create_publisher<geometry_msgs::msg::Vector3>(
       prefix + "/potential_fields/pf_rejection_force", 10);
+    confirmed_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+      prefix + "/potential_fields/confirmed_obstacles", 1);
+    witness_pub_ = create_publisher<geometry_msgs::msg::PointStamped>(
+      prefix + "/potential_fields/blocking_obstacle", 1);
     markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
       prefix + "/potential_fields/pot_field_markers", 10);
     intent_sub_ = create_subscription<geometry_msgs::msg::Vector3>(
@@ -156,6 +192,7 @@ public:
         enabled_ = message->data;
         RCLCPP_INFO(get_logger(), "Obstacle monitor %s", enabled_ ? "enabled" : "disabled");
         sensors_[0].received = sensors_[1].received = Clock::time_point{};
+        sensors_[0].points.reset();sensors_[1].points.reset();
         filtered_ = geometry_msgs::msg::Vector3();
         if (!enabled_) {
           laser_sub_.reset();cloud_sub_.reset();ready_pub_->publish(std_msgs::msg::Bool());return;
@@ -166,13 +203,13 @@ public:
             [this](sensor_msgs::msg::LaserScan::ConstSharedPtr scan) {
               auto & sensor = sensors_[0];
               Eigen::Affine3d tf;
-              if (!prepare_observation(scan->header, sensor, tf)) {return;}
               if (scan->ranges.empty() || !std::isfinite(scan->angle_min) ||
               !std::isfinite(scan->angle_increment) || !std::isfinite(scan->range_min) ||
               !std::isfinite(scan->range_max) || scan->range_max <= scan->range_min)
               {
                 sensor.rejection = "invalid_laser_scan";return;
               }
+              if (!prepare_observation(scan->header, sensor, tf)) {return;}
               std::vector<Eigen::Vector3d> points;
               for (size_t i = 0; i < scan->ranges.size(); i += sensors_[0].stride) {
                 const double range = scan->ranges[i],
@@ -185,30 +222,48 @@ public:
                     Eigen::Vector3d(range * std::cos(angle), range * std::sin(angle), 0.0));
                 }
               }
-              evaluate_points(points, sensors_[0], direction_, angular_);
+              sensor.points =
+              std::make_shared<const std::vector<Eigen::Vector3d>>(std::move(points));
+              evaluate_points(*sensor.points, sensor, direction_, angular_);
             });
         }
-        if (use_cloud_ && cloud_enabled_) {subscribe_cloud();}
+        if (use_cloud_ && cloud_enabled_) {update_cloud_subscription();}
       });
+
     cloud_enable_sub_ = create_subscription<std_msgs::msg::Bool>(
-      prefix + "/potential_fields/enable_cloud", rclcpp::QoS(1),
-      [this](std_msgs::msg::Bool::ConstSharedPtr message) {
+      prefix + "/potential_fields/enable_cloud",
+      rclcpp::QoS(1),
+      [this](std_msgs::msg::Bool::ConstSharedPtr message)
+      {
         std::lock_guard<std::mutex> lock(state_mutex_);
+        if (cloud_enabled_ == message->data) {return;}
         ++cloud_generation_;
         pending_cloud_.reset();
         cloud_enabled_ = message->data;
         if (!cloud_enabled_) {
-          cloud_sub_.reset();sensors_[1].force = geometry_msgs::msg::Vector3();
-        } else if (enabled_ && use_cloud_ && !cloud_sub_) {subscribe_cloud();}
+          cloud_sub_.reset();
+          sensors_[1].force = geometry_msgs::msg::Vector3();
+          sensors_[1].points.reset();
+        } else if (enabled_ && use_cloud_ && !cloud_sub_) {
+          update_cloud_subscription();
+        }
       });
+
     RCLCPP_INFO(
-      get_logger(), "Obstacle monitor: lidar=%s topic=%s; cloud=%s topic=%s; frame=%s; waiting for enable on %s/potential_fields/enable",
-      use_lidar_ ? "on" : "off", laser_topic_.c_str(), use_cloud_ ? "on" : "off",
-      cloud_topic_.c_str(), base_frame_.c_str(), prefix.c_str());
+      get_logger(),
+      "Obstacle monitor: lidar=%s topic=%s; cloud=%s topic=%s; frame=%s; waiting for enable on %s/potential_fields/enable",
+      use_lidar_ ? "on" : "off",
+      laser_topic_.c_str(),
+      use_cloud_ ? "on" : "off",
+      cloud_topic_.c_str(),
+      base_frame_.c_str(),
+      prefix.c_str());
+
     cloud_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     cloud_timer_ = create_wall_timer(
       std::chrono::milliseconds(30),
       std::bind(&PotentialFieldsNode::process_cloud, this), cloud_group_);
+
     timer_ =
       create_wall_timer(
       std::chrono::milliseconds(30),
@@ -230,13 +285,38 @@ private:
         timeout_ << "s)";
       sensor.rejection = reason.str();return false;
     }
-    sensor.measurement_time = Clock::now() - std::chrono::duration_cast<Clock::duration>(
+    const auto measurement_time = Clock::now() - std::chrono::duration_cast<Clock::duration>(
       std::chrono::duration<double>(std::max(0.0, age)));
+    Eigen::Affine3d observation_pose;
+    try {
+      const auto pose = tf_buffer_.lookupTransform(
+        odom_frame_, base_frame_, stamp,
+        rclcpp::Duration::from_seconds(tf_timeout_));
+      observation_pose = tf2::transformToEigen(pose.transform);
+    } catch (const tf2::TransformException & error) {
+      if (!allow_tf_fallback_) {
+        sensor.rejection = std::string("observation_odometry: ") + error.what();return false;
+      }
+      try {
+        const auto pose = tf_buffer_.lookupTransform(odom_frame_, base_frame_, tf2::TimePointZero);
+        const auto pose_stamp = rclcpp::Time(pose.header.stamp, get_clock()->get_clock_type());
+        if (pose_stamp.nanoseconds() != 0 &&
+          std::abs((stamp - pose_stamp).seconds()) > tf_max_age_)
+        {
+          sensor.rejection = "stale_observation_odometry";return false;
+        }
+        observation_pose = tf2::transformToEigen(pose.transform);
+      } catch (const tf2::TransformException & fallback_error) {
+        sensor.rejection = std::string("observation_odometry: ") + fallback_error.what();
+        return false;
+      }
+    }
     try {
       const auto transform = tf_buffer_.lookupTransform(
         base_frame_, header.frame_id, stamp,
         rclcpp::Duration::from_seconds(tf_timeout_));
       result = tf2::transformToEigen(transform.transform);
+      sensor.observation_pose = observation_pose;sensor.measurement_time = measurement_time;
       sensor.rejection.clear();return true;
     } catch (const tf2::TransformException & error) {
       sensor.rejection = std::string("exact_tf: ") + error.what();
@@ -255,6 +335,7 @@ private:
         sensor.rejection = reason.str();return false;
       }
       result = tf2::transformToEigen(transform.transform);
+      sensor.observation_pose = observation_pose;sensor.measurement_time = measurement_time;
       sensor.rejection.clear();
       if (get_parameter("debug").as_bool()) {
         RCLCPP_INFO_THROTTLE(
@@ -268,18 +349,37 @@ private:
     }
   }
 
-  void subscribe_cloud()
+  void update_cloud_subscription()
   {
+    // Both callers already hold state_mutex_; do not acquire it recursively.
+    const bool should_subscribe = enabled_ && use_cloud_ && cloud_enabled_;
+
+    if (static_cast<bool>(cloud_sub_) == should_subscribe) {
+      return;
+    }
+
+    if (!should_subscribe) {
+      cloud_sub_.reset();
+      pending_cloud_.reset();
+      sensors_[1].force = geometry_msgs::msg::Vector3();
+      sensors_[1].points.reset();
+      return;
+    }
+
     sensors_[1].received = Clock::time_point{};
-    // Reception stays in the control group and only replaces the latest frame.
-    // Dense point clouds must never hold up LiDAR or the safety heartbeat.
-    const auto generation = cloud_generation_;
+
+    // Capture a fresh generation only when creating a subscription.
+    const auto generation = ++cloud_generation_;
+
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
       cloud_topic_,
       rclcpp::SensorDataQoS(),
-      [this, generation](sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud) {
+      [this, generation](sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud)
+      {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        if (generation != cloud_generation_ || !enabled_ || !cloud_enabled_) {return;}
+        if (generation != cloud_generation_ || !enabled_ || !cloud_enabled_) {
+          return;
+        }
         pending_cloud_ = cloud;
         sensors_[1].last_message = Clock::now();
       });
@@ -304,11 +404,22 @@ private:
     const auto previous_force = sensor.force;
     const bool previous_risk = sensor.risk;
     const double previous_limit = sensor.speed_limit;
+    const auto previous_points = sensor.points;
+    const auto previous_pose = sensor.observation_pose;
+    const auto previous_measurement = sensor.measurement_time;
+    sensor_msgs::msg::PointCloud2 confirmed;
     // Keep early validation returns local so every rejection is committed too.
     const auto process = [&]() {
 
         Eigen::Affine3d tf;
         if (!prepare_observation(cloud->header, sensor, tf)) {return;}
+        Eigen::Affine3d to_sensor = Eigen::Affine3d::Identity();
+        if (!cloud_sensor_frame_.empty() && cloud_sensor_frame_ != cloud->header.frame_id) {
+          auto header = cloud->header;header.frame_id = cloud_sensor_frame_;
+          Eigen::Affine3d sensor_pose;
+          if (!prepare_observation(header, sensor, sensor_pose)) {return;}
+          to_sensor = sensor_pose.inverse() * tf;
+        }
         if (cloud->width == 0 || cloud->height == 0 || cloud->point_step == 0 ||
           cloud->row_step < static_cast<uint64_t>(cloud->width) * cloud->point_step ||
           cloud->data.size() < static_cast<uint64_t>(cloud->row_step) * cloud->height)
@@ -351,22 +462,82 @@ private:
             std::memcpy(&xyz[axis], bytes.data(), 4);
           }
           const Eigen::Vector3d p(xyz[0], xyz[1], xyz[2]);
-          if (p.allFinite()) {points.push_back(tf * p);}
+          // Range belongs to the sensor origin in 3D, before the full TF rotation.
+          const double range = (to_sensor * p).norm();
+          if (p.allFinite() && range >= cloud_min_range_ && range <= cloud_max_range_) {
+            points.push_back(tf * p);
+          }
         }
+        if (points.empty()) {sensor.rejection = "no_valid_depth";return;}
         evaluate_points(points, sensor, direction, angular);
+
+        // Forward supported geometry to the map even when its ordinary cloud
+        // crop/density filter would reject the points that caused braking.
+        std::map<std::pair<int, int>, std::pair<size_t, Eigen::Vector3d>> cells;
+        for (const auto & p : points) {
+          if (p.z() < sensor.min_z || p.z() > sensor.max_z ||
+            (p.head<2>().norm() <= self_radius_ && p.z() <= self_height_)) {continue;}
+          bool self = false;
+          for (size_t b = 0; b < self_boxes_.size(); b += 6) {
+            if (p.x() >= self_boxes_[b] && p.y() >= self_boxes_[b + 1] &&
+              p.z() >= self_boxes_[b + 2] && p.x() <= self_boxes_[b + 3] &&
+              p.y() <= self_boxes_[b + 4] && p.z() <= self_boxes_[b + 5]) {self = true;break;}
+          }
+          if (self) {continue;}
+          auto & cell = cells[{int(std::floor(p.x() / evidence_resolution_)),
+                int(std::floor(p.y() / evidence_resolution_))}];
+          if (cell.first == 0 || p.head<2>().squaredNorm() < cell.second.head<2>().squaredNorm()) {
+            cell.second = p;
+          }
+          ++cell.first;
+        }
+        sensor_msgs::msg::PointCloud2 evidence;
+        evidence.header = cloud->header;
+        evidence.height = 1;evidence.point_step = 12;evidence.is_dense = true;
+        for (size_t axis = 0; axis < 3; ++axis) {
+          sensor_msgs::msg::PointField field;
+          field.name = axis == 0 ? "x" : axis == 1 ? "y" : "z";
+          field.offset = axis * 4;field.datatype = field.FLOAT32;field.count = 1;
+          evidence.fields.push_back(field);
+        }
+        evidence.is_bigendian = host_big;
+        auto cached = std::make_shared<std::vector<Eigen::Vector3d>>();
+        for (const auto & entry : cells) {
+          cached->insert(
+            cached->end(), std::min(entry.second.first, size_t(sensor.threshold + 1)),
+            entry.second.second);
+          if (entry.second.first < size_t(evidence_min_points_) ||
+            entry.second.second.head<2>().norm() > sensor.max_x)
+          {
+            continue;
+          }
+          const Eigen::Vector3d p = tf.inverse() * entry.second.second;
+          const std::array<float, 3> xyz{float(p.x()), float(p.y()), float(p.z())};
+          const auto offset = evidence.data.size();evidence.data.resize(offset + 12);
+          std::memcpy(evidence.data.data() + offset, xyz.data(), 12);
+          ++evidence.width;
+        }
+        evidence.row_step = evidence.width * evidence.point_step;
+        sensor.points = std::move(cached);
+        // A generation change is checked at commit below before publishing.
+        confirmed = std::move(evidence);
 
       };
     process();
     const double elapsed = std::chrono::duration<double>(Clock::now() - started).count();
     const double age =
       (now() - rclcpp::Time(cloud->header.stamp, get_clock()->get_clock_type())).seconds();
-    if (sensor.received != previous_valid && age > timeout_) {
+    if (sensor.received == previous_valid || age > timeout_) {
       sensor.received = previous_valid;
       sensor.force = previous_force;sensor.risk = previous_risk;sensor.speed_limit = previous_limit;
+      sensor.points = previous_points;
+      sensor.observation_pose = previous_pose;sensor.measurement_time = previous_measurement;
       sensor.image.release();
-      std::ostringstream reason;
-      reason << "cloud_processing_overrun: duration=" << elapsed << "s sensor_age=" << age << "s";
-      sensor.rejection = reason.str();
+      if (age > timeout_) {
+        std::ostringstream reason;
+        reason << "cloud_processing_overrun: duration=" << elapsed << "s sensor_age=" << age << "s";
+        sensor.rejection = reason.str();
+      }
     }
     if (elapsed > std::min(0.1, timeout_ * 0.5)) {
       RCLCPP_WARN_THROTTLE(
@@ -380,6 +551,7 @@ private:
       if (generation == cloud_generation_ && enabled_ && cloud_enabled_) {
         sensor.last_message = sensors_[1].last_message;
         sensors_[1] = std::move(sensor);
+        if (age <= timeout_ && confirmed.width > 0) {confirmed_pub_->publish(confirmed);}
       }
     }
   }
@@ -403,16 +575,26 @@ private:
         distance = std::hypot(p.x(), p.y());
       // A swept circle uses actual lateral clearance; the full braking zone
       // limits speed instead of being interpreted as an immediate collision.
-      if (distance <= 0.10) {continue;}
+      if (distance <= self_radius_ && p.z() <= self_height_) {continue;}
+      bool self = false;
+      for (size_t b = 0; b < self_boxes_.size(); b += 6) {
+        if (p.x() >= self_boxes_[b] && p.y() >= self_boxes_[b + 1] &&
+          p.z() >= self_boxes_[b + 2] && p.x() <= self_boxes_[b + 3] &&
+          p.y() <= self_boxes_[b + 4] && p.z() <= self_boxes_[b + 5]) {self = true;break;}
+      }
+      if (self) {continue;}
       if (along >= 0.0 && std::abs(across) < stop_radius) {
-        clearances.push_back(
-          along -
-          std::sqrt(std::max(0.0, stop_radius * stop_radius - across * across)));
+        // Inside the preferred margin, permit a tangent/escaping motion while
+        // retaining the critical footprint as the hard braking boundary.
+        const double radius = distance < stop_radius ? critical_radius : stop_radius;
+        if (std::abs(across) < radius) {
+          clearances.push_back(along - std::sqrt(std::max(0.0, radius * radius - across * across)));
+        }
       }
       const bool danger = (along >= 0.0 && distance < critical_radius) ||
         (std::abs(angular) > 0.02 && distance < critical_radius);
       if (danger) {++obstacles;}
-      if (distance > 0.10 && distance < sensor.radius && along > sensor.min_x &&
+      if (distance < sensor.radius && along > sensor.min_x &&
         along < sensor.max_x &&
         across > sensor.min_y && across < sensor.max_y)
       {
@@ -462,13 +644,28 @@ private:
       sensors = sensors_;
     }
     const auto tick = Clock::now();
+    Eigen::Affine3d current_pose;
+    builtin_interfaces::msg::Time evaluation_stamp;
+    try {
+      const auto pose = tf_buffer_.lookupTransform(odom_frame_, base_frame_, tf2::TimePointZero);
+      const auto stamp = rclcpp::Time(pose.header.stamp, get_clock()->get_clock_type());
+      if (stamp.nanoseconds() != 0 && std::abs((now() - stamp).seconds()) > timeout_) {
+        throw std::runtime_error("stale monitor odometry");
+      }
+      current_pose = tf2::transformToEigen(pose.transform);
+      evaluation_stamp = stamp.nanoseconds() == 0 ? now() : stamp;
+    } catch (const std::exception & error) {
+      ready_pub_->publish(std_msgs::msg::Bool());
+      std_msgs::msg::Float32 limit;limit.data = 0.0;speed_limit_pub_->publish(limit);
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "%s", error.what());return;
+    }
     geometry_msgs::msg::Vector3 force;
     bool risk = false, ready = true;
     double speed_limit = std::numeric_limits<double>::infinity();
     std::ostringstream unavailable;
     for (size_t i = 0; i < 2; ++i) {
       if ((i == 0 && !use_lidar_) || (i == 1 && (!use_cloud_ || !cloud_enabled_))) {continue;}
-      const auto & sensor = sensors[i];
+      auto & sensor = sensors[i];
       if (sensor.received == Clock::time_point{} ||
         std::chrono::duration<double>(tick - sensor.received).count() > timeout_)
       {
@@ -487,6 +684,15 @@ private:
         }
         continue;
       }
+      // Re-evaluate intent at control rate; stopping must not freeze an old
+      // directional speed limit while a safe lateral escape is being selected.
+      std::vector<Eigen::Vector3d> points;
+      if (sensor.points) {
+        const Eigen::Affine3d to_current = current_pose.inverse() * sensor.observation_pose;
+        points.reserve(sensor.points->size());
+        for (const auto & point : *sensor.points) {points.push_back(to_current * point);}
+        evaluate_points(points, sensor, direction_, angular_);
+      }
       if (!sensor.image.empty() && get_parameter("show_image").as_bool()) {
         cv::imshow(i == 0 ? "Potential fields LiDAR" : "Potential fields cloud", sensor.image);
         cv::waitKey(1);
@@ -494,6 +700,31 @@ private:
       risk = risk || sensor.risk;
       speed_limit = std::min(speed_limit, sensor.speed_limit);
       force.x += sensor.force.x;force.y += sensor.force.y;
+      if (sensor.speed_limit < 0.03 && sensor.points) {
+        double nearest = std::numeric_limits<double>::infinity();
+        Eigen::Vector3d point;
+        for (const auto & p : points) {
+          const double along = std::cos(direction_) * p.x() + std::sin(direction_) * p.y();
+          const double across = -std::sin(direction_) * p.x() + std::cos(direction_) * p.y();
+          if (p.z() >= sensor.min_z && p.z() <= sensor.max_z && along >= 0.0 &&
+            std::abs(across) <= footprint_ + margin_ && p.head<2>().norm() > self_radius_ &&
+            p.norm() < nearest)
+          {
+            nearest = p.norm();point = p;
+          }
+        }
+        if (std::isfinite(nearest)) {
+          geometry_msgs::msg::PointStamped witness;
+          witness.header.frame_id = base_frame_;witness.header.stamp = evaluation_stamp;
+          witness.point.x = point.x();witness.point.y = point.y();witness.point.z = point.z();
+          witness_pub_->publish(witness);
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Motion limited by %s: limit=%.3f m/s clearance=%.3f m point=(%.3f, %.3f, %.3f)",
+            i == 0 ? "lidar" : "cloud", sensor.speed_limit, sensor.clearance,
+            point.x(), point.y(), point.z());
+        }
+      }
     }
     if (!ready) {
       RCLCPP_WARN_THROTTLE(
@@ -538,17 +769,23 @@ private:
   sensor_msgs::msg::PointCloud2::ConstSharedPtr pending_cloud_;
   uint64_t cloud_generation_ = 0;
   rclcpp::CallbackGroup::SharedPtr cloud_group_;
-  std::string base_frame_, laser_topic_, cloud_topic_;
+  std::string base_frame_, odom_frame_, laser_topic_, cloud_topic_, cloud_sensor_frame_;
   bool use_lidar_, use_cloud_, enabled_ = false, cloud_enabled_ = true;
   bool allow_tf_fallback_;
   double future_tolerance_, tf_timeout_, tf_max_age_;
   bool previous_risk_ = false;
   double reaction_time_, critical_margin_;
   double timeout_, footprint_, margin_, deceleration_, max_force_, filter_time_;
+  double cloud_min_range_, cloud_max_range_, self_radius_, self_height_;
+  double evidence_resolution_;
+  int evidence_min_points_;
+  std::vector<double> self_boxes_;
   double speed_ = 0.0, angular_ = 0.0, direction_ = 0.0;
   geometry_msgs::msg::Vector3 filtered_;
   rclcpp::TimerBase::SharedPtr timer_, cloud_timer_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr speed_limit_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr confirmed_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr witness_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr risk_pub_, ready_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr force_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;

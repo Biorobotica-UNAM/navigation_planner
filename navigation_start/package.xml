@@ -22,6 +22,14 @@
   <test_depend>simple_move</test_depend>
   <test_depend>mvn_pln</test_depend>
   <test_depend>potential_fields</test_depend>
+  <test_depend>path_planner</test_depend>
+  <test_depend>map_augmenter</test_depend>
+  <test_depend>hsr_hardware</test_depend>
+  <test_depend>control_msgs</test_depend>
+  <test_depend>trajectory_msgs</test_depend>
+  <test_depend>python3-numpy</test_depend>
+  <test_depend>python3-yaml</test_depend>
+  <test_depend>python3-pil</test_depend>
 
   <exec_depend>launch</exec_depend>
 <exec_depend>launch_ros</exec_depend>

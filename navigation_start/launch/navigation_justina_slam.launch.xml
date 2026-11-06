@@ -7,6 +7,7 @@
   <arg name="use_sim_time"       default="false"/>
   <arg name="namespace_hardware" default="hardware"/>
   <arg name="namespace_nav"      default="navigation"/>
+  <arg name="debug_detection" default="false"/>
   <arg name="use_namespace"      default="true"/>
   <arg name="base_link_name"     default="base_link"/>
 
@@ -82,6 +83,11 @@
   <arg name="augmenter_inflation_radius" default="0.18"/>
   <arg name="augmenter_cost_radius"      default="0.20"/>
   <arg name="robot_radius" default="0.40"/>
+  <arg name="start_recovery_margin" default="0.05"/>
+  <arg name="near_goal_extra_margin" default="0.10"/>
+  <arg name="near_goal_min_progress" default="0.90"/>
+  <arg name="final_position_settle_sec" default="0.30"/>
+  <arg name="head_goal_deadband_rad" default="0.04"/>
   <arg name="static_obstacle_inflation_radius" default="0.05"/>
   <arg name="dynamic_obstacle_inflation_radius" default="0.12"/>
   <arg name="map_augmenter_debug" default="false"/>
@@ -327,6 +333,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_namespace"      value="$(var use_namespace)"/>
     <param name="laser_scan_topic"   value="$(var laser_scan_topic)"/>
     <param name="point_cloud_topic"  value="$(var point_cloud_topic)"/>
@@ -380,6 +387,8 @@
     <param name="diagonal_paths" value="$(var diagonal_paths)"/>
     <param name="allow_unknown" value="$(var allow_unknown)"/>
     <param name="unknown_cost" value="$(var unknown_cost)"/>
+    <param name="robot_radius" value="$(var robot_radius)"/>
+    <param name="start_recovery_margin" value="$(var start_recovery_margin)"/>
   </node>
 
   <node name="simple_move"
@@ -388,6 +397,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_namespace"     value="$(var use_namespace)"/>
     <param name="max_linear_speed"  value="$(var max_linear_speed)"/>
     <param name="max_angular_speed" value="$(var max_angular_speed)"/>
@@ -408,6 +418,8 @@
     <param name="mapped_area_min_known_ratio" value="$(var mapped_area_min_known_ratio)"/>
     <param name="mapped_area_map_topic" value="map"/>
     <remap from="/cmd_vel" to="$(var cmd_vel_topic)"/>
+    <param name="final_position_settle_sec" value="$(var final_position_settle_sec)"/>
+    <param name="head_goal_deadband_rad" value="$(var head_goal_deadband_rad)"/>
   </node>
 
   <node name="potential_fields"
@@ -470,10 +482,14 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="debug_detection" value="$(var debug_detection)"/>
     <remap from="nav_control/goal" to="move_base_simple/goal"/>
     <param name="use_namespace"  value="$(var use_namespace)"/>
     <param name="patience"       value="$(var mvn_pln_patience)"/>
     <param name="base_link_name" value="$(var base_link_name)"/>
+    <param name="robot_radius" value="$(var robot_radius)"/>
+    <param name="near_goal_extra_margin" value="$(var near_goal_extra_margin)"/>
+    <param name="near_goal_min_progress" value="$(var near_goal_min_progress)"/>
   </node>
 
 

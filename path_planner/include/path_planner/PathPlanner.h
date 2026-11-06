@@ -5,6 +5,7 @@
 #include <nav_msgs/msg/path.hpp>
 
 #include <vector>
+#include <string>
 
 enum class PlanStatus
 {
@@ -24,6 +25,7 @@ struct PlanOptions
     double unknown_cost = 1.0;
     double goal_tolerance_m = 0.0;
     double escape_clear_radius = 0.6;
+    double start_recovery_mask_radius = 0.28;
     bool disable_rear_path_plan = false;
     double online_behind_clearance = 1.0;
     double smooth_alpha = 0.1;
@@ -32,8 +34,10 @@ struct PlanOptions
     bool require_smooth_path = true;
     int smoothing_retry_limit = 8;
     double smoothing_time_budget_sec = 1.0;
-    double max_path_curvature = 4.0;
-    double max_path_heading_step = 0.35;
+    double max_path_curvature = 6.0;
+    double max_path_heading_step = 0.50;
+    double recovery_cost_radius = 0.35;
+    double recovery_cost_peak = 40.0;
 };
 
 struct PlanResult
@@ -42,11 +46,19 @@ struct PlanResult
     nav_msgs::msg::Path path;
     bool used_escape = false;
     bool goal_relocated = false;
+    std::string detail;
 };
 
 class PathPlanner
 {
 public:
+    // A bounded local search on the physical-clearance layer; input grids stay immutable.
+    static PlanResult RecoverStart(
+        const nav_msgs::msg::OccupancyGrid& map,
+        const nav_msgs::msg::OccupancyGrid& clearance_map,
+        const geometry_msgs::msg::Pose& start_pose,
+        const PlanOptions& options = {});
+
     // The original six-argument call remains valid through default arguments.
     static bool AStar(
         const nav_msgs::msg::OccupancyGrid& map,
@@ -65,13 +77,15 @@ public:
         const geometry_msgs::msg::Pose& start_pose,
         const geometry_msgs::msg::Pose& goal_pose,
         const PlanOptions& options = {},
-        const std::vector<geometry_msgs::msg::Pose>& via_points = {});
+        const std::vector<geometry_msgs::msg::Pose>& via_points = {},
+        const std::vector<nav_msgs::msg::Path>& avoided_paths = {},
+        const nav_msgs::msg::OccupancyGrid* start_clearance_map = nullptr);
 
     // Geometric acceptance is independent of whether smoothing changed points.
     static bool IsSmooth(const nav_msgs::msg::Path& path,
                          double max_curvature, double max_heading_step);
 
-    // Optional cost_map preserves the original local segment cost ceiling.
+    // Optional cost_map bounds the integrated soft cost while rounding corners.
     // Revert to the input path if smoothing violates collision or cost limits.
     static nav_msgs::msg::Path SmoothPath(
         const nav_msgs::msg::Path& path,
@@ -80,5 +94,6 @@ public:
         float tolerance = 0.00001f,
         const nav_msgs::msg::OccupancyGrid* collision_map = nullptr,
         bool allow_unknown = false,
-        const nav_msgs::msg::OccupancyGrid* cost_map = nullptr);
+        const nav_msgs::msg::OccupancyGrid* cost_map = nullptr,
+        std::string* rejection = nullptr);
 };

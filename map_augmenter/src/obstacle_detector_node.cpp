@@ -107,7 +107,7 @@ public:
     const double period       = parameter("processing_period_sec", 0.075,
                                           "Integration and publication interval.");
 
-    obstacle_timeout_         = parameter("obstacle_timeout_sec", 0.75, 
+    obstacle_timeout_         = parameter("obstacle_timeout_sec", 2.5,
                                           "Lifetime since the last sensor observation.");
 
     sensor_max_age_           = parameter("sensor_max_age_sec", 0.5,
@@ -137,8 +137,39 @@ public:
     ignore_static_            = parameter("ignore_static_obstacles", true, 
                                           "Suppress detections already represented by the base map.");
 
-    self_ignore_radius_       = parameter("self_obstacle_ignore_radius", 0.0,
+    self_ignore_radius_       = parameter("self_obstacle_ignore_radius", 0.23,
                                           "Ignore sensor points within this horizontal distance of the robot base.");
+    self_ignore_max_z_ = parameter("self_obstacle_ignore_max_z", 0.30,
+      "Maximum height of the cylindrical base self filter, metres.");
+    self_boxes_ = parameter("self_filter_boxes", std::vector<double>{},
+      "Additional base-frame self volumes: xmin,ymin,zmin,xmax,ymax,zmax per box.");
+    cloud_min_range_ = parameter("cloud_min_range", 0.0,
+      "Minimum 3D range from the cloud frame origin, before transforming to the base.");
+    cloud_sensor_frame_ = parameter("cloud_sensor_frame", std::string(""),
+      "Physical camera frame for range/view geometry; empty uses the cloud header frame.");
+    cloud_max_range_ = parameter("cloud_max_range", 5.0,
+      "Maximum 3D range from the cloud frame origin.");
+    unobserved_hold_radius_ = parameter("unobserved_obstacle_hold_radius", 1.0,
+      "Retain nearby cloud evidence after timeout until observed free or left behind.");
+    unobserved_hold_sec_ = parameter("unobserved_obstacle_hold_sec", 3.0,
+      "Maximum near-obstacle memory age in seconds; minimum-range blind spots remain protected.");
+    if (!std::isfinite(cloud_min_range_) || cloud_min_range_ < 0.0 ||
+      !std::isfinite(cloud_max_range_) || cloud_max_range_ <= cloud_min_range_ ||
+      !std::isfinite(self_ignore_max_z_) || !std::isfinite(unobserved_hold_radius_) ||
+      unobserved_hold_radius_ < 0.0 || !std::isfinite(unobserved_hold_sec_) ||
+      unobserved_hold_sec_ <= 0.0 || self_boxes_.size() % 6 != 0)
+    {
+      throw std::invalid_argument("Invalid cloud geometry limits");
+    }
+    for (size_t i = 0; i < self_boxes_.size(); i += 6) {
+      for (size_t axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(self_boxes_[i + axis]) || !std::isfinite(self_boxes_[i + axis + 3]) ||
+          self_boxes_[i + axis] >= self_boxes_[i + axis + 3])
+        {
+          throw std::invalid_argument("Invalid self_filter_boxes bounds");
+        }
+      }
+    }
 
     laser_min_range_          = parameter("laser_min_range", 0.10,
                                          "Additional minimum laser range.");
@@ -212,6 +243,9 @@ public:
 
     cloud_topic2_               = parameter("point_cloud_topic2", std::string("/point_cloud2"),
                                             "Optional camera input 2 PointCloud2 topic.");
+    confirmed_sub_ = create_subscription<Cloud>(
+      endpoint("confirmed_obstacles_topic", "/potential_fields/confirmed_obstacles"), 1,
+      [this](Cloud::ConstSharedPtr cloud) {latest_confirmed_ = cloud;});
                               
     const auto laser_topic      = parameter("laser_scan_topic", std::string("/scan"),
                                        "Hokuyo or other LaserScan topic.");
@@ -539,6 +573,7 @@ private:
     lidar_diagnostics_ = SensorDiagnostics{};
     diagnostic_cycles_ = diagnostic_no_grid_ = diagnostic_expired_before_ = diagnostic_expired_after_ = 0;
     diagnostic_pose_resets_ = diagnostic_clock_resets_ = diagnostic_cleared_cells_ = 0;
+    diagnostic_cloud_refreshes_ = diagnostic_confirmed_refreshes_ = diagnostic_ray_cleared_ = 0;
     diagnostic_processing_ms_ = diagnostic_maximum_processing_ms_ = 0.0;
     diagnostics_window_ = SteadyClock::now();
   }
@@ -603,6 +638,15 @@ private:
          << " expired_before=" << diagnostic_expired_before_ << " expired_after=" << diagnostic_expired_after_
          << " pose_resets=" << diagnostic_pose_resets_ << " clock_resets=" << diagnostic_clock_resets_
          << " cleared_cells=" << diagnostic_cleared_cells_
+         << " cloud_refreshes=" << diagnostic_cloud_refreshes_
+         << " confirmed_refreshes=" << diagnostic_confirmed_refreshes_
+         << " ray_cleared=" << diagnostic_ray_cleared_
+         << " memory{tracks=" << cloud_tracks_.size()
+         << " retained_hold=" << retention_counts_[0] << " retained_blind=" << retention_counts_[1]
+         << " retained_robot_tf=" << retention_counts_[2] << " retained_camera_tf=" << retention_counts_[3]
+         << std::setprecision(3) << " oldest_s=" << oldest_retained_age_ << " oldest_xy=" << oldest_retained_x_ << "," << oldest_retained_y_
+         << " camera_range_m=" << oldest_retained_range_ << " oldest_reason=" << oldest_retained_reason_
+         << " camera_frame=" << oldest_retained_frame_ << "}"
          << " cycle_ms{avg=" << (diagnostic_cycles_ ? diagnostic_processing_ms_ / diagnostic_cycles_ : 0.0)
          << " max=" << diagnostic_maximum_processing_ms_ << "}";
     RCLCPP_INFO(get_logger(), "%s", text.str().c_str());
@@ -675,6 +719,7 @@ private:
     const bool changed = !have_grid_ || !map_augmenter::same_geometry(obstacles_map_, map);
     const bool reference_changed = changed || static_reference_.data != map.data;
     if (changed) {
+      cloud_tracks_.clear();
       Grid resized = map_augmenter::empty_obstacle_grid(map);
       std::vector<int64_t> times(resized.data.size(), never_observed);
       if (have_grid_) {
@@ -813,7 +858,7 @@ private:
     int x{0}, y{0};
   };
 
-  void add_cloud(const Cloud & cloud, int stride, SensorDiagnostics * stats)
+  void add_cloud(const Cloud & cloud, int stride, SensorDiagnostics * stats, bool confirmed = false)
   {
     FrameTimer frame_timer(stats);
     if (cloud.width == 0 || cloud.height == 0) {
@@ -843,9 +888,14 @@ private:
     }
     if (stats) {++stats->tf_ok;}
 
+    Eigen::Affine3d range_to_base = sensor_to_base;
+    if (!cloud_sensor_frame_.empty() && cloud_sensor_frame_ != cloud.header.frame_id &&
+      !lookup_transform(base_link_, cloud_sensor_frame_, stamp, range_to_base, stats)) {return;}
+    const Eigen::Affine3d to_sensor = range_to_base.inverse() * sensor_to_base;
+
     double crop_cos = 1.0, crop_sin = 0.0;
     if (cloud_follow_head_) {
-      const Eigen::Vector3d view = sensor_to_base.linear() * cloud_forward_axis_;
+      const Eigen::Vector3d view = range_to_base.linear() * cloud_forward_axis_;
       if (std::hypot(view.x(), view.y()) > cloud_yaw_min_projection_) {
         const double yaw = std::atan2(view.y(), view.x());
         crop_cos = std::cos(yaw);
@@ -853,6 +903,8 @@ private:
       }
     }
     std::unordered_map<size_t, CellEvidence> hits;
+    std::unordered_map<int, Eigen::Vector3d> rays;
+    std::unordered_map<size_t, Eigen::Vector3d> positions;
     const size_t total = static_cast<size_t>(cloud.width) * cloud.height;
     for (size_t i = 0; i < total; i += static_cast<size_t>(stride)) {
       if (stats) {++stats->sampled;}
@@ -864,14 +916,37 @@ private:
         read_coordinate(p, *fy, cloud.is_bigendian),
         read_coordinate(p, *fz, cloud.is_bigendian));
       if (!point.allFinite()) {continue;}
+      const Eigen::Vector3d sensor_point = to_sensor * point;
+      const double range = sensor_point.norm();
+      if (!confirmed && (range < cloud_min_range_ || range > cloud_max_range_)) {continue;}
+      if (!confirmed && range > 1e-6) {
+        const int azimuth = int(std::floor(std::atan2(sensor_point.y(), sensor_point.x()) / 0.02));
+        const int elevation = int(std::floor(std::atan2(sensor_point.z(), sensor_point.head<2>().norm()) / 0.02));
+        const int key = (azimuth + 160) * 320 + elevation + 160;
+        const auto found = rays.find(key);
+        if (found == rays.end()) {rays.emplace(key, sensor_point);} else if (
+          found->second.squaredNorm() < sensor_point.squaredNorm()) {found->second = sensor_point;}
+      }
       if (stats) {++stats->finite;}
       const Eigen::Vector3d base_point = sensor_to_base * point;
       const Eigen::Vector3d crop_point(
         crop_cos * base_point.x() + crop_sin * base_point.y(),
         -crop_sin * base_point.x() + crop_cos * base_point.y(), base_point.z());
-      if (!cloud_box_.contains(crop_point)) {continue;}
+      // Confirmation bypasses ordinary XY/density gates, never the height gate.
+      if (crop_point.z() < cloud_box_.min_z || crop_point.z() > cloud_box_.max_z ||
+        (!confirmed && !cloud_box_.contains(crop_point))) {continue;}
       if (stats) {++stats->crop_hits;}
-      if (base_point.head<2>().norm() < self_ignore_radius_) {
+      bool self = base_point.head<2>().norm() < self_ignore_radius_ &&
+        base_point.z() <= self_ignore_max_z_;
+      for (size_t b = 0; b < self_boxes_.size(); b += 6) {
+        if (base_point.x() >= self_boxes_[b] && base_point.y() >= self_boxes_[b + 1] &&
+          base_point.z() >= self_boxes_[b + 2] && base_point.x() <= self_boxes_[b + 3] &&
+          base_point.y() <= self_boxes_[b + 4] && base_point.z() <= self_boxes_[b + 5])
+        {
+          self = true;break;
+        }
+      }
+      if (self) {
         if (stats) {++stats->self_rejected;}
         continue;
       }
@@ -886,11 +961,45 @@ private:
       ++hit.count;
       hit.x = x;
       hit.y = y;
+      positions[map_augmenter::cell_index(obstacles_map_, x, y)] = map_point;
+    }
+    // Missing/NaN depth and a rotated view never count as a free-space ray.
+    // Require three observations beyond the stored 3D point before clearing it.
+    if (!confirmed) {
+      const Eigen::Affine3d map_to_sensor = (base_to_map * range_to_base).inverse();
+      for (auto it = cloud_tracks_.begin(); it != cloud_tracks_.end();) {
+        if (hits.count(it->first)) {it->second.clear_frames = 0;++it;continue;}
+        const auto p = map_to_sensor * it->second.position;
+        const double range = p.norm();
+        bool free = false;
+        if (range >= cloud_min_range_ && range <= cloud_max_range_) {
+          const int az = int(std::floor(std::atan2(p.y(), p.x()) / 0.02));
+          const int el = int(std::floor(std::atan2(p.z(), p.head<2>().norm()) / 0.02));
+          for (int da = -1; da <= 1; ++da) {
+            for (int de = -1; de <= 1; ++de) {
+              const auto ray = rays.find((az + da + 160) * 320 + el + de + 160);
+              if (ray == rays.end()) {continue;}
+              const double along = ray->second.dot(p) / std::max(1e-6, range);
+              const double across = (ray->second - along * p / std::max(1e-6, range)).norm();
+              if (along > range + 0.10 && across / std::max(1e-6, along) < 0.012) {free = true;}
+            }
+          }
+        }
+        it->second.clear_frames = free ? it->second.clear_frames + 1 : 0;
+        if (it->second.clear_frames >= 3 &&
+          (last_observed_ns_[it->first] <= it->second.stamp ||
+          (stamp.nanoseconds() - last_observed_ns_[it->first]) * 1e-9 > sensor_max_age_))
+        {
+          obstacles_map_.data[it->first] = 0;last_observed_ns_[it->first] = never_observed;
+          if (diagnostics_enabled_) {++diagnostic_ray_cleared_;}
+          it = cloud_tracks_.erase(it);
+        } else {++it;}
+      }
     }
     if (stats) {stats->evidence_cells += hits.size();}
     for (const auto & entry : hits) {
       const auto & hit = entry.second;
-      if (hit.count < static_cast<size_t>(cloud_min_points_)) {
+      if (!confirmed && hit.count < static_cast<size_t>(cloud_min_points_)) {
         if (stats) {++stats->density_rejected;}
         continue;
       }
@@ -905,9 +1014,19 @@ private:
           if (found != hits.end() && found->second.count >= static_cast<size_t>(cloud_min_points_)) {++neighbors;}
         }
       }
-      if (neighbors >= cloud_min_neighbors_) {
+      if (confirmed || neighbors >= cloud_min_neighbors_) {
         if (stats) {++stats->density_ok;}
+        const size_t index = map_augmenter::cell_index(obstacles_map_, hit.x, hit.y);
+        const int64_t previous_observation = last_observed_ns_[index];
         mark_obstacle(hit.x, hit.y, stamp, stats);
+        if (obstacles_map_.data[index] > 0) {
+          if (diagnostics_enabled_ && last_observed_ns_[index] > previous_observation) {
+            if (confirmed) {++diagnostic_confirmed_refreshes_;} else {++diagnostic_cloud_refreshes_;}
+          }
+          cloud_tracks_[index] = {positions.at(index), stamp.nanoseconds(), 0,
+            !cloud_sensor_frame_.empty() ? cloud_sensor_frame_ :
+            confirmed ? last_cloud_frame_ : cloud.header.frame_id};
+        }
       } else if (stats) {
         ++stats->neighbors_rejected;
       }
@@ -951,7 +1070,14 @@ private:
         Eigen::Vector3d(range * std::cos(angle), range * std::sin(angle), 0.0);
       if (!laser_box_.contains(base_point)) {continue;}
       if (stats) {++stats->crop_hits;}
-      if (base_point.head<2>().norm() < self_ignore_radius_) {
+      bool self = base_point.head<2>().norm() < self_ignore_radius_ &&
+        base_point.z() <= self_ignore_max_z_;
+      for (size_t b = 0; b < self_boxes_.size(); b += 6) {
+        if (base_point.x() >= self_boxes_[b] && base_point.y() >= self_boxes_[b + 1] &&
+          base_point.z() >= self_boxes_[b + 2] && base_point.x() <= self_boxes_[b + 3] &&
+          base_point.y() <= self_boxes_[b + 4] && base_point.z() <= self_boxes_[b + 5]) {self = true;break;}
+      }
+      if (self) {
         if (stats) {++stats->self_rejected;}
         continue;
       }
@@ -975,6 +1101,7 @@ private:
     std::fill(obstacles_map_.data.begin(), obstacles_map_.data.end(), 0);
     std::fill(last_observed_ns_.begin(), last_observed_ns_.end(), never_observed);
     clear_obstacle_memory();
+    cloud_tracks_.clear();latest_confirmed_.reset();
     latest_cloud1_.reset();
     latest_cloud2_.reset();
     latest_scan_.reset();
@@ -1023,14 +1150,70 @@ private:
     check_pose_correction();
 
     const int64_t lifetime = rclcpp::Duration::from_seconds(obstacle_timeout_).nanoseconds();
+    Eigen::Vector3d robot;
+    bool have_robot = false;
+    try {
+      const auto tf = tf_buffer_.lookupTransform(map_frame_, base_link_, tf2::TimePointZero);
+      robot = Eigen::Vector3d(tf.transform.translation.x, tf.transform.translation.y, 0.0);
+      const auto stamp = rclcpp::Time(tf.header.stamp, get_clock()->get_clock_type());
+      have_robot = stamp.nanoseconds() == 0 || std::abs((now() - stamp).seconds()) <= sensor_max_age_;
+    } catch (const tf2::TransformException &) {}
+    std::unordered_map<std::string, Eigen::Vector3d> camera_origins;
+    for (const auto & entry : cloud_tracks_) {
+      const auto & frame = entry.second.sensor_frame;
+      if (frame.empty() || camera_origins.count(frame)) {continue;}
+      Eigen::Vector3d origin = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+      try {
+        const auto tf = tf_buffer_.lookupTransform(map_frame_, frame, tf2::TimePointZero);
+        const auto stamp = rclcpp::Time(tf.header.stamp, get_clock()->get_clock_type());
+        if (stamp.nanoseconds() == 0 || std::abs((current - stamp).seconds()) <= sensor_max_age_) {
+          origin = Eigen::Vector3d(tf.transform.translation.x, tf.transform.translation.y,
+            tf.transform.translation.z);
+        }
+      } catch (const tf2::TransformException &) {}
+      camera_origins.emplace(frame, origin);
+    }
+    retention_counts_.fill(0);
+    oldest_retained_age_ = oldest_retained_range_ = -1.0;
+    oldest_retained_x_ = oldest_retained_y_ = 0.0;
+    oldest_retained_reason_ = "none";oldest_retained_frame_.clear();
+    const auto retained = [&](size_t index, bool record) {
+        const auto found = cloud_tracks_.find(index);
+        if (found == cloud_tracks_.end()) {return false;}
+        const double age = (current_ns - found->second.stamp) * 1e-9;
+        const auto origin = camera_origins.find(found->second.sensor_frame);
+        const bool camera_valid = origin != camera_origins.end() && origin->second.allFinite();
+        const double range = camera_valid ? (found->second.position - origin->second).norm() : -1.0;
+        int reason = -1;
+        if (!have_robot) {reason = 2;}
+        else if ((found->second.position - robot).head<2>().norm() <= unobserved_hold_radius_) {
+          if (age < unobserved_hold_sec_) {reason = 0;}
+          else if (!camera_valid) {reason = 3;}
+          else if (range < cloud_min_range_) {reason = 1;}
+        }
+        // Expire ordinary ghosts, but never erase a nearby obstacle just
+        // because it entered the camera's physically unobservable near range.
+        if (reason >= 0 && record && diagnostics_enabled_) {
+          ++retention_counts_[reason];
+          if (age > oldest_retained_age_) {
+            oldest_retained_age_ = age;oldest_retained_range_ = range;
+            oldest_retained_x_ = found->second.position.x();oldest_retained_y_ = found->second.position.y();
+            oldest_retained_reason_ = reason == 0 ? "hold" : reason == 1 ? "blind" : reason == 2 ? "robot_tf" : "camera_tf";
+            oldest_retained_frame_ = found->second.sensor_frame;
+          }
+        }
+        return reason >= 0;
+      };
     for (size_t i = 0; i < obstacles_map_.data.size(); ++i) {
       if (obstacles_map_.data[i] <= 0) {continue;}
       const auto observed = last_observed_ns_[i];
       // Future stamps within the configured tolerance retain their evidence.
-      if (observed == never_observed || (current_ns >= observed && current_ns - observed >= lifetime)) {
+      if (observed == never_observed ||
+        (current_ns >= observed && current_ns - observed >= lifetime && !retained(i, true))) {
         if (diagnostics_enabled_) {++diagnostic_expired_before_;}
         obstacles_map_.data[i] = 0;
         last_observed_ns_[i] = never_observed;
+        cloud_tracks_.erase(i);
       }
     }
 
@@ -1039,21 +1222,27 @@ private:
       add_scan(*scan, diagnostics_enabled_ ? &lidar_diagnostics_ : nullptr);
     }
     if (auto cloud = std::exchange(latest_cloud1_, nullptr)) {
+      last_cloud_frame_ = cloud->header.frame_id;
       add_cloud(*cloud, cloud_downsampling_, diagnostics_enabled_ ? &cloud1_diagnostics_ : nullptr);
     }
     if (auto cloud = std::exchange(latest_cloud2_, nullptr)) {
+      if (!use_cloud_) {last_cloud_frame_ = cloud->header.frame_id;}
       add_cloud(*cloud, cloud_downsampling2_, diagnostics_enabled_ ? &cloud2_diagnostics_ : nullptr);
+    }
+    if (auto cloud = std::exchange(latest_confirmed_, nullptr)) {
+      add_cloud(*cloud, 1, nullptr, true);
     }
     // Late, but still acceptable sensor frames must not resurrect already expired evidence.
     const int64_t publish_ns = now().nanoseconds();
     for (size_t i = 0; i < obstacles_map_.data.size(); ++i) {
       const int64_t observed = last_observed_ns_[i];
       if (obstacles_map_.data[i] > 0 && observed != never_observed &&
-        publish_ns >= observed && publish_ns - observed >= lifetime)
+        publish_ns >= observed && publish_ns - observed >= lifetime && !retained(i, false))
       {
         if (diagnostics_enabled_) {++diagnostic_expired_after_;}
         obstacles_map_.data[i] = 0;
         last_observed_ns_[i] = never_observed;
+        cloud_tracks_.erase(i);
       }
     }
     publish_obstacles();
@@ -1075,12 +1264,26 @@ private:
   Box laser_box_, cloud_box_;
   std::string base_link_, map_frame_, odom_frame_;
   std::string cloud_topic1_, cloud_topic2_;
+  std::string cloud_sensor_frame_;
   Eigen::Vector3d cloud_forward_axis_{Eigen::Vector3d::UnitZ()};
   double cloud_yaw_min_projection_;
   rclcpp::QoS cloud_qos_{rclcpp::SensorDataQoS()};
   uint64_t cloud_subscription_generation_{0};
   double obstacle_timeout_, sensor_max_age_, future_tolerance_, tf_timeout_, tf_max_age_;
   double static_ignore_radius_, self_ignore_radius_, laser_min_range_;
+  double cloud_min_range_, cloud_max_range_, self_ignore_max_z_, unobserved_hold_radius_, unobserved_hold_sec_;
+  std::string last_cloud_frame_;
+  std::vector<double> self_boxes_;
+  struct CloudTrack
+  {
+    Eigen::Vector3d position;
+    int64_t stamp;
+    int clear_frames;
+    std::string sensor_frame;
+  };
+  std::unordered_map<size_t, CloudTrack> cloud_tracks_;
+  Cloud::ConstSharedPtr latest_confirmed_;
+  rclcpp::Subscription<Cloud>::SharedPtr confirmed_sub_;
   double pose_jump_translation_, pose_jump_rotation_;
   int cloud_downsampling_, cloud_downsampling2_, lidar_downsampling_;
   int cloud_min_points_, cloud_min_neighbors_, log_throttle_ms_;
@@ -1109,6 +1312,13 @@ private:
   uint64_t diagnostic_cycles_{0}, diagnostic_no_grid_{0};
   uint64_t diagnostic_expired_before_{0}, diagnostic_expired_after_{0};
   uint64_t diagnostic_pose_resets_{0}, diagnostic_clock_resets_{0}, diagnostic_cleared_cells_{0};
+  uint64_t diagnostic_cloud_refreshes_{0}, diagnostic_confirmed_refreshes_{0}, diagnostic_ray_cleared_{0};
+  // Latest expiration pass, not a sum of repeated checks of the same cell.
+  std::array<size_t, 4> retention_counts_{};
+  double oldest_retained_age_{-1.0}, oldest_retained_range_{-1.0};
+  double oldest_retained_x_{0.0}, oldest_retained_y_{0.0};
+  const char * oldest_retained_reason_{"none"};
+  std::string oldest_retained_frame_;
   double diagnostic_processing_ms_{0.0}, diagnostic_maximum_processing_ms_{0.0};
 };
 

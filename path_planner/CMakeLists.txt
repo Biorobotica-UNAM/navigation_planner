@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.8)
 project(path_planner)
 
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "CMake build type" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -13,6 +17,14 @@ find_package(rcl_interfaces REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(pumas_interfaces REQUIRED)
+find_package(builtin_interfaces REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/NavigationPath.msg"
+  "srv/PlanPath.srv"
+  DEPENDENCIES builtin_interfaces geometry_msgs nav_msgs)
+rosidl_get_typesupport_target(planner_typesupport ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 add_library(path_planner_lib src/PathPlanner.cpp)
 target_include_directories(path_planner_lib PUBLIC
@@ -21,7 +33,7 @@ target_include_directories(path_planner_lib PUBLIC
 ament_target_dependencies(path_planner_lib nav_msgs geometry_msgs)
 
 add_executable(path_planner_node src/path_planner_node.cpp)
-target_link_libraries(path_planner_node path_planner_lib)
+target_link_libraries(path_planner_node path_planner_lib "${planner_typesupport}")
 ament_target_dependencies(path_planner_node
   rclcpp rcl_interfaces nav_msgs geometry_msgs pumas_interfaces)
 
@@ -38,7 +50,7 @@ install(DIRECTORY include/ DESTINATION include)
 ament_export_targets(export_path_planner HAS_LIBRARY_TARGET)
 ament_export_include_directories(include)
 ament_export_libraries(path_planner_lib)
-ament_export_dependencies(nav_msgs geometry_msgs)
+ament_export_dependencies(nav_msgs geometry_msgs rosidl_default_runtime)
 
 #if(BUILD_TESTING)
 #  find_package(ament_cmake_gtest REQUIRED)

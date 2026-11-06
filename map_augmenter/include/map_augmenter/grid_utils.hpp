@@ -187,21 +187,21 @@ inline Grid overlay_obstacles(const Grid & base, const Grid & overlay)
   return result;
 }
 
-inline Grid inflate_obstacles(const Grid & grid, double radius, bool circular)
+inline Grid inflate_obstacles(const Grid & grid, double radius, bool circular, bool round_up = true)
 {
   Grid result = grid;
   if (radius <= 0.0) {return result;}
-  const double cells = std::ceil(radius / grid.info.resolution);
+  const double cells = round_up ? std::ceil(radius / grid.info.resolution) : radius / grid.info.resolution;
   const int width = static_cast<int>(grid.info.width);
   const int height = static_cast<int>(grid.info.height);
-  const int reach = static_cast<int>(std::min(cells, static_cast<double>(std::max(width, height))));
+  const int reach = static_cast<int>(std::min(std::ceil(cells), static_cast<double>(std::max(width, height))));
   for (size_t i = 0; i < grid.data.size(); ++i) {
     if (grid.data[i] <= 0) {continue;}
     const int x = static_cast<int>(i % grid.info.width);
     const int y = static_cast<int>(i / grid.info.width);
     for (int ny = std::max(0, y - reach); ny <= std::min(height - 1, y + reach); ++ny) {
       for (int nx = std::max(0, x - reach); nx <= std::min(width - 1, x + reach); ++nx) {
-        if (circular && std::hypot(nx - x, ny - y) > cells) {continue;}
+        if (circular && std::hypot(nx - x, ny - y) > cells + 1e-6) {continue;}
         auto & value = result.data[cell_index(grid, nx, ny)];
         value = std::max(value, grid.data[i]);
       }

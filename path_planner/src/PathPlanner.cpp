@@ -118,32 +118,43 @@ void finishPath(Path& path)
     }
 }
 
-bool validatePathSegments(const Path& path, const Grid& map, bool allow_unknown,
-                          const Grid* costs = nullptr, const Path* original = nullptr)
+// Integrate travel distance and soft costs, independent of waypoint density.
+double pathCost(const Path& path, const Grid& costs, int* peak = nullptr)
+{
+    const GridGeometry geometry(costs);
+    double total = 0.0;
+    if (peak) *peak = 0;
+    for (size_t i = 1; i < path.poses.size(); ++i)
+    {
+        const auto& a = path.poses[i - 1].pose.position;
+        const auto& b = path.poses[i].pose.position;
+        const double length = std::hypot(b.x - a.x, b.y - a.y);
+        const int samples = std::max(1, static_cast<int>(std::ceil(length / (0.5 * geometry.resolution))));
+        for (int j = 0; j < samples; ++j)
+        {
+            const double t = (j + 0.5) / samples;
+            int x, y;
+            if (!geometry.worldToCell(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y), x, y))
+                return std::numeric_limits<double>::infinity();
+            const int cost = std::max(0, static_cast<int>(
+                costs.data[static_cast<size_t>(y) * geometry.width + x]));
+            if (peak) *peak = std::max(*peak, cost);
+            total += length / samples * (1.0 + cost);
+        }
+    }
+    return total;
+}
+
+bool validatePathSegments(const Path& path, const Grid& map, bool allow_unknown)
 {
     if (path.poses.empty() || path.header.frame_id != map.header.frame_id)
         return false;
     const GridGeometry geometry(map);
     for (size_t i = 0; i < path.poses.size(); ++i)
     {
-        // Preserve the local cost envelope, including every crossed segment cell.
-        int cost_limit = 0;
-        if (costs && original)
-        {
-            for (size_t j = i == 0 ? 0 : i - 1; j <= i; ++j)
-            {
-                int cx, cy;
-                const auto& p = original->poses[j].pose.position;
-                if (!geometry.worldToCell(p.x, p.y, cx, cy))
-                    return false;
-                cost_limit = std::max(cost_limit, static_cast<int>(costs->data[
-                    static_cast<size_t>(cy) * geometry.width + cx]));
-            }
-        }
         const auto acceptable = [&](size_t index) {
             const int value = map.data[index];
-            return (value == 0 || (value == -1 && allow_unknown)) &&
-                (!costs || costs->data[index] <= cost_limit);
+            return value == 0 || (value == -1 && allow_unknown);
         };
         const auto& point = path.poses[i].pose.position;
         int end_x, end_y;
@@ -244,8 +255,7 @@ PlanResult planSegments(
                        segment.poses.back().pose.position.y - stops[i].position.y) > geometry_epsilon;
         Path smoothed;
         Grid alternate_costs = costs;
-        Grid clearance_map = map;
-        const Grid* shortcut_map = &map;
+        const Grid* working_costs = &costs;
         const GridGeometry geometry(map);
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::duration<double>(options.smoothing_time_budget_sec);
@@ -270,9 +280,9 @@ PlanResult planSegments(
                             cost = static_cast<int8_t>(std::min(90, std::max(0, static_cast<int>(cost)) + 2));
                         }
                 }
-                // Reserve turning room for the alternate search. This extra
-                // clearance is optional; the real collision map is unchanged.
-                const double radius = std::min(0.6, 1.0 / options.max_path_curvature + 2.0 * geometry.resolution);
+                // Prefer turning room through a soft gradient. Narrow corridors
+                // remain available; the hard base footprint never grows on retries.
+                const double radius = std::min(0.4, 1.0 / options.max_path_curvature + 0.10);
                 const int reach = static_cast<int>(std::ceil(radius / geometry.resolution));
                 for (int y = 0; y < geometry.height; ++y)
                     for (int x = 0; x < geometry.width; ++x)
@@ -281,16 +291,22 @@ PlanResult planSegments(
                             continue;
                         for (int yy = std::max(0, y-reach); yy <= std::min(geometry.height-1, y+reach); ++yy)
                             for (int xx = std::max(0, x-reach); xx <= std::min(geometry.width-1, x+reach); ++xx)
-                                if (std::hypot(xx-x, yy-y) * geometry.resolution <= radius)
-                                    clearance_map.data[static_cast<size_t>(yy) * geometry.width + xx] = 100;
+                            {
+                                const size_t index = static_cast<size_t>(yy) * geometry.width + xx;
+                                if (map.data[index] != 0) continue;
+                                const double distance = std::hypot(xx-x, yy-y) * geometry.resolution;
+                                const int cost = static_cast<int>(12.0 * std::max(0.0, 1.0 - distance / radius));
+                                alternate_costs.data[index] = static_cast<int8_t>(std::max(cost,
+                                    static_cast<int>(alternate_costs.data[index])));
+                            }
                     }
                 Path alternate;
                 PlanStatus status;
-                if (PathPlanner::AStar(clearance_map, alternate_costs, current_start, stops[i],
+                if (PathPlanner::AStar(map, alternate_costs, current_start, stops[i],
                                       options.diagonal_paths, alternate, segment_options, &status))
                 {
                     segment = std::move(alternate);
-                    shortcut_map = &clearance_map;
+                    working_costs = &alternate_costs;
                 }
             }
             // Remove grid stair steps with collision-checked line-of-sight links.
@@ -309,7 +325,13 @@ PlanResult planSegments(
                     Path link;
                     link.header = segment.header;
                     link.poses = {segment.poses[from], segment.poses[to]};
-                    if (validatePathSegments(link, *shortcut_map, options.allow_unknown))
+                    Path reference;
+                    reference.poses.assign(segment.poses.begin() + from, segment.poses.begin() + to + 1);
+                    int link_peak = 0, reference_peak = 0;
+                    const double link_cost = pathCost(link, *working_costs, &link_peak);
+                    const double reference_cost = pathCost(reference, *working_costs, &reference_peak);
+                    if (validatePathSegments(link, map, options.allow_unknown) &&
+                        link_cost <= 1.10 * reference_cost && link_peak <= reference_peak + 2)
                     {
                         next = to;
                         break;
@@ -337,9 +359,10 @@ PlanResult planSegments(
                 }
             }
             const double data_weight = options.smooth_alpha * std::pow(0.5, attempt % 4);
+            std::string rejection;
             smoothed = PathPlanner::SmoothPath(sampled, static_cast<float>(data_weight),
                 static_cast<float>(options.smooth_beta), static_cast<float>(options.smooth_tolerance),
-                &map, options.allow_unknown);
+                &map, options.allow_unknown, working_costs, &rejection);
             if (validatePathSegments(smoothed, map, options.allow_unknown) &&
                 (!options.require_smooth_path || PathPlanner::IsSmooth(smoothed,
                     options.max_path_curvature, options.max_path_heading_step)))
@@ -347,10 +370,13 @@ PlanResult planSegments(
                 accepted = true;
                 break;
             }
+            result.detail = rejection.empty() ? "curvature_or_heading_limit" : rejection;
         }
         if (!accepted)
         {
             result.status = PlanStatus::NoSmoothPath;
+            if (std::chrono::steady_clock::now() >= deadline)
+                result.detail = "smoothing_time_budget: " + result.detail;
             result.path.poses.clear();
             return result;
         }
@@ -369,6 +395,7 @@ PlanResult planSegments(
         return result;
     }
     result.status = PlanStatus::Success;
+    result.detail.clear();
     finishPath(result.path);
     return result;
 }
@@ -562,6 +589,7 @@ bool PathPlanner::AStar(
             pose.pose.position = geometry.cellCenter(start_x, start_y);
             result_path.poses.push_back(pose);
         }
+        result_path.poses.back().pose.orientation = goal_pose.orientation;
         finishPath(result_path);
         if (status)
             *status = PlanStatus::Success;
@@ -575,9 +603,10 @@ bool PathPlanner::AStar(
 
 Path PathPlanner::SmoothPath(
     const Path& path, float weight_data, float weight_smooth, float tolerance,
-    const Grid* collision_map, bool allow_unknown, const Grid* cost_map)
+    const Grid* collision_map, bool allow_unknown, const Grid* cost_map, std::string* rejection)
 {
     Path result = path;
+    if (rejection) rejection->clear();
     if (!std::isfinite(weight_data) || !std::isfinite(weight_smooth) ||
         !std::isfinite(tolerance) || weight_data < 0.0f || weight_data > 1.0f ||
         weight_smooth < 0.0f || weight_smooth > 1.0f || tolerance <= 0.0f)
@@ -611,6 +640,20 @@ Path PathPlanner::SmoothPath(
                     weight_smooth * (previous.x + next.x - 2.0 * point.x);
                 point.y += weight_data * (original.y - point.y) +
                     weight_smooth * (previous.y + next.y - 2.0 * point.y);
+                if (collision_map)
+                {
+                    Path local;
+                    local.header = result.header;
+                    for (int trial = 0; trial < 8; ++trial)
+                    {
+                        local.poses = {result.poses[i - 1], result.poses[i], result.poses[i + 1]};
+                        if (validatePathSegments(local, *collision_map, allow_unknown))
+                            break;
+                        point.x = 0.5 * (point.x + old.x);
+                        point.y = 0.5 * (point.y + old.y);
+                        if (trial == 7) point = old;
+                    }
+                }
                 change += std::abs(point.x - old.x) + std::abs(point.y - old.y);
             }
             if (!std::isfinite(change))
@@ -622,8 +665,22 @@ Path PathPlanner::SmoothPath(
                 break;
         }
     }
-    if (collision_map && !validatePathSegments(result, *collision_map, allow_unknown, cost_map, &path))
+    if (collision_map && !validatePathSegments(result, *collision_map, allow_unknown))
+    {
+        if (rejection) *rejection = "smoothing_intersects_obstacle";
         result = path;
+    }
+    else if (cost_map)
+    {
+        int result_peak = 0, reference_peak = 0;
+        const double result_cost = pathCost(result, *cost_map, &result_peak);
+        const double reference_cost = pathCost(path, *cost_map, &reference_peak);
+        if (result_cost > 1.30 * reference_cost || result_peak > reference_peak + 2)
+        {
+            if (rejection) *rejection = "smoothing_cost_budget";
+            result = path;
+        }
+    }
     finishPath(result);
     return result;
 }
@@ -633,36 +690,176 @@ bool PathPlanner::IsSmooth(const Path& path, double max_curvature, double max_he
     if (path.poses.empty() || !std::isfinite(max_curvature) || max_curvature <= 0.0 ||
         !std::isfinite(max_heading_step) || max_heading_step <= 0.0)
         return false;
-    double previous_heading = 0.0, previous_length = 0.0;
-    bool have_heading = false;
+    std::vector<double> lengths(path.poses.size(), 0.0);
     for (size_t i = 0; i < path.poses.size(); ++i)
     {
         const auto& p = path.poses[i].pose.position;
         if (!std::isfinite(p.x) || !std::isfinite(p.y))
             return false;
-        if (i == 0)
-            continue;
-        const auto& a = path.poses[i-1].pose.position;
-        const double length = std::hypot(p.x-a.x, p.y-a.y);
-        if (length < 1e-8)
-            continue;
-        const double heading = std::atan2(p.y-a.y, p.x-a.x);
-        if (have_heading)
+        if (i > 0)
         {
-            const double turn = std::abs(std::remainder(heading-previous_heading, 2.0*M_PI));
-            if (turn > max_heading_step || turn / ((length+previous_length)*0.5) > max_curvature)
+            const auto& a = path.poses[i - 1].pose.position;
+            lengths[i] = lengths[i - 1] + std::hypot(p.x - a.x, p.y - a.y);
+        }
+    }
+    if (lengths.back() < 1e-8)
+        return true;
+    // Equal metric intervals prevent tiny endpoint/grid segments from dominating
+    // curvature. Retain a geometric residual check so stair steps cannot alias to a line.
+    const size_t count = std::max(size_t{2}, static_cast<size_t>(std::ceil(lengths.back() / 0.10)));
+    const double spacing = lengths.back() / count;
+    std::vector<geometry_msgs::msg::Point> sampled;
+    size_t segment = 1;
+    for (size_t i = 0; i <= count; ++i)
+    {
+        const double target = i * spacing;
+        while (segment + 1 < lengths.size() && lengths[segment] < target)
+            ++segment;
+        const auto& a = path.poses[segment - 1].pose.position;
+        const auto& b = path.poses[segment].pose.position;
+        const double t = std::clamp((target - lengths[segment - 1]) /
+            std::max(1e-12, lengths[segment] - lengths[segment - 1]), 0.0, 1.0);
+        auto point = a;
+        point.x += t * (b.x - a.x); point.y += t * (b.y - a.y);
+        sampled.push_back(point);
+    }
+    double previous_heading = 0.0, previous_length = 0.0;
+    for (size_t i = 1; i < sampled.size(); ++i)
+    {
+        const double length = std::hypot(sampled[i].x - sampled[i-1].x, sampled[i].y - sampled[i-1].y);
+        if (length < 1e-8)
+            return false;
+        const double heading = std::atan2(sampled[i].y - sampled[i-1].y, sampled[i].x - sampled[i-1].x);
+        if (i > 1)
+        {
+            const double turn = std::abs(std::remainder(heading - previous_heading, 2.0 * M_PI));
+            if (turn > max_heading_step || turn / ((length + previous_length) * 0.5) > max_curvature)
                 return false;
         }
-        previous_heading = heading;
-        previous_length = length;
-        have_heading = true;
+        previous_heading = heading; previous_length = length;
+    }
+    for (size_t i = 0; i < path.poses.size(); ++i)
+    {
+        const size_t bin = std::min(count - 1, static_cast<size_t>(lengths[i] / spacing));
+        const auto& a = sampled[bin]; const auto& b = sampled[bin + 1];
+        const auto& p = path.poses[i].pose.position;
+        const double dx = b.x - a.x, dy = b.y - a.y;
+        const double t = std::clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) /
+            std::max(1e-12, dx * dx + dy * dy), 0.0, 1.0);
+        if (std::hypot(p.x - a.x - t * dx, p.y - a.y - t * dy) >
+            std::max(0.01, max_curvature * spacing * spacing / 8.0))
+            return false;
     }
     return true;
 }
 
+PlanResult PathPlanner::RecoverStart(
+    const Grid& map, const Grid& clearance, const Pose& start_pose, const PlanOptions& options)
+{
+    PlanResult result;
+    result.status = PlanStatus::StartBlocked;
+    try
+    {
+        const GridGeometry geometry(map);
+        if (clearance.info != map.info || clearance.header.frame_id != map.header.frame_id ||
+            clearance.data.size() != map.data.size() ||
+            !std::isfinite(options.start_recovery_mask_radius) || options.start_recovery_mask_radius <= 0.0 ||
+            !std::isfinite(options.escape_clear_radius) || options.escape_clear_radius <= 0.0)
+            return result;
+        int sx, sy;
+        if (!geometry.worldToCell(start_pose.position.x, start_pose.position.y, sx, sy))
+            return result;
+        if (clearance.data[static_cast<size_t>(sy) * geometry.width + sx] != 0)
+        {
+            result.detail = "start_inside_physical_clearance";
+            return result;
+        }
+        if (map.data[static_cast<size_t>(sy) * geometry.width + sx] < 0) return result;
+        // Allocate only the local mask. Neither input grid is copied or cleared.
+        const double radius = std::min(options.escape_clear_radius, options.start_recovery_mask_radius);
+        const int reach = static_cast<int>(std::ceil(radius / geometry.resolution)) + 1;
+        const int xmin = std::max(0, sx - reach), ymin = std::max(0, sy - reach);
+        const int width = std::min(geometry.width - 1, sx + reach) - xmin + 1;
+        const int height = std::min(geometry.height - 1, sy + reach) - ymin + 1;
+        const size_t start = static_cast<size_t>(sy - ymin) * width + sx - xmin;
+        std::vector<double> distances(static_cast<size_t>(width) * height,
+            std::numeric_limits<double>::infinity());
+        std::vector<size_t> parents(distances.size(), no_parent);
+        using Entry = std::pair<double, size_t>;
+        std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+        distances[start] = 0.0;open.emplace(0.0, start);
+        size_t endpoint = no_parent;
+        while (!open.empty())
+        {
+            const auto [distance, index] = open.top();open.pop();
+            if (distance != distances[index]) continue;
+            const int x = xmin + index % width, y = ymin + index / width;
+            if (map.data[static_cast<size_t>(y) * geometry.width + x] == 0)
+            {
+                endpoint = index;
+                break;
+            }
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx)
+                {
+                    if ((!dx && !dy) || (!options.diagonal_paths && dx && dy)) continue;
+                    const int nx = x + dx, ny = y + dy;
+                    if (nx < xmin || ny < ymin || nx >= xmin + width || ny >= ymin + height ||
+                        clearance.data[static_cast<size_t>(ny) * geometry.width + nx] != 0 ||
+                        map.data[static_cast<size_t>(ny) * geometry.width + nx] < 0) continue;
+                    const auto p = geometry.cellCenter(nx, ny);
+                    if (std::hypot(p.x - start_pose.position.x, p.y - start_pose.position.y) > radius) continue;
+                    if (dx && dy && (clearance.data[static_cast<size_t>(y) * geometry.width + nx] != 0 ||
+                                    clearance.data[static_cast<size_t>(ny) * geometry.width + x] != 0)) continue;
+                    const double candidate = distance + (index == start ?
+                        std::hypot(p.x-start_pose.position.x, p.y-start_pose.position.y) :
+                        geometry.resolution * (dx && dy ? std::sqrt(2.0) : 1.0));
+                    const size_t next = static_cast<size_t>(ny - ymin) * width + nx - xmin;
+                    if (candidate <= options.escape_clear_radius && candidate < distances[next])
+                    {
+                        distances[next] = candidate;parents[next] = index;open.emplace(candidate, next);
+                    }
+                }
+        }
+        if (endpoint == no_parent)
+        {
+            result.detail = "no_safe_exit_in_local_mask";
+            return result;
+        }
+        Path prefix;prefix.header = map.header;
+        for (size_t index = endpoint; index != no_parent; index = parents[index])
+        {
+            geometry_msgs::msg::PoseStamped pose;
+            pose.header = map.header;pose.pose = start_pose;
+            pose.pose.position = geometry.cellCenter(xmin + index % width, ymin + index / width);
+            prefix.poses.push_back(pose);
+        }
+        std::reverse(prefix.poses.begin(), prefix.poses.end());
+        prefix.poses.front().pose = start_pose;
+        if (!validatePathSegments(prefix, clearance, false)) return result;
+        result.path.header = map.header;
+        result.path.poses.push_back(prefix.poses.front());
+        for (size_t from = 0; from + 1 < prefix.poses.size();)
+        {
+            size_t next = from + 1;
+            for (size_t to = prefix.poses.size() - 1; to > from + 1; --to)
+            {
+                Path link;link.header = map.header;link.poses = {prefix.poses[from], prefix.poses[to]};
+                if (validatePathSegments(link, clearance, false)) {next = to;break;}
+            }
+            result.path.poses.push_back(prefix.poses[next]);from = next;
+        }
+        result.status = PlanStatus::Success;result.used_escape = true;
+        result.detail = "escaping_planning_inflation";
+        return result;
+    }
+    catch (const std::invalid_argument&) {return result;}
+}
+
 PlanResult PathPlanner::Plan(
     const Grid& map, const Grid& cost_map, const Pose& start_pose, const Pose& goal_pose,
-    const PlanOptions& options, const std::vector<Pose>& via_points)
+    const PlanOptions& options, const std::vector<Pose>& via_points,
+    const std::vector<Path>& avoided_paths, const Grid* start_clearance_map)
 {
     PlanResult result;
     try
@@ -678,7 +875,10 @@ PlanResult PathPlanner::Plan(
             !std::isfinite(options.smooth_beta) || options.smooth_beta < 0.0 || options.smooth_beta > 1.0 ||
             !std::isfinite(options.smooth_tolerance) || options.smooth_tolerance <= 0.0 ||
             !std::isfinite(options.unknown_cost) || options.unknown_cost < 0.0 ||
-            !std::isfinite(options.goal_tolerance_m) || options.goal_tolerance_m < 0.0)
+            !std::isfinite(options.goal_tolerance_m) || options.goal_tolerance_m < 0.0 ||
+            !std::isfinite(options.recovery_cost_radius) || options.recovery_cost_radius <= 0.0 ||
+            !std::isfinite(options.recovery_cost_peak) || options.recovery_cost_peak <= 0.0 ||
+            options.recovery_cost_peak > 99.0)
             return result;
         std::vector<Pose> stops = via_points;
         stops.push_back(goal_pose);
@@ -697,6 +897,22 @@ PlanResult PathPlanner::Plan(
             }
         }
 
+        geometry.worldToCell(start_pose.position.x, start_pose.position.y, x, y);
+        if (map.data[static_cast<size_t>(y) * geometry.width + x] != 0 && start_clearance_map)
+        {
+            auto recovery = RecoverStart(map, *start_clearance_map, start_pose, options);
+            if (recovery.status != PlanStatus::Success) return recovery;
+            auto continuation = Plan(map, cost_map, recovery.path.poses.back().pose,
+                goal_pose, options, via_points, avoided_paths);
+            if (continuation.status != PlanStatus::Success) return continuation;
+            recovery.path.poses.pop_back();
+            continuation.path.poses.insert(continuation.path.poses.begin(),
+                recovery.path.poses.begin(), recovery.path.poses.end());
+            continuation.used_escape = true;
+            continuation.detail = recovery.detail;
+            return continuation;
+        }
+
         const Grid* working = &map;
         Grid modified;
         if (options.disable_rear_path_plan)
@@ -708,15 +924,45 @@ PlanResult PathPlanner::Plan(
                         modified.data[static_cast<size_t>(gy) * geometry.width + gx] = 100;
             working = &modified;
         }
+        Grid recovery_costs = cost_map;
+        if (recovery_costs.data.size() != map.data.size())
+            return result;
+        const int reach = static_cast<int>(std::ceil(options.recovery_cost_radius / geometry.resolution));
+        for (const auto& route : avoided_paths)
+        {
+            if (route.header.frame_id != map.header.frame_id)
+                return result;
+            for (const auto& pose : route.poses)
+            {
+                int gx, gy;
+                if (!geometry.worldToCell(pose.pose.position.x, pose.pose.position.y, gx, gy))
+                    continue;
+                for (int y = std::max(0, gy - reach); y <= std::min(geometry.height - 1, gy + reach); ++y)
+                    for (int x = std::max(0, gx - reach); x <= std::min(geometry.width - 1, gx + reach); ++x)
+                    {
+                        const auto center = geometry.cellCenter(x, y);
+                        const double distance = std::hypot(center.x - pose.pose.position.x,
+                                                          center.y - pose.pose.position.y);
+                        // Leave room to depart the current pose; penalties only discourage routes.
+                        const double departure = std::min(1.0, std::hypot(center.x - start_pose.position.x,
+                            center.y - start_pose.position.y) / options.recovery_cost_radius);
+                        const int penalty = static_cast<int>(options.recovery_cost_peak * departure *
+                            std::max(0.0, 1.0 - distance / options.recovery_cost_radius));
+                        auto& cost = recovery_costs.data[static_cast<size_t>(y) * geometry.width + x];
+                        if (cost >= 0)
+                            cost = static_cast<int8_t>(std::max(static_cast<int>(cost), penalty));
+                    }
+            }
+        }
         size_t failed_segment = 0;
-        result = planSegments(*working, cost_map, start_pose, stops, options, 0.0, failed_segment);
+        result = planSegments(*working, recovery_costs, start_pose, stops, options, 0.0, failed_segment);
         if (result.status == PlanStatus::Success || result.status == PlanStatus::InvalidInput)
             return result;
 
         if (options.goal_tolerance_m > 0.0 && failed_segment + 1 == stops.size() &&
             (result.status == PlanStatus::GoalBlocked || result.status == PlanStatus::NoPath))
         {
-            result = planSegments(*working, cost_map, start_pose, stops, options,
+            result = planSegments(*working, recovery_costs, start_pose, stops, options,
                                   options.goal_tolerance_m, failed_segment);
         }
         return result;

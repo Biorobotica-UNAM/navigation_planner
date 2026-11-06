@@ -7,6 +7,7 @@
   <arg name="use_sim_time"       default="false"/>
   <arg name="namespace_hardware" default="hardware"/>
   <arg name="namespace_nav"      default="navigation"/>
+  <arg name="debug_detection" default="false"/>
   <arg name="use_namespace"      default="true"/>
   <arg name="base_link_name"     default="base_link"/>
 
@@ -35,7 +36,7 @@
   <arg name="lidar_downsampling"                      default="1"/>
   <arg name="static_obstacle_ignore_radius"           default="0.10"/>
   <!-- Mantiene libre la huella del robot para no dibujar obstaculos sobre si mismo. -->
-  <arg name="self_obstacle_ignore_radius"             default="0.30"/>
+  <arg name="self_obstacle_ignore_radius"             default="0.23"/>
   <arg name="obstacle_cloud_min_points_per_cell"      default="2"/>
   <arg name="obstacle_cloud_min_neighbor_cells"       default="2"/>
   <arg name="cloud_points_threshold"                  default="15"/>
@@ -43,18 +44,21 @@
   <arg name="mvn_pln_patience"                        default="True"/>
 
   <!-- ===== Laser detection window ===== -->
-  <arg name="laser_min_x" default="0.17"/>
-  <arg name="laser_max_x" default="0.55"/>
-  <arg name="laser_min_y" default="-0.25"/>
-  <arg name="laser_max_y" default="0.25"/>
+  <arg name="laser_min_x" default="0.0"/>
+  <arg name="laser_max_x" default="2.5"/>
+  <arg name="laser_min_y" default="-1.0"/>
+  <arg name="laser_max_y" default="1.0"/>
   <arg name="laser_min_z" default="0.05"/>
   <arg name="laser_max_z" default="1.20"/>
 
   <!-- ===== Point cloud detection window ===== -->
-  <arg name="cloud_min_x" default="0.30"/>
-  <arg name="cloud_max_x" default="0.80"/>
-  <arg name="cloud_min_y" default="-0.30"/>
-  <arg name="cloud_max_y" default="0.30"/>
+  <arg name="cloud_sensor_frame"                      default=""/>
+  <arg name="cloud_min_range"                         default="0.60"/>
+  <arg name="cloud_max_range"                         default="5.0"/>
+  <arg name="cloud_min_x" default="0.0"/>
+  <arg name="cloud_max_x" default="2.5"/>
+  <arg name="cloud_min_y" default="-1.0"/>
+  <arg name="cloud_max_y" default="1.0"/>
   <arg name="cloud_min_z" default="0.15"/>
   <arg name="cloud_max_z" default="1.20"/>
 
@@ -66,13 +70,18 @@
   <!-- use_online=True: re-fetches the SLAM map on every request (map changes continuously) -->
   <!-- Higher decay/inflation because the SLAM map can have momentary noise -->
   <arg name="augmenter_decay_factor"     default="18"/>
-  <arg name="augmenter_inflation_radius" default="0.18"/>
+  <arg name="augmenter_inflation_radius" default="0.25"/>
   <arg name="augmenter_cost_radius"      default="0.90"/>
-  <arg name="robot_radius" default="0.35"/>
+  <arg name="robot_radius"                            default="0.23"/>
+  <arg name="start_recovery_margin" default="0.05"/>
+  <arg name="near_goal_extra_margin" default="0.10"/>
+  <arg name="near_goal_min_progress" default="0.90"/>
+  <arg name="final_position_settle_sec" default="0.30"/>
+  <arg name="head_goal_deadband_rad" default="0.04"/>
   <arg name="circular_inflation" default="true"/>
-  <!-- Hard clearance assumes a 0.35 m footprint radius plus 0.05 m margin. -->
-  <arg name="static_obstacle_inflation_radius" default="0.40"/>
-  <arg name="dynamic_obstacle_inflation_radius" default="0.40"/>
+  <!-- HSR base including bumper, plus 0.02 m hard clearance. -->
+  <arg name="static_obstacle_inflation_radius" default="0.25"/>
+  <arg name="dynamic_obstacle_inflation_radius" default="0.25"/>
   <arg name="map_augmenter_debug" default="false"/>
 
   <!-- ===== Obstacle Detector ===== -->
@@ -219,10 +228,10 @@
     <param name="output_topic" value="$(var point_cloud_topic)"/>
     <param name="input_qos_mode" value="$(var cloud_filter_input_qos_mode)"/>
     <param name="base_link_name" value="$(var base_link_name)"/>
-    <param name="min_x" value="$(var cloud_min_x)"/>
-    <param name="max_x" value="$(var cloud_max_x)"/>
-    <param name="min_y" value="$(var cloud_min_y)"/>
-    <param name="max_y" value="$(var cloud_max_y)"/>
+    <param name="min_x" value="-3.0"/>
+    <param name="max_x" value="3.0"/>
+    <param name="min_y" value="-3.0"/>
+    <param name="max_y" value="3.0"/>
     <param name="min_z" value="$(var cloud_min_z)"/>
     <param name="max_z" value="$(var cloud_max_z)"/>
     <param name="voxel_leaf_size" value="0.03"/>
@@ -240,6 +249,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_namespace"      value="$(var use_namespace)"/>
     <param name="laser_scan_topic"   value="$(var laser_scan_topic)"/>
     <param name="point_cloud_topic"  value="$(var point_cloud_topic)"/>
@@ -262,6 +272,9 @@
     <param name="laser_max_y"        value="$(var laser_max_y)"/>
     <param name="laser_min_z"        value="$(var laser_min_z)"/>
     <param name="laser_max_z"        value="$(var laser_max_z)"/>
+    <param name="cloud_sensor_frame" value="$(var cloud_sensor_frame)" type="str"/>
+    <param name="cloud_min_range"    value="$(var cloud_min_range)"/>
+    <param name="cloud_max_range"    value="$(var cloud_max_range)"/>
     <param name="cloud_min_x"        value="$(var cloud_min_x)"/>
     <param name="cloud_max_x"        value="$(var cloud_max_x)"/>
     <param name="cloud_min_y"        value="$(var cloud_min_y)"/>
@@ -286,7 +299,9 @@
     <param name="allow_unknown" value="$(var allow_unknown)"/>
     <param name="unknown_cost" value="$(var unknown_cost)"/>
     <!-- Keep occupied cells intact during recovery. -->
-    <param name="escape_clear_radius" value="0.0"/>
+    <param name="escape_clear_radius" value="0.6"/>
+    <param name="robot_radius" value="$(var robot_radius)"/>
+    <param name="start_recovery_margin" value="$(var start_recovery_margin)"/>
   </node>
 
   <node name="simple_move"
@@ -295,6 +310,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_namespace"     value="$(var use_namespace)"/>
     <param name="max_linear_speed"  value="$(var max_linear_speed)"/>
     <param name="max_angular_speed" value="$(var max_angular_speed)"/>
@@ -304,6 +320,8 @@
     <param name="use_pot_fields"    value="$(var use_pot_fields)"/>
     <param name="base_link_name"    value="$(var base_link_name)"/>
     <remap from="/cmd_vel" to="$(var cmd_vel_topic)"/>
+    <param name="final_position_settle_sec" value="$(var final_position_settle_sec)"/>
+    <param name="head_goal_deadband_rad" value="$(var head_goal_deadband_rad)"/>
   </node>
 
   <node name="potential_fields"
@@ -324,6 +342,10 @@
     <param name="laser_max_y"            value="$(var laser_max_y)"/>
     <param name="laser_min_z"            value="$(var laser_min_z)"/>
     <param name="laser_max_z"            value="$(var laser_max_z)"/>
+    <param name="cloud_sensor_frame"     value="$(var cloud_sensor_frame)" type="str"/>
+    <param name="cloud_min_points_per_cell" value="$(var obstacle_cloud_min_points_per_cell)"/>
+    <param name="cloud_min_range"        value="$(var cloud_min_range)"/>
+    <param name="cloud_max_range"        value="$(var cloud_max_range)"/>
     <param name="cloud_min_x"            value="$(var cloud_min_x)"/>
     <param name="cloud_max_x"            value="$(var cloud_max_x)"/>
     <param name="cloud_min_y"            value="$(var cloud_min_y)"/>
@@ -332,6 +354,8 @@
     <param name="cloud_max_z"            value="$(var cloud_max_z)"/>
     <param name="laser_pot_fields_d0"    value="$(var laser_pot_fields_d0)"/>
     <param name="laser_pot_fields_k_rej" value="$(var laser_pot_fields_k_rej)"/>
+    <param name="collision_footprint_radius" value="$(var robot_radius)"/>
+    <param name="self_obstacle_ignore_radius" value="$(var self_obstacle_ignore_radius)"/>
     <param name="cloud_pot_fields_d0"    value="$(var cloud_pot_fields_d0)"/>
     <param name="cloud_pot_fields_k_rej" value="$(var cloud_pot_fields_k_rej)"/>
     <param name="cloud_downsampling"     value="$(var cloud_downsampling)"/>
@@ -366,10 +390,14 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="debug_detection" value="$(var debug_detection)"/>
     <remap from="nav_control/goal" to="move_base_simple/goal"/>
     <param name="use_namespace"  value="$(var use_namespace)"/>
     <param name="patience"       value="$(var mvn_pln_patience)"/>
     <param name="base_link_name" value="$(var base_link_name)"/>
+    <param name="robot_radius" value="$(var robot_radius)"/>
+    <param name="near_goal_extra_margin" value="$(var near_goal_extra_margin)"/>
+    <param name="near_goal_min_progress" value="$(var near_goal_min_progress)"/>
   </node>
 
 

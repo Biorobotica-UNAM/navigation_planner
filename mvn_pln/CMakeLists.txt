@@ -30,6 +30,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 
 find_package(rcl_interfaces REQUIRED)
+find_package(path_planner REQUIRED)
 
 # =====================
 # C++ Node
@@ -51,6 +52,7 @@ ament_target_dependencies(mvn_pln_node
   tf2_ros
   tf2_geometry_msgs
   rcl_interfaces
+  path_planner
 )
 
 # =====================

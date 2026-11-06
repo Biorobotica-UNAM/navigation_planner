@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.8)
 project(simple_move)
 
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "CMake build type" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -21,6 +25,7 @@ find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(path_planner REQUIRED)
 find_package(action_msgs REQUIRED)
 find_package(actionlib_msgs REQUIRED)
 
@@ -42,6 +47,7 @@ ament_target_dependencies(simple_move_node
   sensor_msgs
   geometry_msgs
   nav_msgs
+  path_planner
   action_msgs
   actionlib_msgs
   tf2

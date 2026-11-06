@@ -39,13 +39,13 @@ public:
                                             "Wait for the prohibition overlay before serving planning maps.") && use_prohibition_;
     circular_ =                   parameter("circular_inflation", false, 
                                             "Circular inflation; false uses a square kernel.");
-    const double legacy_radius =  parameter("inflation_radius", 0.15,
+    const double legacy_radius =  parameter("inflation_radius", 0.25,
                                             "Fallback inflation radius in metres when a specific radius is negative.");
     const double shared_radius =  parameter("obstacle_inflation_radius", -1.0,
                                             "Fallback for both inflation radii; negative selects inflation_radius.");
-    static_radius_ =              parameter("static_obstacle_inflation_radius", 0.05,
+    static_radius_ =              parameter("static_obstacle_inflation_radius", 0.25,
                                             "Static clearance in metres; negative selects the fallback radius.");
-    dynamic_radius_ =             parameter("dynamic_obstacle_inflation_radius", 0.15,
+    dynamic_radius_ =             parameter("dynamic_obstacle_inflation_radius", 0.25,
                                             "Dynamic clearance in metres; negative selects the fallback radius.");
     
     const double fallback = shared_radius >= 0.0 ? shared_radius : legacy_radius;
@@ -92,7 +92,10 @@ public:
     // Compatibility with existing launches: neither value changes the explicit
     // clearance radii, and expiration is exclusively the detector's job.
     parameter("decay_factor", 0, "Deprecated here; obstacle_detector owns expiration.");
-    parameter("robot_radius", 0.35, "Legacy metadata; explicit inflation radii control clearance.");
+    robot_radius_ = parameter("robot_radius", 0.23, "Physical base circumradius, excluding planning margins.");
+    if (!positive(robot_radius_)) {throw std::invalid_argument("Invalid robot_radius");}
+    static_radius_ = std::max(robot_radius_, static_radius_);
+    dynamic_radius_ = std::max(robot_radius_, dynamic_radius_);
 
     auto output_qos = rclcpp::QoS(depth).reliable();
     if (output_latched) {output_qos.transient_local();}
@@ -104,6 +107,7 @@ public:
 
     pub_augmented_ = create_publisher<Grid>(endpoint("augmented_map_topic", "/augmented_map"), output_qos);
     pub_planning_ = create_publisher<Grid>(endpoint("planning_map_topic", "/planning_map"), output_qos);
+    pub_clearance_ = create_publisher<Grid>(endpoint("clearance_map_topic", "/clearance_map"), output_qos);
     pub_base_ = create_publisher<Grid>(endpoint("base_map_output_topic", "/map_augmenter/base_map"), output_qos);
     const auto base_topic = parameter("base_map_topic", std::string("map"),
       "Raw map-server or SLAM topic; empty disables the subscription.");
@@ -189,7 +193,7 @@ private:
 
   struct Snapshot
   {
-    Grid static_collision, static_cost, augmented_collision, augmented_cost;
+    Grid static_collision, static_cost, augmented_collision, augmented_cost, clearance;
     bool has_dynamic_obstacles{false};
   };
 
@@ -254,6 +258,7 @@ private:
     const Grid merged = use_prohibition_ && prohibition_input_.ready ?
       map_augmenter::overlay_obstacles(base_input_.grid, prohibition_input_.grid) : base_input_.grid;
     static_collision_ = map_augmenter::inflate_obstacles(merged, static_radius_, circular_);
+    static_clearance_ = map_augmenter::inflate_obstacles(merged, robot_radius_, true, false);
     static_cost_ = map_augmenter::make_cost_map(static_collision_, cost_radius_, cost_peak_, circular_);
     rebuild_augmented_layers();
   }
@@ -266,11 +271,14 @@ private:
     next.static_cost = static_cost_;
     next.augmented_collision = static_collision_;
     next.augmented_cost = static_cost_;
+    next.clearance = static_clearance_;
     if (have_obstacles_) {
       const Grid projected = map_augmenter::reproject_obstacles(dynamic_obstacles_, base_input_.grid);
       next.has_dynamic_obstacles = std::any_of(projected.data.begin(), projected.data.end(),
         [](int8_t value) {return value > 0;});
-      const Grid inflated = map_augmenter::inflate_obstacles(projected, dynamic_radius_, circular_);
+      const Grid inflated = map_augmenter::inflate_obstacles(projected, dynamic_radius_, circular_, false);
+      const Grid clearance = map_augmenter::inflate_obstacles(projected, robot_radius_, true, false);
+      next.clearance = map_augmenter::overlay_obstacles(static_clearance_, clearance);
       next.augmented_collision = map_augmenter::overlay_obstacles(static_collision_, inflated);
       const Grid dynamic_cost = map_augmenter::make_cost_map(inflated, cost_radius_, cost_peak_, circular_);
       for (size_t i = 0; i < dynamic_cost.data.size(); ++i) {
@@ -286,6 +294,7 @@ private:
     next.static_cost.header.stamp = stamp;
     next.augmented_collision.header.stamp = stamp;
     next.augmented_cost.header.stamp = stamp;
+    next.clearance.header.stamp = stamp;
     snapshot_ = std::move(next);
     ready_ = true;
     if (debug_) {
@@ -301,6 +310,7 @@ private:
     if (!ready_) {return;}
     pub_augmented_->publish(snapshot_.augmented_collision);
     pub_planning_->publish(snapshot_.augmented_collision);
+    pub_clearance_->publish(snapshot_.clearance);
   }
 
   void add_map_service(const std::string & name, const std::string & default_name,
@@ -386,16 +396,16 @@ private:
 
   MapInput base_input_, prohibition_input_;
   Snapshot snapshot_;
-  Grid dynamic_obstacles_, static_collision_, static_cost_;
+  Grid dynamic_obstacles_, static_collision_, static_cost_, static_clearance_;
   bool use_namespace_{false}, use_online_{false}, use_prohibition_{true}, require_prohibition_{true};
   bool circular_{false}, debug_{false}, ready_{false}, have_obstacles_{false};
-  double static_radius_, dynamic_radius_, cost_radius_, topic_timeout_, request_timeout_;
+  double static_radius_, dynamic_radius_, cost_radius_, topic_timeout_, request_timeout_, robot_radius_;
   double tf_timeout_, robot_tf_max_age_;
   int cost_peak_, log_throttle_ms_;
   std::string base_link_, map_frame_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
-  rclcpp::Publisher<Grid>::SharedPtr pub_augmented_, pub_planning_, pub_base_;
+  rclcpp::Publisher<Grid>::SharedPtr pub_augmented_, pub_planning_, pub_base_, pub_clearance_;
   rclcpp::Subscription<Grid>::SharedPtr sub_base_, sub_prohibition_, sub_obstacles_;
   rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr sub_point_;
   std::vector<rclcpp::Service<GetMap>::SharedPtr> map_services_;

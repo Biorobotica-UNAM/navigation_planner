@@ -1,0 +1,16 @@
+# Internal coordination contract; existing GetPlan services remain available.
+geometry_msgs/PoseStamped start
+geometry_msgs/PoseStamped goal
+# Zero keeps exact-goal behavior for existing clients.
+float64 goal_recovery_radius
+builtin_interfaces/Time minimum_map_stamp
+# Temporary soft costs for this request only. Never changes occupied cells.
+nav_msgs/Path[] avoided_paths
+# Fresh sensor witnesses that must be represented by occupied map cells.
+geometry_msgs/PointStamped[] required_obstacles
+---
+nav_msgs/Path path
+builtin_interfaces/Time map_stamp
+string reason
+bool start_recovery
+bool goal_relocated

@@ -25,45 +25,70 @@
   <arg name="use_point_cloud"                         default="True"/>
   <arg name="use_pot_fields"                          default="True"/>
 
+  <!-- Physical geometry and independent planning/sensor margins. -->
+  <!-- HSR base_v2 + bumper envelope: 0.228 m, rounded outward. -->
+  <arg name="robot_radius"                            default="0.23"/>
+  <arg name="start_recovery_margin" default="0.05"/>
+  <arg name="near_goal_extra_margin" default="0.10"/>
+  <arg name="near_goal_min_progress" default="0.90"/>
+  <arg name="final_position_settle_sec" default="0.30"/>
+  <arg name="head_goal_deadband_rad" default="0.04"/>
+  <arg name="collision_footprint_radius"              default="$(var robot_radius)"/>
+  <arg name="planning_hard_margin"                    default="0.02"/>
+  <arg name="dynamic_planning_margin"                 default="-0.1"/>
+  <!-- Compatibility alias; negative values never reduce the physical footprint. -->
+  <arg name="planning_hard_margin_1"                    default="$(var dynamic_planning_margin)"/>
+  <arg name="collision_stop_margin"                   default="0.08"/>
+
   <!-- ===== Tuning / thresholds ===== -->
   <arg name="cloud_downsampling"                      default="1"/>
   <arg name="cloud_filter_input_qos_mode"             default="dual"/>
   <arg name="cloud_filter_debug"                      default="false"/>
   <arg name="cloud_filter_min_points_per_voxel"       default="2"/>
   <arg name="cloud_filter_min_neighbor_voxels"        default="2"/>
-  <arg name="static_obstacle_ignore_radius"           default="0.001"/>
+  <arg name="static_obstacle_ignore_radius"           default="0.08"/>
   <arg name="obstacle_cloud_min_neighbor_cells"       default="2"/>
   <arg name="cloud_points_threshold"                  default="15"/>
   <arg name="lidar_points_threshold"                  default="20"/>
   <arg name="mvn_pln_patience"                        default="True"/>
 
   <!-- ===== Laser detection window ===== -->
-  <arg name="laser_min_x"                             default="0.17"/>
-  <arg name="laser_max_x"                             default="0.55"/>
-  <arg name="laser_min_y"                             default="-0.25"/>
-  <arg name="laser_max_y"                             default="0.25"/>
+  <arg name="laser_min_x"                             default="0.0"/>
+  <arg name="laser_max_x"                             default="2.5"/>
+  <arg name="laser_min_y"                             default="-1.0"/>
+  <arg name="laser_max_y"                             default="1.0"/>
   <arg name="laser_min_z"                             default="0.05"/>
   <arg name="laser_max_z"                             default="1.20"/>
 
   <!-- ===== Point cloud detection window ===== -->
-  <arg name="cloud_min_x"                             default="0.30"/>
-  <arg name="cloud_max_x"                             default="0.80"/>
-  <arg name="cloud_min_y"                             default="-0.30"/>
-  <arg name="cloud_max_y"                             default="0.30"/>
-  <arg name="cloud_min_z"                             default="0.15"/>
+  <!-- Xtion range is measured in 3D from its optical frame, independent of tilt. -->
+  <arg name="cloud_sensor_frame"                      default=""/>
+  <arg name="cloud_min_range"                         default="0.60"/>
+  <arg name="cloud_max_range"                         default="5.0"/>
+  <arg name="self_obstacle_ignore_max_z"              default="0.30"/>
+  <arg name="unobserved_obstacle_hold_radius"         default="1.0"/>
+  <arg name="unobserved_obstacle_hold_sec"            default="3.0"/>
+  <arg name="head_preview_angle_rad"                   default="0.25"/>
+  <arg name="head_max_pan_speed"                      default="1.5"/>
+  <arg name="cloud_min_x"                             default="0.0"/>
+  <arg name="cloud_max_x"                             default="2.5"/>
+  <arg name="cloud_min_y"                             default="-1.0"/>
+  <arg name="cloud_max_y"                             default="1.0"/>
+  <arg name="cloud_min_z"                             default="0.20"/>
   <arg name="cloud_max_z"                             default="1.20"/>
 
   <!-- ===== Map Augmenter ===== -->
   <arg name="augmenter_cost_radius"                   default="0.90"/>
-  <arg name="dynamic_obstacle_inflation_radius"       default="0.15"/>
+  <!--arg name="dynamic_obstacle_inflation_radius"       default="$(eval 'max($(var robot_radius), $(var robot_radius) + $(var planning_hard_margin_1))')"/-->
+  <arg name="dynamic_obstacle_inflation_radius"       default= "$(eval '$(var robot_radius) + $(var planning_hard_margin_1)')"/>
 
   <arg name="augmenter_use_online"                     default="false"/>
   <arg name="use_prohibition_map"                      default="true"/>
   <arg name="require_prohibition_map"                  default="true"/>
   <arg name="circular_inflation"                       default="true"/>
-  <!-- Hard clearance assumes a 0.35 m footprint radius plus 0.05 m margin. -->
-  <arg name="static_obstacle_inflation_radius"         default="0.1"/>
-  <arg name="augmenter_cost_peak"                      default="6"/>
+  <!-- The input map contains raw obstacles; inflation includes the base and margin. -->
+  <arg name="static_obstacle_inflation_radius"         default="$(eval '$(var robot_radius) + $(var planning_hard_margin)')"/>
+  <arg name="augmenter_cost_peak"                      default="15"/>
   <arg name="map_augmenter_debug"                      default="false"/>
   <arg name="augmenter_map_topic_timeout_sec"          default="3.0"/>
   <arg name="augmenter_map_request_timeout_sec"        default="3.0"/>
@@ -91,7 +116,7 @@
   <arg name="remember_all_obstacles"                   default="false"/>
   <arg name="odom_frame"                               default="odom"/>
   <arg name="detector_processing_period_sec"           default="0.075"/>
-  <arg name="obstacle_timeout_sec"                     default="0.75"/>
+  <arg name="obstacle_timeout_sec"                     default="1.0"/>
   <arg name="sensor_max_age_sec"                       default="0.5"/>
   <arg name="sensor_future_tolerance_sec"              default="0.05"/>
   <arg name="allow_zero_sensor_stamp"                  default="false"/>
@@ -99,7 +124,7 @@
   <arg name="tf_allow_latest_fallback"                 default="true"/>
   <arg name="tf_fallback_max_age_sec"                  default="0.20"/>
   <arg name="ignore_static_obstacles"                  default="true"/>
-  <arg name="self_obstacle_ignore_radius"              default="0.0"/>
+  <arg name="self_obstacle_ignore_radius"              default="$(var robot_radius)"/>
   <arg name="detector_laser_min_range"                 default="0.10"/>
   <arg name="clear_on_pose_jump"                       default="true"/>
   <arg name="pose_jump_translation_m"                  default="0.5"/>
@@ -120,7 +145,8 @@
   <arg name="goal_relocation_radius"                   default="1.0"/>
   <arg name="disable_rear_path_plan"                   default="false"/>
   <arg name="online_behind_clearance"                  default="1.0"/>
-  <arg name="planner_map_refresh_period_sec"           default="1.0"/>
+  <arg name="planner_map_refresh_period_sec"           default="0.2"/>
+  <arg name="planner_map_snapshot_timeout_sec"         default="1.0"/>
   <arg name="planner_map_request_timeout_sec"          default="5.0"/>
   <arg name="planner_map_pair_retry_limit"             default="1"/>
 
@@ -137,8 +163,8 @@
   <arg name="angular_acceleration"                    default="0.8"/>
   <arg name="linear_jerk"                             default="1.5"/>
   <arg name="angular_jerk"                            default="4.0"/>
-  <arg name="fine_dist_tolerance"                     default="0.03"/>
-  <arg name="angle_tolerance"                         default="0.05"/>
+  <arg name="fine_dist_tolerance"                     default="0.08"/>
+  <arg name="angle_tolerance"                         default="0.08"/>
   <arg name="lookahead_min_m"                         default="0.20"/>
   <arg name="lookahead_max_m"                         default="0.60"/>
   <arg name="lookahead_time_sec"                      default="0.6"/>
@@ -148,12 +174,21 @@
   <arg name="head_pan_min"                            default="-3.14"/>
   <arg name="head_pan_max"                            default="1.74"/>
   <arg name="head_tilt"                               default="-0.5"/>
-  <arg name="head_alignment_tolerance"                default="0.15"/>
+  <arg name="head_alignment_tolerance"                default="0.20"/>
+  <arg name="head_pan_limit_margin"                   default="0.05"/>
+  <arg name="head_stop_error_rad"                     default="0.55"/>
+  <arg name="head_lookahead_time_sec"                 default="0.25"/>
+  <arg name="final_position_hysteresis_m"              default="0.03"/>
+  <arg name="final_capture_distance_m"                 default="0.40"/>
+  <arg name="final_angle_max_angular_speed"             default="0.50"/>
+  <arg name="angular_damping"                           default="0.50"/>
   <arg name="head_feedback_timeout_sec"               default="0.5"/>
   <arg name="head_alignment_timeout_sec"              default="10.0"/>
   <arg name="max_path_deviation_m"                    default="0.35"/>
   <arg name="deviation_persistence_sec"               default="0.5"/>
   <arg name="progress_timeout_sec"                    default="8.0"/>
+  <arg name="sensor_wait_timeout_sec"                  default="10.0"/>
+  <arg name="start_escape_speed"                       default="0.08"/>
   <arg name="navigation_sensor_timeout_sec"           default="0.5"/>
   <arg name="navigation_tf_timeout_sec"               default="0.5"/>
 
@@ -163,19 +198,27 @@
   <arg name="navigation_map_timeout_sec"              default="3.0"/>
   <arg name="controller_timeout_sec"                  default="2.0"/>
   <arg name="path_check_horizon_m"                    default="2.0"/>
+  <arg name="local_avoidance_timeout_sec"              default="3.0"/>
+  <arg name="local_blocked_hold_sec"                  default="1.5"/>
+  <arg name="local_avoidance_speed"                   default="0.20"/>
+  <arg name="max_avoidance_deviation_m"                default="0.55"/>
+  <arg name="max_recovery_attempts"                   default="3"/>
+  <arg name="recovery_progress_m"                     default="0.4"/>
+  <arg name="recovery_path_horizon_m"                 default="0.8"/>
+  <arg name="recovery_path_difference_m"              default="0.12"/>
+  <arg name="recovery_cost_radius"                    default="0.35"/>
+  <arg name="recovery_cost_peak"                      default="40.0"/>
 
   <!-- ===== Strict path quality ===== -->
   <arg name="require_smooth_path"                     default="true"/>
   <arg name="smoothing_retry_limit"                   default="8"/>
   <arg name="smoothing_time_budget_sec"               default="1.0"/>
-  <arg name="max_path_curvature"                      default="4.0"/>
-  <arg name="max_path_heading_step"                   default="0.35"/>
+  <arg name="max_path_curvature"                      default="6.0"/>
+  <arg name="max_path_heading_step"                   default="0.50"/>
 
   <!-- ===== Potential Fields ===== -->
-  <arg name="collision_footprint_radius"              default="0.30"/>
   <arg name="collision_reaction_time_sec"              default="0.10"/>
   <arg name="collision_critical_margin"                default="0.02"/>
-  <arg name="collision_stop_margin"                   default="0.08"/>
   <arg name="repulsion_max_speed"                     default="0.15"/>
   <arg name="repulsion_filter_time_sec"               default="0.15"/>
   <arg name="pot_fields_debug"                        default="False"/>
@@ -247,6 +290,7 @@
     <param name="use_prohibition_map"                      value="$(var use_prohibition_map)"/>
     <param name="require_prohibition_map"                  value="$(var require_prohibition_map)"/>
     <param name="circular_inflation"                       value="$(var circular_inflation)"/>
+    <param name="robot_radius"                            value="$(var robot_radius)"/>
     <param name="static_obstacle_inflation_radius"         value="$(var static_obstacle_inflation_radius)"/>
     <param name="cost_peak"                                value="$(var augmenter_cost_peak)"/>
     <param name="debug_maps"                               value="$(var map_augmenter_debug)"/>
@@ -292,6 +336,8 @@
     <param name="remember_all_obstacles"                   value="$(var remember_all_obstacles)"/>
     <param name="odom_frame"                               value="$(var odom_frame)"/>
     <param name="processing_period_sec"                    value="$(var detector_processing_period_sec)"/>
+    <param name="unobserved_obstacle_hold_radius"          value="$(var unobserved_obstacle_hold_radius)"/>
+    <param name="unobserved_obstacle_hold_sec"             value="$(var unobserved_obstacle_hold_sec)"/>
     <param name="obstacle_timeout_sec"                     value="$(var obstacle_timeout_sec)"/>
     <param name="sensor_max_age_sec"                       value="$(var sensor_max_age_sec)"/>
     <param name="sensor_future_tolerance_sec"              value="$(var sensor_future_tolerance_sec)"/>
@@ -321,6 +367,10 @@
     <param name="laser_max_y"                         value="$(var laser_max_y)"/>
     <param name="laser_min_z"                         value="$(var laser_min_z)"/>
     <param name="laser_max_z"                         value="$(var laser_max_z)"/>
+    <param name="cloud_sensor_frame"                       value="$(var cloud_sensor_frame)" type="str"/>
+    <param name="cloud_min_range"                          value="$(var cloud_min_range)"/>
+    <param name="cloud_max_range"                          value="$(var cloud_max_range)"/>
+    <param name="self_obstacle_ignore_max_z"               value="$(var self_obstacle_ignore_max_z)"/>
     <param name="cloud_min_x"                         value="$(var cloud_min_x)"/>
     <param name="cloud_max_x"                         value="$(var cloud_max_x)"/>
     <param name="cloud_min_y"                         value="$(var cloud_min_y)"/>
@@ -355,10 +405,15 @@
     <param name="disable_rear_path_plan"                   value="$(var disable_rear_path_plan)"/>
     <param name="online_behind_clearance"                  value="$(var online_behind_clearance)"/>
     <param name="map_refresh_period_sec"                   value="$(var planner_map_refresh_period_sec)"/>
+    <param name="map_snapshot_timeout_sec"                 value="$(var planner_map_snapshot_timeout_sec)"/>
+    <param name="recovery_cost_radius"                      value="$(var recovery_cost_radius)"/>
+    <param name="recovery_cost_peak"                        value="$(var recovery_cost_peak)"/>
     <param name="map_request_timeout_sec"                  value="$(var planner_map_request_timeout_sec)"/>
     <param name="map_pair_retry_limit"                     value="$(var planner_map_pair_retry_limit)"/>
     <param name="use_namespace"                            value="$(var use_namespace)"/>
     <param name="diagonal_paths"                           value="$(var diagonal_paths)"/>
+    <param name="robot_radius" value="$(var robot_radius)"/>
+    <param name="start_recovery_margin" value="$(var start_recovery_margin)"/>
   </node>
 
   <!-- ================================================================== -->
@@ -370,6 +425,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_namespace"                 value="$(var use_namespace)"/>
     <param name="max_linear_speed"              value="$(var max_linear_speed)"/>
     <param name="max_angular_speed"             value="$(var max_angular_speed)"/>
@@ -391,10 +447,25 @@
     <param name="lookahead_time_sec"            value="$(var lookahead_time_sec)"/>
     <param name="initial_alignment_fraction"    value="$(var initial_alignment_fraction)"/>
     <param name="final_alignment_fraction"      value="$(var final_alignment_fraction)"/>
+    <param name="start_escape_radius"          value="$(var escape_clear_radius)"/>
+    <param name="start_escape_speed"           value="$(var start_escape_speed)"/>
+    <param name="head_preview_angle_rad"       value="$(var head_preview_angle_rad)"/>
+    <param name="head_max_pan_speed"            value="$(var head_max_pan_speed)"/>
+    <param name="odom_name"                     value="$(var odom_frame)"/>
     <param name="head_pan_min"                  value="$(var head_pan_min)"/>
     <param name="head_pan_max"                  value="$(var head_pan_max)"/>
     <param name="head_tilt"                     value="$(var head_tilt)"/>
     <param name="head_alignment_tolerance"      value="$(var head_alignment_tolerance)"/>
+    <param name="head_pan_limit_margin"         value="$(var head_pan_limit_margin)"/>
+    <param name="head_stop_error_rad"           value="$(var head_stop_error_rad)"/>
+    <param name="head_lookahead_time_sec"        value="$(var head_lookahead_time_sec)"/>
+    <param name="final_position_hysteresis_m"    value="$(var final_position_hysteresis_m)"/>
+    <param name="final_capture_distance_m"       value="$(var final_capture_distance_m)"/>
+    <param name="final_angle_max_angular_speed"   value="$(var final_angle_max_angular_speed)"/>
+    <param name="angular_damping"                value="$(var angular_damping)"/>
+    <param name="local_avoidance_timeout_sec"     value="$(var local_blocked_hold_sec)"/>
+    <param name="local_avoidance_speed"           value="$(var local_avoidance_speed)"/>
+    <param name="max_avoidance_deviation_m"       value="$(var max_avoidance_deviation_m)"/>
     <param name="head_feedback_timeout_sec"     value="$(var head_feedback_timeout_sec)"/>
     <param name="head_alignment_timeout_sec"    value="$(var head_alignment_timeout_sec)"/>
     <param name="max_path_deviation_m"          value="$(var max_path_deviation_m)"/>
@@ -408,6 +479,8 @@
     <remap from="/hardware/head/current_pose"          to="/$(var namespace_hardware)/head/current_pose"/>
     <param name="use_sim_time"                  value="$(var use_sim_time)"/>
     <param name="collision_reaction_time_sec"   value="$(var collision_reaction_time_sec)"/>
+    <param name="final_position_settle_sec" value="$(var final_position_settle_sec)"/>
+    <param name="head_goal_deadband_rad" value="$(var head_goal_deadband_rad)"/>
   </node>
 
   <!-- ================================================================== -->
@@ -431,6 +504,11 @@
     <param name="laser_max_y"                   value="$(var laser_max_y)"/>
     <param name="laser_min_z"                   value="$(var laser_min_z)"/>
     <param name="laser_max_z"                   value="$(var laser_max_z)"/>
+    <param name="cloud_sensor_frame"            value="$(var cloud_sensor_frame)" type="str"/>
+    <param name="cloud_min_points_per_cell"     value="$(var obstacle_cloud_min_points_per_cell)"/>
+    <param name="cloud_min_range"               value="$(var cloud_min_range)"/>
+    <param name="cloud_max_range"               value="$(var cloud_max_range)"/>
+    <param name="self_obstacle_ignore_max_z"    value="$(var self_obstacle_ignore_max_z)"/>
     <param name="cloud_min_x"                   value="$(var cloud_min_x)"/>
     <param name="cloud_max_x"                   value="$(var cloud_max_x)"/>
     <param name="cloud_min_y"                   value="$(var cloud_min_y)"/>
@@ -452,6 +530,7 @@
     <param name="laser_scan_topic"              value="$(var laser_scan_topic)"/>
     <remap from="/cmd_vel"                      to="$(var cmd_vel_topic)"/>
     <param name="base_link_name"                value="$(var base_link_name)"/>
+    <param name="self_obstacle_ignore_radius"   value="$(var self_obstacle_ignore_radius)"/>
     <param name="collision_footprint_radius"    value="$(var collision_footprint_radius)"/>
     <param name="collision_stop_margin"         value="$(var collision_stop_margin)"/>
     <param name="repulsion_max_speed"           value="$(var repulsion_max_speed)"/>
@@ -487,7 +566,10 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_namespace"            value="$(var use_namespace)"/>
+    <param name="sensor_wait_timeout_sec"   value="$(var sensor_wait_timeout_sec)"/>
+    <param name="start_escape_radius"       value="$(var escape_clear_radius)"/>
     <param name="patience"                 value="$(var mvn_pln_patience)"/>
     <param name="base_link_name"           value="$(var base_link_name)"/>
     <remap from="nav_control/goal" to="move_base_simple/goal"/>
@@ -495,11 +577,19 @@
     <param name="replan_period_sec"        value="$(var replan_period_sec)"/>
     <param name="controller_timeout_sec"   value="$(var controller_timeout_sec)"/>
     <param name="path_check_horizon_m"     value="$(var path_check_horizon_m)"/>
+    <param name="max_recovery_attempts"    value="$(var max_recovery_attempts)"/>
+    <param name="local_avoidance_timeout_sec" value="$(var local_avoidance_timeout_sec)"/>
+    <param name="recovery_progress_m"      value="$(var recovery_progress_m)"/>
+    <param name="recovery_path_horizon_m"  value="$(var recovery_path_horizon_m)"/>
+    <param name="recovery_path_difference_m" value="$(var recovery_path_difference_m)"/>
     <param name="goal_position_tolerance_m" value="$(var fine_dist_tolerance)"/>
     <param name="goal_angle_tolerance_rad" value="$(var angle_tolerance)"/>
     <param name="tf_timeout_sec"           value="$(var navigation_tf_timeout_sec)"/>
     <param name="map_timeout_sec"          value="$(var navigation_map_timeout_sec)"/>
     <param name="use_sim_time"             value="$(var use_sim_time)"/>
+    <param name="robot_radius" value="$(var robot_radius)"/>
+    <param name="near_goal_extra_margin" value="$(var near_goal_extra_margin)"/>
+    <param name="near_goal_min_progress" value="$(var near_goal_min_progress)"/>
   </node>
 
 
