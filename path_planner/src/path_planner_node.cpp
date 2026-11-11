@@ -1,5 +1,6 @@
 #include "path_planner/PathPlanner.h"
 #include "path_planner/srv/plan_path.hpp"
+#include "path_planner/srv/get_planning_snapshot.hpp"
 
 #include <nav_msgs/srv/get_map.hpp>
 #include <nav_msgs/srv/get_plan.hpp>
@@ -29,12 +30,15 @@ class PathPlannerNode : public rclcpp::Node
     using PlanPath = path_planner::srv::PlanPath;
     using GetPlanWithVia = pumas_interfaces::srv::GetPlanWithVia;
     using MapClient = rclcpp::Client<GetMap>;
+    using GetSnapshot = path_planner::srv::GetPlanningSnapshot;
     using SteadyClock = std::chrono::steady_clock;
 
     struct MapPair
     {
         Grid map;
         Grid costs;
+        Grid clearance;
+        uint64_t revision;
         SteadyClock::time_point received;
     };
     using Snapshot = std::shared_ptr<const MapPair>;
@@ -43,7 +47,7 @@ class PathPlannerNode : public rclcpp::Node
     {
         MapClient::SharedPtr map_client, cost_client, active_client;
         Grid staged_map;
-        bool pending = false;
+        bool pending = false, atomic_request = false;
         uint64_t generation = 0;
         int64_t request_id = 0;
         int retries = 0;
@@ -133,6 +137,9 @@ public:
             map_prefix + "get_augmented_map", rmw_qos_profile_services_default, update_group_);
         cycles_[1].cost_client = create_client<GetMap>(
             map_prefix + "get_augmented_cost_map", rmw_qos_profile_services_default, update_group_);
+
+        snapshot_client_ = create_client<GetSnapshot>(map_prefix + "get_planning_snapshot",
+            rmw_qos_profile_services_default, update_group_);
 
         static_service_ = create_service<GetPlan>(
             plan_prefix + "plan_path_with_static",
@@ -259,6 +266,32 @@ private:
         auto& cycle = cycles_[index];
         if (cycle.pending)
             return;
+        if (snapshot_client_->service_is_ready())
+        {
+            cycle.pending = cycle.atomic_request = true;
+            const auto generation = ++cycle.generation;
+            cycle.deadline = SteadyClock::now() + std::chrono::duration_cast<SteadyClock::duration>(
+                std::chrono::duration<double>(request_timeout_));
+            auto request = std::make_shared<GetSnapshot::Request>();
+            request->augmented = index == 1;
+            const auto pending = snapshot_client_->async_send_request(request,
+                [this,index,generation](rclcpp::Client<GetSnapshot>::SharedFuture future) {
+                    auto& state = cycles_[index];
+                    if (!state.pending || state.generation != generation) return;
+                    state.pending = false;
+                    try
+                    {
+                        auto response = future.get();
+                        if (!response->ready || response->clearance.data.empty()) return;
+                        storeSnapshot(index, std::move(response->map), std::move(response->costs),
+                            std::move(response->clearance), response->revision);
+                    }
+                    catch (const std::exception& error) {RCLCPP_WARN(get_logger(), "Snapshot response failed: %s", error.what());}
+                });
+            cycle.request_id = pending.request_id;
+            return;
+        }
+        cycle.atomic_request = false;
         if (!cycle.map_client->service_is_ready() || !cycle.cost_client->service_is_ready())
         {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
@@ -328,41 +361,38 @@ private:
         try
         {
             Grid costs = std::move(ready.get()->map);
-            const auto& map = cycle.staged_map;
-            // The producer stamps every layer of a snapshot together.
-            if (map.header.stamp != costs.header.stamp ||
-                map.header.frame_id.empty() || map.header.frame_id != costs.header.frame_id ||
-                map.info.width == 0 || map.info.height == 0 ||
-                map.info.width != costs.info.width || map.info.height != costs.info.height ||
-                !std::isfinite(map.info.resolution) || map.info.resolution <= 0.0 ||
-                map.info.resolution != costs.info.resolution || map.info.origin != costs.info.origin ||
-                static_cast<uint64_t>(map.info.width) * map.info.height != map.data.size() ||
-                map.data.size() != costs.data.size())
+            if (!storeSnapshot(index,std::move(cycle.staged_map),std::move(costs),Grid{},0) && cycle.retries < retry_limit_)
             {
-                cycle.staged_map = Grid{};
-                if (cycle.retries < retry_limit_)
-                {
-                    ++cycle.retries;
-                    startUpdate(index, true);
-                }
-                else
-                    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                        "Map/cost snapshot mismatch; retaining the previous snapshot %zu.", index);
-                return;
+                ++cycle.retries;
+                startUpdate(index,true);
             }
-            auto next = std::make_shared<const MapPair>(
-                MapPair{std::move(cycle.staged_map), std::move(costs), SteadyClock::now()});
-            {
-                std::lock_guard<std::mutex> lock(snapshots_mutex_);
-                snapshots_[index].swap(next);
-            }
-            // Release the old grids after leaving the critical section.
         }
         catch (const std::exception& error)
         {
             cycle.staged_map = Grid{};
             RCLCPP_WARN(get_logger(), "Cost-map response failed: %s", error.what());
         }
+    }
+
+    bool storeSnapshot(size_t index, Grid map, Grid costs, Grid clearance, uint64_t revision)
+    {
+        const auto coherent = [&map](const Grid& layer) {
+            return layer.header == map.header && layer.info == map.info && layer.data.size() == map.data.size();
+        };
+        if (map.header.frame_id.empty() || map.info.width == 0 || map.info.height == 0 ||
+            !std::isfinite(map.info.resolution) || map.info.resolution <= 0.0 ||
+            static_cast<uint64_t>(map.info.width)*map.info.height != map.data.size() ||
+            !coherent(costs) || (!clearance.data.empty() && !coherent(clearance)))
+        {
+            RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),2000,
+                "Map/cost snapshot mismatch; retaining the previous snapshot %zu.",index);
+            return false;
+        }
+        auto next = std::make_shared<const MapPair>(MapPair{
+            std::move(map),std::move(costs),std::move(clearance),revision,SteadyClock::now()});
+        std::lock_guard<std::mutex> lock(snapshots_mutex_);
+        snapshots_[index].swap(next);
+        return true;
     }
 
     void expireRequests()
@@ -374,7 +404,8 @@ private:
         {
             if (cycle.pending && current >= cycle.deadline)
             {
-                cycle.active_client->remove_pending_request(cycle.request_id);
+                if (cycle.atomic_request) snapshot_client_->remove_pending_request(cycle.request_id);
+                else cycle.active_client->remove_pending_request(cycle.request_id);
                 ++cycle.generation;
                 cycle.pending = false;
                 cycle.staged_map = Grid{};
@@ -449,8 +480,8 @@ private:
             return;
         }
         options.goal_tolerance_m = 0.0;
-        const Grid* clearance = nullptr;
-        if (clearance_map_ && clearance_map_->header.frame_id == frame &&
+        const Grid* clearance = snapshot->clearance.data.empty() ? nullptr : &snapshot->clearance;
+        if (!clearance && clearance_map_ && clearance_map_->header.frame_id == frame &&
             clearance_map_->info == snapshot->map.info &&
             clearance_map_->data.size() == snapshot->map.data.size())
         {
@@ -576,6 +607,7 @@ private:
                         result.used_escape ? "true" : "false", result.goal_relocated ? "true" : "false");
     }
 
+    rclcpp::Client<GetSnapshot>::SharedPtr snapshot_client_;
     std::array<UpdateCycle, 2> cycles_;
     std::array<Snapshot, 2> snapshots_;
     std::mutex snapshots_mutex_;

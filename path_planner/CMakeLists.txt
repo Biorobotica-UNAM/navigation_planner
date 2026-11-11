@@ -23,6 +23,7 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/NavigationPath.msg"
   "srv/PlanPath.srv"
+  "srv/GetPlanningSnapshot.srv"
   DEPENDENCIES builtin_interfaces geometry_msgs nav_msgs)
 rosidl_get_typesupport_target(planner_typesupport ${PROJECT_NAME} "rosidl_typesupport_cpp")
 

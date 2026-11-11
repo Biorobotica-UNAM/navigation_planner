@@ -39,6 +39,7 @@ class MotionPlannerNode : public rclcpp::Node
   using Grid = nav_msgs::msg::OccupancyGrid;
   using Path = nav_msgs::msg::Path;
   using PlanPath = path_planner::srv::PlanPath;
+  using Command = path_planner::msg::NavigationPath;
   using Clock = std::chrono::steady_clock;
   enum class State {IDLE, PLANNING, FOLLOWING, RETRY, WAITING_SENSORS};
 
@@ -52,6 +53,7 @@ public:
     const bool namespaced = declare_parameter<bool>("use_namespace", false, startup);
     base_frame_ = declare_parameter<std::string>("base_link_name", "base_link", startup);
     map_frame_ = declare_parameter<std::string>("map_frame", "map", startup);
+    odom_frame_ = declare_parameter<std::string>("odom_name", "odom", startup);
     declare_parameter<bool>("patience", true);
     declare_parameter<bool>("debug_detection", false);
     max_recovery_attempts_ = declare_parameter<int>("max_recovery_attempts", 3, startup);
@@ -216,13 +218,13 @@ private:
     }
     goal_ = goal.pose;
     target_goal_ = goal_;
-    start_recovery_ = approximate_goal_ = motion_completed_ = false;
+    start_recovery_ = approximate_goal_ = motion_completed_ = near_braking_ = false;
     diagnostic_time_ = Clock::time_point{};
     near_goal_blocker_ = "not_evaluated";
     near_progress_ = near_remaining_ = -1.0;
     planning_blocked_attempts_ = 0;
     start_recovery_attempts_ = 0;
-    pose_received_ = settled_since_ = Clock::time_point{};
+    pose_received_ = odom_received_ = settled_since_ = Clock::time_point{};
     near_sent_ = false;
     motion_started_ = false;
     motion_id_.clear();
@@ -538,12 +540,12 @@ private:
       std::hypot(
         goal_.position.x - robot.position.x,
         goal_.position.y - robot.position.y) >= radius) {return false;}
-    target_goal_ = robot;target_goal_.orientation = goal_.orientation;
+    target_goal_ = robot;
     approximate_goal_ = true;
+    near_braking_ = true;
     path_ = Path();path_.header.frame_id = map_frame_;
     geometry_msgs::msg::PoseStamped pose;pose.pose = target_goal_;path_.poses.push_back(pose);
-    publish_status(Status::ACTIVE, "aligning_near_blocked_goal");
-    dispatch_path();
+    dispatch_path(Command::BRAKE);
     return true;
   }
 
@@ -570,21 +572,37 @@ private:
       schedule_replan("robot_tf_unavailable");
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "%s", error.what()); return;
     }
-    if (pose_received_ != Clock::time_point{}) {
+    // Localization corrections must not be interpreted as physical motion.
+    try {
+      const auto tf = tf_buffer_.lookupTransform(odom_frame_, base_frame_, tf2::TimePointZero);
+      const auto stamp = rclcpp::Time(tf.header.stamp, get_clock()->get_clock_type());
+      if (stamp.nanoseconds() != 0 &&
+        std::abs((now() - stamp).seconds()) > get_parameter("tf_timeout_sec").as_double())
+      {
+        throw std::runtime_error("Odometry transform is stale");
+      }
+      geometry_msgs::msg::Pose odom;
+      odom.position.x = tf.transform.translation.x;odom.position.y = tf.transform.translation.y;
+      odom.orientation = tf.transform.rotation;
+      if (odom_received_ != Clock::time_point{}) {
       const double elapsed = std::max(
         1e-3, std::chrono::duration<double>(
-          tick - pose_received_).count());
+          tick - odom_received_).count());
       const double linear = std::hypot(
-        robot.position.x - robot_.position.x,
-        robot.position.y - robot_.position.y) / elapsed;
+        odom.position.x - odom_pose_.position.x,
+        odom.position.y - odom_pose_.position.y) / elapsed;
       const double angular =
         std::abs(
         std::remainder(
-          tf2::getYaw(robot.orientation) - tf2::getYaw(robot_.orientation),
+          tf2::getYaw(odom.orientation) - tf2::getYaw(odom_pose_.orientation),
           2.0 * M_PI)) / elapsed;
       if (linear < 0.03 && angular < 0.08) {
         if (settled_since_ == Clock::time_point{}) {settled_since_ = tick;}
       } else {settled_since_ = Clock::time_point{};}
+      }
+      odom_pose_ = odom;odom_received_ = tick;
+    } catch (const std::exception &) {
+      odom_received_ = settled_since_ = Clock::time_point{};
     }
     robot_ = robot;pose_received_ = tick;
     log_navigation(controller_phase_.empty() ? "evaluating" : controller_phase_);
@@ -614,6 +632,12 @@ private:
     const double angular_error =
       std::remainder(tf2::getYaw(goal_.orientation) - tf2::getYaw(robot.orientation), 2.0 * M_PI);
     const bool at_position = distance <= get_parameter("goal_position_tolerance_m").as_double();
+    if (motion_completed_ &&
+      std::chrono::duration<double>(tick - motion_completed_since_).count() >
+      get_parameter("sensor_wait_timeout_sec").as_double())
+    {
+      end_goal(Status::ABORTED, "goal_pose_not_settled");return;
+    }
     if (state_ != State::FOLLOWING && start_recovery_ && motion_completed_) {
       start_recovery_ = false;motion_completed_ = false;target_goal_ = goal_;
       if (map_ && occupancy_at(*map_, robot.position) != 0) {
@@ -623,15 +647,27 @@ private:
       publish_status(Status::ACTIVE, "start_recovered");
     }
     if (state_ != State::FOLLOWING && approximate_goal_ && motion_completed_) {
+      if (near_braking_) {
+        if (settled_since_ == Clock::time_point{} ||
+          std::chrono::duration<double>(tick - settled_since_).count() < 0.3) {return;}
+        near_braking_ = false;
+        if (distance >= robot_radius_ + near_goal_extra_) {
+          approximate_goal_ = motion_completed_ = false;schedule_replan("near_goal_braking_drift");
+          return;
+        }
+        target_goal_ = robot;target_goal_.orientation = goal_.orientation;
+        path_ = Path();path_.header.frame_id = map_frame_;
+        geometry_msgs::msg::PoseStamped pose;pose.pose = target_goal_;path_.poses.push_back(pose);
+        publish_status(Status::ACTIVE, "aligning_near_blocked_goal");dispatch_path(Command::ROTATE);
+        return;
+      }
       const double target_distance = std::hypot(
         target_goal_.position.x - robot.position.x,
         target_goal_.position.y - robot.position.y);
       if (!map_ ||
         std::chrono::duration<double>(tick - map_received_).count() > get_parameter(
           "map_timeout_sec").as_double()) {return;}
-      if (occupancy_at(*map_, goal_.position) <= 0) {
-        approximate_goal_ = false;target_goal_ = goal_;motion_completed_ = false;
-      } else {
+      {
         if (get_parameter("debug_detection").as_bool()) {
           near_goal_blocker_ = target_distance >
             get_parameter("goal_position_tolerance_m").as_double() ? "alternative_position" :
@@ -677,7 +713,33 @@ private:
         return;
       }
     }
-    if (state_ != State::FOLLOWING && at_position &&
+    if (state_ != State::FOLLOWING && motion_completed_ && !start_recovery_) {
+      const double elapsed = std::chrono::duration<double>(tick - motion_completed_since_).count();
+      const bool settled = settled_since_ != Clock::time_point{} &&
+      std::chrono::duration<double>(tick - settled_since_).count() >= 0.3;
+      if (!settled || elapsed < 0.3) {return;}
+      if (at_position &&
+        std::abs(angular_error) <= get_parameter("goal_angle_tolerance_rad").as_double())
+      {
+        end_goal(Status::SUCCEEDED, "goal_pose_reached");return;
+      }
+      if (elapsed < 1.0) {return;}
+      motion_completed_ = false;
+      if (distance <= get_parameter("goal_position_tolerance_m").as_double() + 0.03 && map_ &&
+        occupancy_at(*map_, robot.position) == 0)
+      {
+        path_ = Path();path_.header.frame_id = map_frame_;
+        geometry_msgs::msg::PoseStamped pose;pose.pose = robot;path_.poses.push_back(pose);
+        pose.pose = goal_;path_.poses.push_back(pose);
+        if (route_is_free(
+            path_, robot.position.x, robot.position.y,
+            std::numeric_limits<double>::infinity()))
+        {
+          dispatch_path(at_position ? Command::ROTATE : Command::FOLLOW_PATH);return;
+        }
+      }
+    }
+    if (state_ != State::FOLLOWING && !motion_started_ && at_position &&
       std::abs(angular_error) <= get_parameter("goal_angle_tolerance_rad").as_double())
     {
       end_goal(Status::SUCCEEDED, motion_started_ ? "goal_pose_reached" : "already_at_goal_pose");
@@ -697,13 +759,6 @@ private:
       std_msgs::msg::Bool obstruction;obstruction.data = blocked;obstruction_pub_->publish(
         obstruction);
       if (blocked) {
-        // Let the controller enforce its bounded sensor/alignment waits before
-        // interpreting a stationary base as a failed geometric detour.
-        if (controller_phase_ == "aligning_head" ||
-          controller_phase_ == "waiting_for_obstacle_data")
-        {
-          route_blocked_since_ = tick;avoidance_position_ = robot.position;
-        }
         if (route_blocked_since_ == Clock::time_point{} ||
           std::hypot(
             robot.position.x - avoidance_position_.x,
@@ -711,8 +766,14 @@ private:
         {
           route_blocked_since_ = tick;avoidance_position_ = robot.position;
         }
-        if (std::chrono::duration<double>(tick - route_blocked_since_).count() >
-          get_parameter("local_avoidance_timeout_sec").as_double())
+        // Alignment may need longer than a geometric detour, but changing
+        // phases cannot restart the stationary deadline indefinitely.
+        const double allowance = controller_phase_ == "aligning_head" ||
+          controller_phase_ == "waiting_for_obstacle_data" ?
+          std::max(get_parameter("local_avoidance_timeout_sec").as_double(),
+          get_parameter("sensor_wait_timeout_sec").as_double()) :
+          get_parameter("local_avoidance_timeout_sec").as_double();
+        if (std::chrono::duration<double>(tick - route_blocked_since_).count() > allowance)
         {
           schedule_replan("route_blocked_without_progress");return;
         }
@@ -880,7 +941,7 @@ private:
     request_id_ = future.request_id;
   }
 
-  void dispatch_path()
+  void dispatch_path(uint8_t kind = Command::FOLLOW_PATH)
   {
     route_blocked_since_ = Clock::time_point{};
     controller_phase_.clear();
@@ -898,6 +959,7 @@ private:
     route_projection_ = 0.0;
     path_planner::msg::NavigationPath command;
     command.path = path_;
+    command.mode = kind == Command::FOLLOW_PATH && path_.poses.size() == 1 ? Command::ROTATE : kind;
     if (approximate_goal_) {
       command.arrival_center = goal_.position;
       command.arrival_radius = robot_radius_ + near_goal_extra_;
@@ -906,20 +968,22 @@ private:
     visual_path_pub_->publish(path_);
     publish_status(
       Status::ACTIVE,
-      path_.poses.size() == 1 ? "correcting_orientation" : "following_path");
+      command.mode == Command::BRAKE ? "braking_near_goal" : command.mode ==
+      Command::ROTATE ? "correcting_orientation" : "following_path");
   }
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
-  std::string base_frame_, map_frame_, motion_id_;
+  std::string base_frame_, map_frame_, odom_frame_, motion_id_;
   State state_ = State::IDLE;
-  geometry_msgs::msg::Pose goal_, target_goal_, robot_;
+  geometry_msgs::msg::Pose goal_, target_goal_, robot_, odom_pose_;
   double robot_radius_, near_goal_extra_, near_goal_progress_;
   double route_projection_ = 0.0;
   bool start_recovery_ = false, approximate_goal_ = false, motion_completed_ = false;
+  bool near_braking_ = false;
   int planning_blocked_attempts_ = 0;
   int start_recovery_attempts_ = 0;
-  Clock::time_point pose_received_, settled_since_, motion_completed_since_;
+  Clock::time_point pose_received_, odom_received_, settled_since_, motion_completed_since_;
   geometry_msgs::msg::Point failure_position_;
   geometry_msgs::msg::Point avoidance_position_;
   builtin_interfaces::msg::Time minimum_map_stamp_;

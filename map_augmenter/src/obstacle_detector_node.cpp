@@ -7,6 +7,7 @@
 // ----- ROS 2 -----
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 
 // ----- ROS 2 messages -----
 // --- sensor_msgs ---
@@ -312,6 +313,8 @@ public:
     pub_obstacles_  = create_publisher<Grid>(endpoint("obstacles_map_topic",
                                                       "/obstacles_map"),
                                                       output_qos);
+    pub_uncertain_ = create_publisher<geometry_msgs::msg::PoseArray>(
+      endpoint("uncertain_obstacles_topic","/uncertain_obstacles"),rclcpp::QoS(1).transient_local());
 
     sub_base_       = create_subscription<Grid>(endpoint("base_map_topic",
                                                          "/map_augmenter/base_map"), 
@@ -480,6 +483,17 @@ private:
   void publish_obstacles()
   {
     obstacles_map_.header.stamp = now();
+    geometry_msgs::msg::PoseArray uncertain;
+    uncertain.header = obstacles_map_.header;
+    for (const auto & entry : cloud_tracks_) {
+      if (!entry.second.uncertain) {continue;}
+      geometry_msgs::msg::Pose pose;
+      pose.position.x = entry.second.position.x();pose.position.y = entry.second.position.y();
+      pose.position.z = entry.second.position.z();pose.orientation.w = 1.0;
+      uncertain.poses.push_back(pose);
+    }
+    uncertain_count_ = uncertain.poses.size();
+    pub_uncertain_->publish(uncertain);
     if (remember_all_obstacles_ && !memory_cells_.empty())
     {
       if (memory_dirty_) {rebuild_memory_overlay();}
@@ -634,6 +648,7 @@ private:
          << " published=" << diagnostic_cycles_ << " observed_hz=" << diagnostic_cycles_ / seconds
          << " no_grid_cycles=" << diagnostic_no_grid_ << " occupied_now=" << occupied
          << " remembered_cells=" << memory_cells_.size()
+         << " uncertain_now=" << uncertain_count_
          << " cloud_subscriptions=" << (bool(sub_cloud1_) + bool(sub_cloud2_))
          << " expired_before=" << diagnostic_expired_before_ << " expired_after=" << diagnostic_expired_after_
          << " pose_resets=" << diagnostic_pose_resets_ << " clock_resets=" << diagnostic_clock_resets_
@@ -644,6 +659,7 @@ private:
          << " memory{tracks=" << cloud_tracks_.size()
          << " retained_hold=" << retention_counts_[0] << " retained_blind=" << retention_counts_[1]
          << " retained_robot_tf=" << retention_counts_[2] << " retained_camera_tf=" << retention_counts_[3]
+         << " retained_unverified=" << retention_counts_[4]
          << std::setprecision(3) << " oldest_s=" << oldest_retained_age_ << " oldest_xy=" << oldest_retained_x_ << "," << oldest_retained_y_
          << " camera_range_m=" << oldest_retained_range_ << " oldest_reason=" << oldest_retained_reason_
          << " camera_frame=" << oldest_retained_frame_ << "}"
@@ -1191,19 +1207,30 @@ private:
           else if (!camera_valid) {reason = 3;}
           else if (range < cloud_min_range_) {reason = 1;}
         }
-        // Expire ordinary ghosts, but never erase a nearby obstacle just
-        // because it entered the camera's physically unobservable near range.
+        if (found->second.uncertain && reason < 0) {reason = 4;}
+        // Expired blind evidence leaves planning occupancy, but remains a
+        // local uncertainty until observed free or safely left behind.
+        found->second.uncertain = found->second.uncertain ||
+          (reason >= 0 && age >= unobserved_hold_sec_);
         if (reason >= 0 && record && diagnostics_enabled_) {
           ++retention_counts_[reason];
           if (age > oldest_retained_age_) {
             oldest_retained_age_ = age;oldest_retained_range_ = range;
             oldest_retained_x_ = found->second.position.x();oldest_retained_y_ = found->second.position.y();
-            oldest_retained_reason_ = reason == 0 ? "hold" : reason == 1 ? "blind" : reason == 2 ? "robot_tf" : "camera_tf";
+            static constexpr const char * reasons[] = {"hold","blind","robot_tf","camera_tf","unverified"};
+            oldest_retained_reason_ = reasons[reason];
             oldest_retained_frame_ = found->second.sensor_frame;
           }
         }
-        return reason >= 0;
+        return reason >= 0 && !found->second.uncertain;
       };
+    for (auto it = cloud_tracks_.begin(); it != cloud_tracks_.end();) {
+      if (!it->second.uncertain) {++it;continue;}
+      if (have_robot && (it->second.position-robot).head<2>().norm() > unobserved_hold_radius_) {
+        it = cloud_tracks_.erase(it);continue;
+      }
+      retained(it->first,true);++it;
+    }
     for (size_t i = 0; i < obstacles_map_.data.size(); ++i) {
       if (obstacles_map_.data[i] <= 0) {continue;}
       const auto observed = last_observed_ns_[i];
@@ -1213,7 +1240,8 @@ private:
         if (diagnostics_enabled_) {++diagnostic_expired_before_;}
         obstacles_map_.data[i] = 0;
         last_observed_ns_[i] = never_observed;
-        cloud_tracks_.erase(i);
+        const auto track = cloud_tracks_.find(i);
+        if (track != cloud_tracks_.end() && !track->second.uncertain) {cloud_tracks_.erase(track);}
       }
     }
 
@@ -1242,7 +1270,8 @@ private:
         if (diagnostics_enabled_) {++diagnostic_expired_after_;}
         obstacles_map_.data[i] = 0;
         last_observed_ns_[i] = never_observed;
-        cloud_tracks_.erase(i);
+        const auto track = cloud_tracks_.find(i);
+        if (track != cloud_tracks_.end() && !track->second.uncertain) {cloud_tracks_.erase(track);}
       }
     }
     publish_obstacles();
@@ -1280,6 +1309,7 @@ private:
     int64_t stamp;
     int clear_frames;
     std::string sensor_frame;
+    bool uncertain = false;
   };
   std::unordered_map<size_t, CloudTrack> cloud_tracks_;
   Cloud::ConstSharedPtr latest_confirmed_;
@@ -1299,6 +1329,7 @@ private:
   Cloud::ConstSharedPtr latest_cloud1_, latest_cloud2_;
   Scan::ConstSharedPtr latest_scan_;
   rclcpp::Publisher<Grid>::SharedPtr pub_obstacles_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr pub_uncertain_;
   rclcpp::Subscription<Grid>::SharedPtr sub_base_;
   rclcpp::Subscription<Cloud>::SharedPtr sub_cloud1_, sub_cloud2_;
   rclcpp::Subscription<Scan>::SharedPtr sub_scan_;
@@ -1314,7 +1345,8 @@ private:
   uint64_t diagnostic_pose_resets_{0}, diagnostic_clock_resets_{0}, diagnostic_cleared_cells_{0};
   uint64_t diagnostic_cloud_refreshes_{0}, diagnostic_confirmed_refreshes_{0}, diagnostic_ray_cleared_{0};
   // Latest expiration pass, not a sum of repeated checks of the same cell.
-  std::array<size_t, 4> retention_counts_{};
+  std::array<size_t, 5> retention_counts_{};
+  size_t uncertain_count_{0};
   double oldest_retained_age_{-1.0}, oldest_retained_range_{-1.0};
   double oldest_retained_x_{0.0}, oldest_retained_y_{0.0};
   const char * oldest_retained_reason_{"none"};

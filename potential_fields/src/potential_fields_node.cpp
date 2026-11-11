@@ -27,7 +27,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <map>
+#include <unordered_map>
 #include <tuple>
 #include <limits>
 #include <stdexcept>
@@ -473,7 +473,8 @@ private:
 
         // Forward supported geometry to the map even when its ordinary cloud
         // crop/density filter would reject the points that caused braking.
-        std::map<std::pair<int, int>, std::pair<size_t, Eigen::Vector3d>> cells;
+        std::unordered_map<uint64_t, std::pair<size_t, Eigen::Vector3d>> cells;
+        cells.reserve(std::min(points.size(),size_t(4096)));
         for (const auto & p : points) {
           if (p.z() < sensor.min_z || p.z() > sensor.max_z ||
             (p.head<2>().norm() <= self_radius_ && p.z() <= self_height_)) {continue;}
@@ -484,8 +485,9 @@ private:
               p.y() <= self_boxes_[b + 4] && p.z() <= self_boxes_[b + 5]) {self = true;break;}
           }
           if (self) {continue;}
-          auto & cell = cells[{int(std::floor(p.x() / evidence_resolution_)),
-                int(std::floor(p.y() / evidence_resolution_))}];
+          const auto ix = static_cast<uint32_t>(static_cast<int32_t>(std::floor(p.x()/evidence_resolution_)));
+          const auto iy = static_cast<uint32_t>(static_cast<int32_t>(std::floor(p.y()/evidence_resolution_)));
+          auto & cell = cells[(static_cast<uint64_t>(ix)<<32)|iy];
           if (cell.first == 0 || p.head<2>().squaredNorm() < cell.second.head<2>().squaredNorm()) {
             cell.second = p;
           }

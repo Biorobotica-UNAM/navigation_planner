@@ -2,6 +2,7 @@
 
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <nav_msgs/srv/get_map.hpp>
+#include <path_planner/srv/get_planning_snapshot.hpp>
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -23,6 +24,7 @@ class MapAugmenterNode : public rclcpp::Node
   using Grid = map_augmenter::Grid;
   using GetMap = nav_msgs::srv::GetMap;
   using MapClient = rclcpp::Client<GetMap>;
+  using GetSnapshot = path_planner::srv::GetPlanningSnapshot;
   using SteadyClock = std::chrono::steady_clock;
 
 public:
@@ -60,6 +62,7 @@ public:
                                             "Maximum generated soft cost, from 1 to 99.");
     debug_ =                      parameter("debug_maps", false, 
                                             "Log processed map statistics.");
+    declare_parameter<bool>("debug_detection", false);
     
     log_throttle_ms_ =            parameter("log_throttle_ms", 2000,
                                             "Repeated warning interval in milliseconds.");
@@ -125,6 +128,9 @@ public:
     sub_obstacles_ = create_subscription<Grid>(
       endpoint("obstacles_map_topic", "/obstacles_map"), obstacle_qos, [this](Grid::ConstSharedPtr msg) {
         if (!accept_grid(*msg)) {return;}
+        const bool changed = !have_obstacles_ || !map_augmenter::same_geometry(dynamic_obstacles_, *msg) ||
+          dynamic_obstacles_.data != msg->data;
+        if (!changed) {publish_snapshot(true);return;}
         dynamic_obstacles_ = *msg;
         have_obstacles_ = true;
         rebuild_augmented_layers();
@@ -156,6 +162,26 @@ public:
       [this]() -> const Grid & {return snapshot_.augmented_collision;});
     add_map_service("get_augmented_cost_map_service", "/map_augmenter/get_augmented_cost_map",
       [this]() -> const Grid & {return snapshot_.augmented_cost;});
+    snapshot_service_ = create_service<GetSnapshot>(endpoint("get_planning_snapshot_service", "/map_augmenter/get_planning_snapshot"),
+      [this](GetSnapshot::Request::SharedPtr request, GetSnapshot::Response::SharedPtr response) {
+        const auto started = SteadyClock::now();
+        response->ready = ready_;
+        if (!ready_) {return;}
+        // This callback shares the producer's mutually-exclusive group.
+        response->revision = revision_;
+        response->map = request->augmented ? snapshot_.augmented_collision : snapshot_.static_collision;
+        response->costs = request->augmented ? snapshot_.augmented_cost : snapshot_.static_cost;
+        response->clearance = request->augmented ? snapshot_.clearance : static_clearance_;
+        response->clearance.header = response->map.header;
+        if (get_parameter("debug_detection").as_bool()) {
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+            "MapSnapshot revision=%lu augmented=%d copy_ms=%.3f layer_bytes=%zu static_radius=%.3f dynamic_radius=%.3f robot_radius=%.3f",
+            static_cast<unsigned long>(revision_), request->augmented,
+            std::chrono::duration<double,std::milli>(SteadyClock::now()-started).count(),
+            response->map.data.size()+response->costs.data.size()+response->clearance.data.size(),
+            static_radius_,dynamic_radius_,robot_radius_);
+        }
+      });
     srv_obstacles_ = create_service<std_srvs::srv::Trigger>(
       endpoint("are_there_obstacles_service", "/map_augmenter/are_there_obstacles"),
       [this](std_srvs::srv::Trigger::Request::SharedPtr,
@@ -289,25 +315,25 @@ private:
         }
       }
     }
-    const auto stamp = now();
-    next.static_collision.header.stamp = stamp;
-    next.static_cost.header.stamp = stamp;
-    next.augmented_collision.header.stamp = stamp;
-    next.augmented_cost.header.stamp = stamp;
-    next.clearance.header.stamp = stamp;
     snapshot_ = std::move(next);
+    ++revision_;
     ready_ = true;
     if (debug_) {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), log_throttle_ms_,
         "Rebuilt %ux%u map; dynamic obstacles=%s", base_input_.grid.info.width,
         base_input_.grid.info.height, snapshot_.has_dynamic_obstacles ? "true" : "false");
     }
-    publish_snapshot();
+    publish_snapshot(true);
   }
 
-  void publish_snapshot()
+  void publish_snapshot(bool refreshed = false)
   {
     if (!ready_) {return;}
+    if (refreshed) {
+      const auto stamp = now();
+      for (auto * grid : {&snapshot_.static_collision,&snapshot_.static_cost,
+        &snapshot_.augmented_collision,&snapshot_.augmented_cost,&snapshot_.clearance}) {grid->header.stamp = stamp;}
+    }
     pub_augmented_->publish(snapshot_.augmented_collision);
     pub_planning_->publish(snapshot_.augmented_collision);
     pub_clearance_->publish(snapshot_.clearance);
@@ -396,6 +422,8 @@ private:
 
   MapInput base_input_, prohibition_input_;
   Snapshot snapshot_;
+  uint64_t revision_{0};
+  rclcpp::Service<GetSnapshot>::SharedPtr snapshot_service_;
   Grid dynamic_obstacles_, static_collision_, static_cost_, static_clearance_;
   bool use_namespace_{false}, use_online_{false}, use_prohibition_{true}, require_prohibition_{true};
   bool circular_{false}, debug_{false}, ready_{false}, have_obstacles_{false};

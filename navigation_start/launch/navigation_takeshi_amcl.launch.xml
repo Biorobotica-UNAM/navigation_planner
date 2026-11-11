@@ -74,7 +74,7 @@
   <arg name="cloud_max_x"                             default="2.5"/>
   <arg name="cloud_min_y"                             default="-1.0"/>
   <arg name="cloud_max_y"                             default="1.0"/>
-  <arg name="cloud_min_z"                             default="0.20"/>
+  <arg name="cloud_min_z"                             default="0.04"/>
   <arg name="cloud_max_z"                             default="1.20"/>
 
   <!-- ===== Map Augmenter ===== -->
@@ -285,6 +285,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="use_online"                               value="$(var augmenter_use_online)"/>
     <param name="use_prohibition_map"                      value="$(var use_prohibition_map)"/>
@@ -425,6 +426,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="robot_radius" value="$(var robot_radius)"/>
     <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_namespace"                 value="$(var use_namespace)"/>
     <param name="max_linear_speed"              value="$(var max_linear_speed)"/>
@@ -566,6 +568,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="odom_name" value="$(var odom_frame)"/>
     <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_namespace"            value="$(var use_namespace)"/>
     <param name="sensor_wait_timeout_sec"   value="$(var sensor_wait_timeout_sec)"/>

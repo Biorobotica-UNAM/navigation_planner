@@ -20,6 +20,7 @@ find_package(rclcpp REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 
 find_package(nav_msgs REQUIRED)
+find_package(path_planner REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
@@ -41,6 +42,7 @@ add_executable(map_augmenter_node
   src/map_augmenter_node.cpp
 )
 ament_target_dependencies(map_augmenter_node
+  path_planner
   rclcpp
   rcl_interfaces
   nav_msgs

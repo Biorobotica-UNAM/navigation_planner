@@ -1,0 +1,8 @@
+# Select static layers or the layers containing transient obstacles.
+bool augmented
+---
+bool ready
+uint64 revision
+nav_msgs/OccupancyGrid map
+nav_msgs/OccupancyGrid costs
+nav_msgs/OccupancyGrid clearance

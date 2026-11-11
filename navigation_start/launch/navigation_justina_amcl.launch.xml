@@ -235,6 +235,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="debug_detection" value="$(var debug_detection)"/>
     <remap from="point_obstacle"         to="clicked_point"/>
     <param name="use_namespace"          value="$(var use_namespace)"/>
     <param name="static_map_server"      value="static_map_server/map"/>
@@ -335,6 +336,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="robot_radius" value="$(var robot_radius)"/>
     <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_namespace"     value="$(var use_namespace)"/>
     <param name="max_linear_speed"  value="$(var max_linear_speed)"/>
@@ -410,6 +412,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="odom_name" value="$(var odom_frame)"/>
     <param name="debug_detection" value="$(var debug_detection)"/>
     <remap from="nav_control/goal" to="move_base_simple/goal"/>
     <param name="use_namespace"  value="$(var use_namespace)"/>
