@@ -68,6 +68,13 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_clearance test/test_clearance.cpp)
   target_link_libraries(test_clearance path_planner_lib)
+  ament_add_gtest(test_motion_observation test/test_motion_observation.cpp)
+  target_include_directories(test_motion_observation PRIVATE include)
+  ament_add_gtest(test_laboratory_constraints test/test_laboratory_constraints.cpp)
+  target_link_libraries(test_laboratory_constraints path_planner_lib)
+  target_include_directories(test_laboratory_constraints PRIVATE ../map_augmenter/include)
+  target_compile_definitions(test_laboratory_constraints PRIVATE
+    NAVIGATION_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../navigation_start/maps")
 endif()
 
 ament_package()

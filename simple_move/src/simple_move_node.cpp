@@ -11,6 +11,8 @@
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <path_planner/msg/navigation_path.hpp>
+#include <path_planner/motion_observation.hpp>
+#include <path_planner/motion_constraints.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float32.hpp>
@@ -46,7 +48,6 @@ class SimpleMoveNode : public rclcpp::Node
     bool physical = false, omni = true;
     double c = 1.0, s = 0.0, reaction = 0.1, deceleration = 0.3, angular_deceleration = 0.8,
       escape_radius = 0.6;
-    std::vector<std::array<double, 3>> uncertainty;
   };
   struct LocalCheck
   {
@@ -110,6 +111,7 @@ public:
       {"final_capture_distance_m", 0.40}, {"angular_damping", 0.35},
       {"start_escape_radius", 0.6}, {"start_escape_speed", 0.08},
       {"local_avoidance_speed", 0.20},
+      {"avoidance_switch_hold_sec", 0.25}, {"avoidance_switch_score_margin", 0.03},
       {"local_avoidance_timeout_sec", 1.5}, {"max_avoidance_deviation_m", 0.55},
       {"head_alignment_timeout_sec", 10.0}, {"sensor_timeout_sec", 0.5},
       {"map_timeout_sec", 3.0}, {"tf_timeout_sec", 0.5}, {"max_path_deviation_m", 0.35},
@@ -233,7 +235,7 @@ public:
           }
           precision = 0.5 * slack;
         }
-        if (command->mode > Command::BRAKE) {return;}
+        if (command->mode > Command::RECOVER_START) {return;}
         start_motion(command->path, false, command->mode);
         if (active_) {
           motion_position_tolerance_ = precision;
@@ -403,6 +405,11 @@ private:
     active_ = true;
     motion_kind_ = kind;
     motion_settled_since_ = Clock::time_point{};
+    odometry_ = path_planner::MotionObservation{};
+    head_wait_elapsed_ = 0.0;
+    challenger_direction_ = std::numeric_limits<double>::quiet_NaN();
+    challenger_since_ = Clock::time_point{};
+    recovery_clear_since_ = Clock::time_point{};
     last_phase_.clear();last_diagnostic_ = Clock::time_point{};
     trace_ = MotionTrace{};
     motion_position_tolerance_ = 0.0;
@@ -422,7 +429,7 @@ private:
     initial_elapsed_ = final_elapsed_ = 0.0;
     escape_side_ = 0;
     local_direction_ = std::numeric_limits<double>::quiet_NaN();
-    local_blocked_since_ = Clock::time_point{};
+    local_blocked_elapsed_ = 0.0;
     sensor_blocked_since_ = sensor_clear_since_ = Clock::time_point{};
     last_head_goal_ = std::numeric_limits<double>::quiet_NaN();
     head_holding_ = true;head_limit_holding_ = false;
@@ -439,7 +446,7 @@ private:
     progress_ = best_progress_ = 0.0;
     velocity_.fill(0.0); acceleration_.fill(0.0);
     if (braking) {velocity_ = previous_velocity;acceleration_ = previous_acceleration;}
-    started_ = progress_time_ = head_wait_ = last_tick_ = Clock::now();
+    started_ = progress_time_ = last_tick_ = Clock::now();
     deviation_since_ = Clock::time_point{};
     status_.status = Status::ACTIVE;
     status_.text = "tracking_path";
@@ -491,7 +498,7 @@ private:
       "not_checked" ? trace_.rejected : trace_.published;
     RCLCPP_INFO(
       get_logger(),
-      "MotionDiagnostic motion=%s phase=%s frame=%s dt=%.3f pose=(%.3f,%.3f,%.3f) progress=%.3f remaining=%.3f distance=%.3f tolerance=%.3f yaw_error=%.3f yaw_reference=%.3f yaw_rate=%.3f direction=%.3f final_align=%d capture=%d escape=%d head_gate=%s head=%.3f head_goal=%.3f head_error=%.3f head_age=%.3f nominal=(%.3f,%.3f,%.3f) requested=(%.3f,%.3f,%.3f) published=(%.3f,%.3f,%.3f) obstacle_limit=%.3f ready=%d ready_age=%.3f risk_age=%.3f collision=%d map_age=%.3f clearance_age=%.3f local_reason=%s layer=%s tested=(%.3f,%.3f,%.3f) cell=(%d,%d,%d) sample_t=%.3f separation_m=%.4f required_m=%.4f candidates=%zu rejected=(%zu,%zu,%zu)",
+      "MotionDiagnostic motion=%s phase=%s frame=%s dt=%.3f pose=(%.3f,%.3f,%.3f) progress=%.3f remaining=%.3f distance=%.3f tolerance=%.3f yaw_error=%.3f yaw_reference=%.3f yaw_rate=%.3f direction=%.3f final_align=%d capture=%d escape=%d head_gate=%s head=%.3f head_goal=%.3f head_error=%.3f head_age=%.3f nominal=(%.3f,%.3f,%.3f) requested=(%.3f,%.3f,%.3f) published=(%.3f,%.3f,%.3f) obstacle_limit=%.3f ready=%d ready_age=%.3f risk_age=%.3f collision=%d map_age=%.3f clearance_age=%.3f local_reason=%s layer=%s tested=(%.3f,%.3f,%.3f) cell=(%d,%d,%d) sample_t=%.3f separation_m=%.4f required_m=%.4f candidates=%zu rejected=(%zu,%zu,%zu) linear_speed=%.4f rest_angular_speed=%.4f odom_span=%.3f position_span=%.4f stationary=%d quiet_sec=%.3f head_wait_sec=%.3f arrival_inside=%d",
       status_.goal_id.id.c_str(), status_.text.c_str(),
       path_.header.frame_id.c_str(), trace_.dt,
       trace_.x, trace_.y, trace_.yaw, progress_, trace_.remaining, trace_.distance, trace_.tolerance,
@@ -511,7 +518,12 @@ private:
       collision_, map_age, clearance_age,
       check.reason, check.layer, check.tested[0], check.tested[1], check.tested[2], check.cell_x, check.cell_y, check.value, check.time, check.separation, check.required,
       trace_.candidates, trace_.nominal_rejected, trace_.reachable_rejected,
-      trace_.corridor_rejected);
+      trace_.corridor_rejected, odometry_.linear_speed, odometry_.angular_speed,
+      odometry_.span, odometry_.position_span, odometry_.stationary,
+      motion_settled_since_ == Clock::time_point{} ? 0.0 :
+      std::chrono::duration<double>(tick - motion_settled_since_).count(), head_wait_elapsed_,
+      arrival_radius_ <= 0.0 || std::hypot(trace_.x - arrival_center_.x,
+      trace_.y - arrival_center_.y) < arrival_radius_);
   }
 
   void process_motion()
@@ -523,9 +535,8 @@ private:
       status_pub_->publish(status_);
       last_feedback_ = tick;
     }
-    const double dt = std::clamp(
-      std::chrono::duration<double>(
-        tick - last_tick_).count(), 0.001, 0.1);
+    const double elapsed = std::chrono::duration<double>(tick - last_tick_).count();
+    const double dt = std::clamp(elapsed, 0.001, 0.1);
     last_tick_ = tick;
     trace_ = MotionTrace{};trace_.dt = dt;
     const bool diagnostics = get_parameter("debug_detection").as_bool();
@@ -544,7 +555,7 @@ private:
       sensor_timeout = parameters[11].as_double();
     const bool omni = get_parameter("motion_mode").as_string() == "omni";
     const bool use_head = get_parameter("move_head").as_bool() && !head_bypass_;
-    if (use_head && !last_use_head_) {head_holding_ = true; head_wait_ = tick;}
+    if (use_head && !last_use_head_) {head_holding_ = true;}
     last_use_head_ = use_head;
     const bool use_fields = get_parameter("use_pot_fields").as_bool();
     if (omni != last_omni_) {velocity_.fill(0.0); acceleration_.fill(0.0); last_omni_ = omni;}
@@ -555,6 +566,7 @@ private:
       last_fields_enable_ = tick;
     }
     double x, y, yaw, odom_yaw, odom_x, odom_y;
+    int64_t odom_stamp_ns = 0;
     try {
       const auto tf = tf_buffer_.lookupTransform(
         path_.header.frame_id, base_frame_,
@@ -570,6 +582,7 @@ private:
       yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
       const auto odom_tf = tf_buffer_.lookupTransform(odom_frame_, base_frame_, tf2::TimePointZero);
       const auto odom_stamp = rclcpp::Time(odom_tf.header.stamp, get_clock()->get_clock_type());
+      odom_stamp_ns = odom_stamp.nanoseconds();
       if (odom_stamp.nanoseconds() != 0 &&
         std::abs((now() - odom_stamp).seconds()) > get_parameter("tf_timeout_sec").as_double())
       {
@@ -594,7 +607,8 @@ private:
     trace_.yaw_error = final_error;
     if (!initialized_) {
       initial_yaw_ = yaw;previous_yaw_ = odom_yaw;initialized_ = true;
-      previous_odom_x_ = odom_x;previous_odom_y_ = odom_y;feasible_yaw_reference_ = yaw;
+      feasible_yaw_reference_ = yaw;
+      best_position_error_ = distance;
       // Avoid turning away and back during short omni transfers. Head limits
       // still request the minimum necessary base rotation before translation.
       if (omni && !relative_ && lengths_.back() <= 1.0 && std::abs(final_error) <= 0.20) {
@@ -610,18 +624,16 @@ private:
         (*vector)[0] = std::cos(change) * vx + std::sin(change) * vy;
         (*vector)[1] = -std::sin(change) * vx + std::cos(change) * vy;
       }
-      if (std::abs(change) < 2.0 * wmax * dt + 0.02) {
-        measured_yaw_rate_ += (1.0 - std::exp(-dt / 0.12)) * (change / dt - measured_yaw_rate_);
-      }
       previous_yaw_ = odom_yaw;
-      const double measured = std::hypot(odom_x - previous_odom_x_, odom_y - previous_odom_y_) / dt;
-      measured_linear_speed_ += (1.0 - std::exp(-dt / 0.12)) * (measured - measured_linear_speed_);
-      previous_odom_x_ = odom_x;previous_odom_y_ = odom_y;
     }
-    const bool stopped = measured_linear_speed_ < 0.02 && std::abs(measured_yaw_rate_) < 0.05 &&
-      std::hypot(velocity_[0], velocity_[1]) < 0.01 && std::abs(velocity_[2]) < 0.03;
-    if (!stopped) {motion_settled_since_ = Clock::time_point{};}
-    if (stopped && motion_settled_since_ == Clock::time_point{}) {motion_settled_since_ = tick;}
+    odometry_.observe(odom_stamp_ns, odom_x, odom_y, odom_yaw);
+    measured_yaw_rate_ = odometry_.yaw_rate;
+    const bool quiet_command = std::hypot(velocity_[0], velocity_[1]) < 0.01 &&
+      std::abs(velocity_[2]) < 0.03;
+    // Command settling and observed rest overlap; neither replaces the other.
+    if (!quiet_command) {motion_settled_since_ = Clock::time_point{};}
+    if (quiet_command && motion_settled_since_ == Clock::time_point{}) {motion_settled_since_ = tick;}
+    const bool stopped = quiet_command && odometry_.stationary;
     const bool inside_arrival_region = arrival_radius_ <= 0.0 ||
       std::hypot(x - arrival_center_.x, y - arrival_center_.y) < arrival_radius_;
     if (!inside_arrival_region && motion_position_tolerance_ > 0.0) {
@@ -638,7 +650,7 @@ private:
       std::chrono::duration<double>(tick - risk_received_).count()> sensor_timeout));
 
     // Geometry and limits are immutable throughout this mutually-exclusive tick.
-    local_context_.grid.reset();local_context_.uncertainty.clear();
+    local_context_.grid.reset();
     local_context_.rejection = "map_unavailable";
     local_context_.omni = omni;
     local_context_.reaction = get_parameter("collision_reaction_time_sec").as_double();
@@ -666,16 +678,12 @@ private:
         local_context_.c = std::cos(angle);local_context_.s = std::sin(angle);
       }
     }
+    if (local_context_.grid && motion_kind_ == Command::BRAKE) {
+      motion_constraints_.update(*local_context_.grid,
+        uncertain_obstacles_ ? *uncertain_obstacles_ : empty_uncertainty_,
+        get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m);
+    }
     if (uncertain_obstacles_) {
-      const double guard = get_parameter("robot_radius").as_double() + 0.05;
-      const double horizon = guard + vmax * (local_context_.reaction + vmax / (2.0 * amax));
-      for (const auto & pose : uncertain_obstacles_->poses) {
-        const auto & p = pose.position;
-        const double square = (p.x - x) * (p.x - x) + (p.y - y) * (p.y - y);
-        if (square <= horizon * horizon) {
-          local_context_.uncertainty.push_back({p.x, p.y, std::min(square, guard * guard)});
-        }
-      }
       if (std::chrono::duration<double>(tick - uncertainty_received_).count() > map_timeout) {
         local_context_.grid.reset();local_context_.rejection = "uncertainty_stale";
       }
@@ -702,7 +710,7 @@ private:
         }
       }
       cmd_pub_->publish(command);log_motion(command);
-      if (free && obstacle_ready && motion_settled_since_ != Clock::time_point{} &&
+      if (free && obstacle_ready && stopped && motion_settled_since_ != Clock::time_point{} &&
         std::chrono::duration<double>(tick - motion_settled_since_).count() >= 0.3)
       {
         finish(Status::SUCCEEDED, "base_stopped");
@@ -710,6 +718,7 @@ private:
       return;
     }
 
+    bool recovery_clear = false;
     if (map_ && path_.header.frame_id == map_frame_) {
       const auto & info = map_->info;
       const double angle = 2.0 * std::atan2(info.origin.orientation.z, info.origin.orientation.w);
@@ -722,6 +731,8 @@ private:
         const size_t index = size_t(gy) * info.width + size_t(gx);
         if (map_->data[index] == 0) {
           escape_active_ = false;escape_checked_ = true;
+          recovery_clear = local_context_.grid && local_context_.physical &&
+            clearance_map_->data[index] == 0;
         } else if (!escape_checked_ && clearance_map_ && clearance_map_->info == info &&
           clearance_map_->header.frame_id == map_frame_ &&
           clearance_map_->data.size() == map_->data.size() &&
@@ -748,8 +759,30 @@ private:
         }
       }
     }
-    if (!escape_active_ &&
-      (motion_kind_ == Command::ROTATE || (inside_arrival_region && distance <= tolerance)) &&
+    const bool recovering = motion_kind_ == Command::RECOVER_START;
+    if (local_context_.grid) {
+      // Preserve planning clearance while tracking. Escapes and stationary
+      // alignment use the physical layer, without erasing occupied cells.
+      motion_constraints_.update(escape_active_ || recovering || final_align_ || motion_kind_ == Command::ROTATE ?
+        *local_context_.grid : *map_,
+        uncertain_obstacles_ ? *uncertain_obstacles_ : empty_uncertainty_,
+        get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m);
+      recovery_clear = recovery_clear && motion_constraints_.uncertainty_free(x, y, x, y, false) &&
+        motion_constraints_.sampling_free(x, y, x, y, false);
+    }
+    if (recovering) {
+      if (!recovery_clear) {recovery_clear_since_ = Clock::time_point{};}
+      else if (recovery_clear_since_ == Clock::time_point{}) {recovery_clear_since_ = tick;}
+      // A short escape must leave inflation before applying normal arrival tolerance.
+      if (!recovery_clear) {tolerance = std::min(tolerance, 0.005);}
+      trace_.tolerance = tolerance;
+    }
+    const bool position_reached = recovering ? recovery_clear :
+      inside_arrival_region && distance <= tolerance;
+    const bool recovery_stable = !recovering || (recovery_clear_since_ != Clock::time_point{} &&
+      std::chrono::duration<double>(tick - recovery_clear_since_).count() >= 0.3);
+    if (!escape_active_ && stopped && recovery_stable &&
+      (motion_kind_ == Command::ROTATE || position_reached) &&
       std::abs(final_error) <= angle_tolerance &&
       obstacle_ready && !(use_fields && collision_) &&
       motion_settled_since_ != Clock::time_point{} &&
@@ -757,14 +790,15 @@ private:
     {
       finish(Status::SUCCEEDED, "pose_reached"); return;
     }
-    if ((distance <= tolerance && !escape_active_ && inside_arrival_region) ||
+    if ((position_reached && !escape_active_) ||
       motion_kind_ == Command::ROTATE) {final_align_ = true;}
     if (final_align_ && (distance > tolerance || !inside_arrival_region) &&
       std::abs(final_error) <= angle_tolerance)
     {
       if (terminal_position_since_ == Clock::time_point{}) {terminal_position_since_ = tick;}
     } else {terminal_position_since_ = Clock::time_point{};}
-    if (motion_kind_ != Command::ROTATE && final_align_ && (escape_active_ ||
+    if (recovering && !recovery_clear) {final_align_ = false;}
+    if (!recovering && motion_kind_ != Command::ROTATE && final_align_ && (escape_active_ ||
       distance > tolerance + get_parameter("final_position_hysteresis_m").as_double() ||
       (terminal_position_since_ != Clock::time_point{} &&
       std::chrono::duration<double>(tick - terminal_position_since_).count() >=
@@ -792,11 +826,6 @@ private:
       }
     }
     progress_ = std::max(progress_, projected);
-    if (nearest < 0.10 && !route_obstructed_ && escape_side_ == 0 &&
-      (!use_head || !head_holding_))
-    {
-      local_detour_ = false;local_direction_ = std::numeric_limits<double>::quiet_NaN();
-    }
     const double deviation_limit = get_parameter(
       route_obstructed_ || local_detour_ || escape_side_ != 0 ?
       "max_avoidance_deviation_m" : "max_path_deviation_m").as_double();
@@ -1086,7 +1115,7 @@ private:
         corridor.linear.y = probe_speed * std::sin(bearing);
         if (local_motion_is_free(x, y, yaw, corridor, target_distance)) {escape_side_ = 0;}
       }
-      if (!direct_free || route_obstructed_ || escape_side_ != 0) {
+      if (!direct_free || route_obstructed_ || local_detour_ || escape_side_ != 0) {
         avoiding = true;
         const double nominal = std::min(
           {escape_active_ ? std::min(vmax, get_parameter("start_escape_speed").as_double()) : vmax,
@@ -1098,17 +1127,42 @@ private:
         const double bearing = tangent - yaw;
         const double rejoin_offset = std::remainder(direction - tangent, 2.0 * M_PI);
         double best_score = -std::numeric_limits<double>::infinity();
-        geometry_msgs::msg::Twist best;
-        double best_offset = 0.0;
+        double retained_score = -std::numeric_limits<double>::infinity();
+        double side_score = -std::numeric_limits<double>::infinity();
+        geometry_msgs::msg::Twist best, retained, same_side;
+        double best_offset = 0.0, side_offset = 0.0;
+        const double retained_offset = std::isfinite(local_direction_) && omni ?
+          std::remainder(local_direction_ - odom_yaw - bearing, 2.0 * M_PI) : rejoin_offset;
+        const std::array<double, 15> offsets = {retained_offset, rejoin_offset, 0.0, 0.30,
+          -0.30, 0.60, -0.60, 0.95, -0.95, 1.35, -1.35, M_PI / 2.0, -M_PI / 2.0, 2.1, -2.1};
+        std::array<double, 15> cos_offset{}, cos_direction{}, sin_direction{}, steering_cost{};
+        const double base_cos = std::cos(yaw), base_sin = std::sin(yaw);
+        const double preview_limit = use_fields ? std::min(vmax, obstacle_speed_limit_) : vmax;
+        // Direction costs and trigonometry are shared by all four speed fractions.
+        for (size_t i = 0; i < offsets.size(); ++i) {
+          cos_offset[i] = std::cos(offsets[i]);
+          cos_direction[i] = std::cos(bearing + offsets[i]);
+          sin_direction[i] = std::sin(bearing + offsets[i]);
+          if (use_head) {
+            const double pan = select_head_pan(bearing + offsets[i], pan_min, pan_max);
+            steering_cost[i] = nominal * (0.25 * std::abs(
+              std::clamp(pan, pan_min, pan_max) - head_pan_) +
+              std::abs(pan - std::clamp(pan, pan_min, pan_max)));
+          }
+          if (std::isfinite(local_direction_)) {
+            steering_cost[i] += 0.5 * nominal * std::abs(std::remainder(
+              bearing + offsets[i] + odom_yaw - local_direction_, 2.0 * M_PI));
+          }
+        }
         for (double fraction : {1.0, 0.75, 0.5, 0.25}) {
-          for (double offset : {rejoin_offset, 0.0, 0.30, -0.30, 0.60, -0.60, 0.95, -0.95, 1.35, -1.35,
-              M_PI / 2.0, -M_PI / 2.0, 2.1, -2.1})
+          for (size_t candidate_index = 0; candidate_index < offsets.size(); ++candidate_index)
           {
+            const double offset = offsets[candidate_index];
             ++trace_.candidates;
             geometry_msgs::msg::Twist candidate;
             if (omni) {
-              candidate.linear.x = nominal * fraction * std::cos(bearing + offset);
-              candidate.linear.y = nominal * fraction * std::sin(bearing + offset);
+              candidate.linear.x = nominal * fraction * cos_direction[candidate_index];
+              candidate.linear.y = nominal * fraction * sin_direction[candidate_index];
               candidate.angular.z = angular;
             } else {
               candidate.linear.x = vx * fraction;
@@ -1117,7 +1171,6 @@ private:
             if (!local_motion_is_free(
                 x, y, yaw, candidate, std::numeric_limits<double>::infinity(),
                 diagnostics ? &trace_.rejected : nullptr)) {++trace_.nominal_rejected;continue;}
-            const double preview_limit = use_fields ? std::min(vmax, obstacle_speed_limit_) : vmax;
             const auto reachable = predict_velocity(
               candidate.linear.x, candidate.linear.y,
               candidate.angular.z, dt, parameters, preview_limit, omni, false);
@@ -1134,14 +1187,14 @@ private:
               const double corridor_distance = std::min(
                 remaining, std::max(
                   0.10,
-                  candidate_speed * get_parameter("collision_reaction_time_sec").as_double() +
+                  candidate_speed * local_context_.reaction +
                   candidate_speed * candidate_speed / (2.0 * amax) + map_->info.resolution));
               const double probe_speed = std::max(
                 vmax, std::sqrt(
                   2.0 * amax * corridor_distance) + 0.1);
               geometry_msgs::msg::Twist probe;
-              probe.linear.x = probe_speed * std::cos(bearing + offset);
-              probe.linear.y = probe_speed * std::sin(bearing + offset);
+              probe.linear.x = probe_speed * cos_direction[candidate_index];
+              probe.linear.y = probe_speed * sin_direction[candidate_index];
               if (!local_motion_is_free(
                   x, y, yaw, probe, corridor_distance,
                   diagnostics ? &trace_.rejected : nullptr)) {++trace_.corridor_rejected;continue;}
@@ -1154,8 +1207,8 @@ private:
             // Score a short endpoint against nearby route segments. Tangential
             // advance alone rewards a parallel detour indefinitely.
             const double preview_time = std::min(1.0, lookahead / std::max(0.05, nominal));
-            const double world_x = std::cos(yaw) * candidate.linear.x - std::sin(yaw) * candidate.linear.y;
-            const double world_y = std::sin(yaw) * candidate.linear.x + std::cos(yaw) * candidate.linear.y;
+            const double world_x = base_cos * candidate.linear.x - base_sin * candidate.linear.y;
+            const double world_y = base_sin * candidate.linear.x + base_cos * candidate.linear.y;
             const double end_x = x + preview_time * world_x, end_y = y + preview_time * world_y;
             double cross_track = std::numeric_limits<double>::infinity();
             for (size_t i = std::max(size_t{1}, segment); i < path_.poses.size(); ++i) {
@@ -1168,23 +1221,61 @@ private:
               cross_track = std::min(cross_track, std::hypot(end_x - a.x - projection * dx, end_y - a.y - projection * dy));
             }
             if (!std::isfinite(cross_track)) {cross_track = std::hypot(end_x - target_x, end_y - target_y);}
-            const double score = 4.0 * nominal * fraction * std::cos(offset) +
+            const double score = 4.0 * nominal * fraction * cos_offset[candidate_index] +
               0.5 * nominal * fraction - 0.15 * nominal * std::abs(offset) -
               6.0 * cross_track / preview_time -
               2.0 * change - 0.25 * std::abs(candidate.angular.z - velocity_[2]) -
-              (std::isfinite(local_direction_) ? (use_head && head_holding_ ? 5.0 : 0.5 * nominal) *
-              std::abs(
-                std::remainder(
-                  bearing + offset + yaw - local_direction_,
-                  2.0 * M_PI)) : 0.0) -
+              steering_cost[candidate_index] -
               (escape_side_ * offset < -0.01 ? 0.35 * nominal : 0.0);
             if (score > best_score) {best_score = score;best = candidate;best_offset = offset;}
+            if (escape_side_ * offset >= -0.01 && score > side_score) {
+              side_score = score;same_side = candidate;side_offset = offset;
+            }
+            if (candidate_index == 0 && score > retained_score) {
+              retained_score = score;retained = candidate;
+            }
           }
         }
         if (std::isfinite(best_score)) {
+          // Keep the chosen side of an obstacle until the route connector opens.
+          // Otherwise cross-track cost can repeatedly pull a lateral detour back
+          // across the route before it has passed the obstacle. An unsafe retained
+          // direction still permits an immediate change to any safe candidate.
+          if (omni && !(use_head && head_holding_) && escape_side_ * best_offset < -0.01 && std::isfinite(side_score))
+          {
+            best = same_side;best_offset = side_offset;best_score = side_score;
+          }
+          // Both choices pass the same geometry and braking checks above. Holding
+          // a direction never preserves an unsafe command or a body-frame twist.
+          const double candidate_direction = odom_yaw + std::atan2(best.linear.y, best.linear.x);
+          if (omni && use_head && head_holding_ && std::isfinite(local_direction_) && std::isfinite(retained_score)) {
+            // Finish observing a viable direction before requesting another pan.
+            best = retained;best_offset = retained_offset;challenger_since_ = Clock::time_point{};
+          } else if (omni && std::isfinite(local_direction_) && std::isfinite(retained_score) &&
+            std::abs(std::remainder(candidate_direction - local_direction_, 2.0 * M_PI)) > 0.10)
+          {
+            if (best_score <= retained_score + get_parameter("avoidance_switch_score_margin").as_double()) {
+              challenger_since_ = Clock::time_point{};
+            } else if (challenger_since_ == Clock::time_point{} ||
+              std::abs(std::remainder(candidate_direction - challenger_direction_, 2.0 * M_PI)) > 0.10)
+            {
+              challenger_direction_ = candidate_direction;challenger_since_ = tick;
+            }
+            if (challenger_since_ == Clock::time_point{} ||
+              std::chrono::duration<double>(tick - challenger_since_).count() <
+              get_parameter("avoidance_switch_hold_sec").as_double())
+            {
+              best = retained;best_offset = retained_offset;
+            } else {challenger_since_ = Clock::time_point{};}
+          } else {challenger_since_ = Clock::time_point{};}
           vx = best.linear.x;vy = best.linear.y;angular = best.angular.z;
-          if (std::hypot(vx, vy) > 1e-5) {local_direction_ = yaw + std::atan2(vy, vx);}
-          if (escape_side_ == 0 && std::abs(best_offset) > 0.1) {
+          if (std::hypot(vx, vy) > 1e-5) {local_direction_ = odom_yaw + std::atan2(vy, vx);}
+          if (direct_free && !route_obstructed_ &&
+            std::abs(std::remainder(best_offset - rejoin_offset, 2.0 * M_PI)) < 0.10)
+          {
+            local_detour_ = false;escape_side_ = 0;
+          }
+          else if (escape_side_ == 0 && std::abs(best_offset) > 0.1) {
             escape_side_ = best_offset > 0.0 ? 1 : -1;
           }
           if (std::hypot(vx, vy) > 1e-5) {direction = yaw + std::atan2(vy, vx);}
@@ -1192,7 +1283,8 @@ private:
           vx = vy = angular = 0.0;local_holding = true;
           // No viable command is not a new direction. Keep the last safe
           // observation bearing while waiting for clearance or replanning.
-          if (std::isfinite(local_direction_)) {direction = local_direction_;}
+          challenger_since_ = Clock::time_point{};
+          if (std::isfinite(local_direction_)) {direction = yaw + local_direction_ - odom_yaw;}
         }
       }
     }
@@ -1260,6 +1352,7 @@ private:
         head_holding_ = true;
       } else if (error <= head_tolerance) {head_holding_ = false;}
       head_blocked = head_holding_;
+      if (head_blocked) {head_wait_elapsed_ += elapsed;}
       trace_.head_error = pan - head_pan_;
       trace_.head_gate = !fresh ? "feedback_stale" : head_limit_holding_ ? "pan_limit" :
         head_holding_ ? "alignment" : "tracking";
@@ -1292,13 +1385,12 @@ private:
           pan_max - recovery_margin);
         angular = fresh && head_limit_holding_ ?
           std::clamp(2.0 * (pan - recovery_pan), -wmax, wmax) : 0.0;
-        if (std::chrono::duration<double>(tick - head_wait_).count() >
+        if (head_wait_elapsed_ >
           get_parameter("head_alignment_timeout_sec").as_double())
         {
           finish(Status::ABORTED, "head_alignment_timeout"); return;
         }
       } else {
-        head_wait_ = tick;
         const double scale = std::clamp(
           (stop_error - error) / (stop_error - head_tolerance), 0.0,
           1.0);
@@ -1310,7 +1402,7 @@ private:
         const double head_speed = get_parameter("head_max_pan_speed").as_double();
         angular = std::clamp(angular, -0.8 * head_speed, 0.8 * head_speed);
       }
-    } else {head_wait_ = tick;}
+    }
     const double terminal_pan = select_head_pan(direction - final_yaw, pan_min, pan_max);
     if (final_profile_ && !head_blocked &&
       (!use_head || final_align_ || (terminal_pan >= pan_min && terminal_pan <= pan_max)))
@@ -1323,15 +1415,25 @@ private:
         std::sqrt(reserve * reserve + 2.0 * angular_accel * std::abs(final_error)) - reserve);
       angular = std::clamp(angular, -limit, limit);
     }
-    const bool angular_progress = final_align_ && std::abs(final_error) + 0.02 < best_terminal_error_;
-    if (progress_ > best_progress_ + 0.02 || angular_progress || !obstacle_ready) {
-      best_progress_ = progress_; progress_time_ = tick;
+    const bool terminal_region = final_align_ || motion_kind_ == Command::ROTATE ||
+      (!recovering && distance <= get_parameter("final_capture_distance_m").as_double());
+    if (!terminal_region) {best_terminal_error_ = std::abs(final_error);}
+    const bool angular_progress = terminal_region && std::abs(final_error) + 0.02 < best_terminal_error_;
+    const bool route_progress = progress_ > best_progress_ + 0.02;
+    const bool position_progress = distance + 0.02 < best_position_error_;
+    if (route_progress || position_progress || angular_progress || !obstacle_ready) {
+      progress_time_ = tick;
+      if (route_progress) {best_progress_ = progress_;}
+      if (position_progress) {best_position_error_ = distance;}
       if (angular_progress) {best_terminal_error_ = std::abs(final_error);}
+      if (route_progress || position_progress || angular_progress) {head_wait_elapsed_ = 0.0;}
     } else if (std::chrono::duration<double>(tick - progress_time_).count() >
       std::max(get_parameter("progress_timeout_sec").as_double(),
-      head_blocked ? get_parameter("head_alignment_timeout_sec").as_double() : 0.0))
+      head_wait_elapsed_ > 0.0 ? get_parameter("head_alignment_timeout_sec").as_double() : 0.0))
     {
-      finish(Status::ABORTED, "no_progress"); return;
+      finish(Status::ABORTED,
+        final_align_ || motion_kind_ == Command::ROTATE ? "orientation_stalled" : "position_stalled");
+      return;
     }
     geometry_msgs::msg::Vector3 intent;
     intent.x = std::cos(direction - yaw); intent.y = std::sin(direction - yaw);
@@ -1412,25 +1514,19 @@ private:
     {
       velocity_.fill(0.0);acceleration_.fill(0.0);
       cmd_pub_->publish(geometry_msgs::msg::Twist());
-      if (local_blocked_since_ == Clock::time_point{}) {local_blocked_since_ = tick;}
+      local_blocked_elapsed_ += elapsed;
       status_.text = "waiting_for_local_clearance";
       log_motion(geometry_msgs::msg::Twist());
-      if (std::chrono::duration<double>(tick - local_blocked_since_).count() >
+      if (local_blocked_elapsed_ >
         get_parameter("local_avoidance_timeout_sec").as_double())
       {
         finish(Status::ABORTED, "local_trajectory_blocked");
       }
       return;
     }
-    // A safe zero while aligning the head does not resolve a blocked detour.
-    if (std::hypot(command.linear.x, command.linear.y) > 0.01 ||
-      (!head_blocked && !local_holding)) {local_blocked_since_ = Clock::time_point{};}
-    if (local_blocked_since_ != Clock::time_point{} &&
-      std::chrono::duration<double>(tick - local_blocked_since_).count() >
-      get_parameter("local_avoidance_timeout_sec").as_double())
-    {
-      finish(Status::ABORTED, "local_trajectory_blocked");return;
-    }
+    // Selection checked nominal and reachable candidates before the head veto.
+    // A viable candidate waiting for its camera has a separate head deadline.
+    local_blocked_elapsed_ = 0.0;
     log_motion(command);
     cmd_pub_->publish(command);
   }
@@ -1523,7 +1619,7 @@ private:
     const double horizon = reaction + speed / deceleration;
     const double dt = std::min(0.03, info.resolution / (4.0 * std::max(0.01, speed)));
     double travelled = 0.0;
-    double guard_floor = 0.5;
+    double previous_x = x, previous_y = y;
     for (double t = 0.0; t <= horizon; t += dt) {
       if (diagnostic) {diagnostic->time = t;diagnostic->reason = "outside_grid";}
       const double gx = (c * (x - info.origin.position.x) + s * (y - info.origin.position.y)) /
@@ -1550,43 +1646,22 @@ private:
         if (diagnostic) {diagnostic->reason = "escape_radius";}
         return false;
       }
-      for (const auto & point : local_context_.uncertainty) {
-        const double square = (x - point[0]) * (x - point[0]) + (y - point[1]) * (y - point[1]);
-        if (square + 1e-8 < point[2]) {
-          if (diagnostic) {
-            diagnostic->reason = "uncertain_obstacle";diagnostic->separation = std::sqrt(square);
-            diagnostic->required = std::sqrt(point[2]);
-          }
-          return false;
-        }
-      }
-      double guard_distance = std::numeric_limits<double>::infinity();
-      for (int cy = std::max(0, iy - 1); cy <= std::min(static_cast<int>(info.height) - 1, iy + 1);
-        ++cy)
-      {
-        for (int cx = std::max(0, ix - 1); cx <= std::min(static_cast<int>(info.width) - 1, ix + 1);
-          ++cx)
-        {
-          const double dx = std::max({double(cx) - gx, 0.0, gx - double(cx + 1)});
-          const double dy = std::max({double(cy) - gy, 0.0, gy - double(cy + 1)});
-          if (grid.data[static_cast<size_t>(cy) * info.width + cx] != 0) {
-            guard_distance = std::min(guard_distance, std::hypot(dx, dy));
-          }
-        }
-      }
-      // A free start can lie within the additional half-cell sampling guard.
-      // Allow only non-decreasing separation until the guard is recovered;
-      // an occupied start/trajectory cell remains forbidden.
-      if (t == 0.0) {guard_floor = std::min(0.5, guard_distance);}
-      if (diagnostic) {
-        diagnostic->separation = guard_distance * info.resolution;
-        diagnostic->required = guard_floor * info.resolution;
-      }
-      if (guard_distance + 1e-8 < guard_floor) {
-        if (diagnostic) {diagnostic->reason = "sampling_guard";}
+      if (!motion_constraints_.uncertainty_free(previous_x, previous_y, x, y, true,
+          diagnostic ? &diagnostic->separation : nullptr, diagnostic ? &diagnostic->required : nullptr)) {
+        if (diagnostic) {diagnostic->reason = "uncertain_obstacle";}
         return false;
       }
-      guard_floor = std::min(0.5, std::max(guard_floor, guard_distance));
+      if (!motion_constraints_.sampling_free(previous_x, previous_y, x, y, true,
+          diagnostic ? &diagnostic->separation : nullptr, diagnostic ? &diagnostic->required : nullptr)) {
+        if (diagnostic) {
+          diagnostic->reason = "sampling_guard";
+          if (!escape_active_ && !final_align_ && motion_kind_ == Command::FOLLOW_PATH) {
+            diagnostic->layer = "planning_guard";
+          }
+        }
+        return false;
+      }
+      previous_x = x;previous_y = y;
       if (travelled >= max_distance) {
         if (diagnostic) {diagnostic->reason = "ok";}
         return true;
@@ -1621,9 +1696,14 @@ private:
   tf2_ros::TransformListener tf_listener_;
   std::string base_frame_, odom_frame_, map_frame_, last_phase_;
   LocalContext local_context_;
+  path_planner::MotionConstraints motion_constraints_;
+  geometry_msgs::msg::PoseArray empty_uncertainty_;
   uint8_t motion_kind_ = Command::FOLLOW_PATH;
-  double previous_odom_x_ = 0.0, previous_odom_y_ = 0.0, measured_linear_speed_ = 0.0,
-    feasible_yaw_reference_ = 0.0;
+  path_planner::MotionObservation odometry_;
+  double feasible_yaw_reference_ = 0.0, best_position_error_ = 0.0, head_wait_elapsed_ = 0.0;
+  double local_blocked_elapsed_ = 0.0;
+  double challenger_direction_ = std::numeric_limits<double>::quiet_NaN();
+  Clock::time_point challenger_since_, recovery_clear_since_;
   Clock::time_point motion_settled_since_, uncertainty_received_;
   geometry_msgs::msg::PoseArray::ConstSharedPtr uncertain_obstacles_;
   rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr uncertainty_sub_;
@@ -1667,8 +1747,7 @@ private:
   Clock::time_point speed_limit_received_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr speed_limit_sub_;
   geometry_msgs::msg::Vector3 force_;
-  Clock::time_point started_, progress_time_, head_wait_, last_tick_, deviation_since_;
-  Clock::time_point local_blocked_since_;
+  Clock::time_point started_, progress_time_, last_tick_, deviation_since_;
   Clock::time_point risk_received_, force_received_, head_received_, last_feedback_, map_received_,
     last_fields_enable_, ready_received_;
   nav_msgs::msg::OccupancyGrid::ConstSharedPtr map_;

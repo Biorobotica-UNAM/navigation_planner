@@ -6,3 +6,5 @@ uint64 revision
 nav_msgs/OccupancyGrid map
 nav_msgs/OccupancyGrid costs
 nav_msgs/OccupancyGrid clearance
+# Historical observations retained as local collision constraints.
+geometry_msgs/PoseArray uncertain_obstacles

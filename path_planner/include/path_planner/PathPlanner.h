@@ -3,6 +3,7 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <path_planner/motion_constraints.hpp>
 
 #include <vector>
 #include <string>
@@ -38,6 +39,7 @@ struct PlanOptions
     double max_path_heading_step = 0.50;
     double recovery_cost_radius = 0.35;
     double recovery_cost_peak = 40.0;
+    const path_planner::MotionConstraints* motion_constraints = nullptr;
 };
 
 struct PlanResult
@@ -95,5 +97,6 @@ public:
         const nav_msgs::msg::OccupancyGrid* collision_map = nullptr,
         bool allow_unknown = false,
         const nav_msgs::msg::OccupancyGrid* cost_map = nullptr,
-        std::string* rejection = nullptr);
+        std::string* rejection = nullptr,
+        const path_planner::MotionConstraints* motion_constraints = nullptr);
 };

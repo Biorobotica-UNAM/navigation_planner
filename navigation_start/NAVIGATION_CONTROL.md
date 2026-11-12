@@ -12,6 +12,13 @@ salida de estado del transporte actual. Cada petición crea una generación nuev
 se descartan respuestas de planes cancelados y resultados de movimientos anteriores.
 No existe historial de destinos visitados ni supresión de goals repetidos.
 
+Planning snapshots also carry `uncertain_obstacles`. A*, smoothing, route checks,
+and braking checks share `MotionConstraints`: retained observations use the physical
+radius plus 0.05 m, and interpolation uses a half-cell clearance guard. Spatial
+buckets rebuild only when point positions, geometry, or radius change; queries do
+not allocate or copy occupancy grids. A start already inside an uncertainty guard
+may move away or tangentially, but may not reduce separation.
+
 Cada goal se compara con la pose actual:
 
 - Posición y orientación dentro de tolerancia: éxito `already_at_goal_pose`, sin plan.
@@ -59,7 +66,11 @@ requiere al menos `near_goal_min_progress=0.90` del recorrido, y tanto longitud
 restante como distancia al goal menores que el radio anterior. La proyección se
 limita a una ventana local para no saltarse un bucle al cruzar segmentos. Se
 completa la orientación antes del éxito. Una ruta libre conserva las tolerancias
-normales de llegada. Si el bloqueo desaparece se vuelve al destino original.
+normales de llegada. Un destino alternativo permanece estable durante los
+replanteos mientras siga siendo válido. Si deja de serlo, se vuelve a evaluar
+el goal original. Una llegada aproximada ya planificada puede frenar al entrar
+en la región segura sin exigir alcanzar el punto alternativo ni el 90 % de esa
+ruta corta. El frenado vuelve a comprobar posición, margen y reposo antes de girar.
 
 ## Configuración y cambios durante ejecución
 
@@ -153,6 +164,48 @@ inmediato. Esto no amplía la tolerancia de éxito. Los objetivos de cabeza usan
 de hasta media tolerancia de cabeza para no perseguir cambios de pocos grados.
 En el perfil Takeshi AMCL, las tolerancias compartidas entre controlador y
 coordinador son 0.08 m y 0.08 rad (aproximadamente 4.6 grados).
+
+### Arrival, recovery and avoidance stability
+
+Both nodes use the same fixed-capacity odometry window. It accepts distinct
+source timestamps, fits linear/angular velocity over at least 0.30 s, and checks
+the position/angular envelope to reject round-trip motion. Repeated transforms
+cannot fill the window. Clock resets and gaps longer than 0.5 s discard it;
+the existing TF freshness checks remain active. Command settling overlaps the
+observation window instead of adding another physical-rest delay.
+
+`RECOVER_START` is an internal `NavigationPath` mode. A recovery shorter than the
+normal position tolerance still has to leave planning inflation, remain in a
+free cell in coherent, fresh planning/physical maps, and stop before succeeding.
+The coordinator then plans from the reached pose toward the original goal.
+
+Avoidance retains its heading in odometry coordinates and checks that heading
+against current geometry and braking limits every cycle. A safe challenger must
+improve the score by `avoidance_switch_score_margin=0.03` for
+`avoidance_switch_hold_sec=0.25` before replacing it. An unsafe retained direction
+is discarded immediately. Head travel has a continuous cost independent of
+whether head alignment is holding the base. Trigonometry and direction costs
+are computed once per direction and reused for the four speed fractions.
+Until the connector back to the route opens, safe candidates on the chosen side
+of an obstacle take precedence over reversing the detour. If that side has no
+safe candidate, the controller can immediately select the other side.
+
+Near the destination, improvement toward the fixed final orientation counts as
+progress before position enters tolerance. Head waits accumulate between real
+position/angular improvements; alternating controller phases does not reset that
+budget. Stall results distinguish `position_stalled`, `orientation_stalled` and
+`head_alignment_timeout`.
+
+The coordinator retries control stalls without adding them to `avoided_paths`.
+Control retries are bounded by `max_recovery_attempts`, with the counter reset
+only after `recovery_progress_m` of displacement or a new goal. Geometric
+blockages retain the existing route-exclusion policy. Initial escape failures
+never enter the global route history. Diagnostics include observed linear and
+angular speed, odometry-window duration, position envelope, command settling and
+accumulated head-wait time. Head centering remains owned by `scanner_node` after
+navigation success.
+Both controller and coordinator default to `Release` when no build type is
+specified; an explicitly selected build type is preserved.
 
 La repulsión favorece una corrección lateral acotada en relación con la velocidad
 de seguimiento. No invierte ni cancela por sí sola el avance; el monitor conserva
@@ -262,7 +315,10 @@ seguro, el controlador mantiene velocidad cero y pide replanteo tras 1.5 s
 El controlador comprueba la trayectoria local limitada, incluida la repulsión,
 sobre su horizonte de frenado usando la capa reciente `clearance_map`, que
 contiene la huella física; si falta, usa el mapa aumentado. No añade otra huella
-completa. El mapa aumentado mantiene el margen adicional para planear la ruta.
+completa. El seguimiento normal también valida el margen de interpolación sobre
+el mapa aumentado, conservando el espacio previsto por el planificador. El
+escape, el frenado y la alineación estacionaria pueden usar la capa física más
+pequeña; las celdas ocupadas permanecen protegidas.
 La comprobación local agrega
 medio píxel de margen para cubrir esquinas entre muestras. Si una pose libre
 empieza dentro de ese margen adicional, sólo se acepta un movimiento que mantenga
@@ -285,8 +341,14 @@ replanificar. Los datos vencidos detienen la base y llevan al coordinador a
 `waiting_for_obstacle_data`: no se solicitan planes mientras falte el sensor.
 Tras 0.3 s de datos recuperados se planifica desde la pose real. Si no se recupera
 en `sensor_wait_timeout_sec` (10 s), el goal termina con `obstacle_data_unavailable`. Los umbrales están expuestos en el launch.
-La espera de alineación de cabeza o de sensores no consume el plazo de bloqueo
-geométrico de la ruta. Los testigos de obstáculos usan el timestamp de la pose
+La espera de alineación de cabeza con un candidato viable no consume el plazo
+de bloqueo geométrico local; conserva su propio timeout. La dirección retenida
+se mantiene durante la alineación sólo mientras siga siendo segura. Los límites
+de falta de progreso y duración total continúan activos.
+Las rutas fallidas se vuelven a comprobar con las restricciones actuales antes
+de excluirlas; un corredor liberado puede reutilizarse. El presupuesto de
+recuperación se reinicia por acercamiento real al goal, no por desplazarse en círculos.
+Los testigos de obstáculos usan el timestamp de la pose
 con la que se calcularon para permitir su transformación al mapa.
 Con `patience=true`, no encontrar una ruta válida mantiene los reintentos; con
 `false`, una respuesta sin plan válido termina el goal con fallo.
@@ -560,28 +622,26 @@ ocultar pérdida de nube.
 
 ## Validación
 
-Pasaron 102 casos distintos: 16 C++ del planeador, 63 de controlador y coordinación,
-9 de coherencia de mapas, 9 de profundidad y 5 escenarios con los mapas del
-laboratorio. Las pruebas ROS usan dominios aislados de localhost. Se cubrieron
-salidas curvas desde inflación sin invadir la capa física, replanificación desde
-la pose alcanzada, reintentos acotados, metas alternativas alcanzables y el
-límite estricto de distancia para declarar éxito aproximado. También se
-verificaron la orientación posterior al resultado del controlador, las
-oscilaciones pequeñas de posición/cabeza y los clientes directos de `nav_msgs/Path`.
-Los casos de diagnóstico comprueban la activación en ejecución, el motivo de
-parada antes de retornar, la correlación goal/movimiento y la diferencia entre
-retención por rango ciego, caducidad y borrado por rayos libres. El display de
-ruta se prueba con un suscriptor que se conecta después del despacho; recibe
-la ruta retenida, no genera un movimiento duplicado y se limpia al cancelar.
+En esta revisión pasaron 121 casos: 31 C++, 70 de controlador y coordinación,
+9 de coherencia de mapas y 11 escenarios con `maps/lab_2026` y
+`prohibition_maps/lab_2026`. Se compilaron `path_planner`, `map_augmenter`,
+`simple_move` y `mvn_pln` en una instalación aislada en `/tmp`. Las pruebas ROS
+usaron dominios distintos en localhost, con base, cabeza y sensores simulados.
 
-La prueba local de rendimiento ejecutó 100 recuperaciones sobre un mapa de un
-millón de celdas en aproximadamente 0.39 ms en este equipo. Es una medición
-sintética del algoritmo local; no mide latencia del stack ni del robot.
+Los casos nuevos comprueban incertidumbre en A* y suavizado, salida sin reducir
+separación, liberación de un corredor, llegada dentro de la región segura y
+espera de cabeza posterior a un rechazo geométrico. La búsqueda espacial se
+contrastó con una búsqueda exhaustiva en 3000 segmentos y 500 puntos sobre una
+geometría de mapa rotada. Un goal a 4 mm del borde de una celda inflada se rechaza
+si exige pose exacta y se resuelve sin exceder los 8 cm cuando solicita esa
+tolerancia explícitamente.
 
-El recorrido de esquina alcanzó 0.900 m/s con separación mínima simulada de
-0.248 m; el caso de obstáculo dinámico mantuvo 0.286 m. Se compilaron los nodos
-modificados y se validaron XML, sintaxis Python y parámetros compartidos de
-llegada. Se corrigió un punto simulado situado justo en el borde de una celda
-para que la prueba de mesa exija explícitamente un inicio libre en la capa
-física y bloqueado en planificación. No se enviaron comandos al hardware.
-Para cargar estos cambios hay que reiniciar navegación; falta la validación física.
+El recorrido largo de esquina alcanzó 0.900 m/s con separación mínima simulada
+de 0.279 m. Las pruebas de nube VGA mantuvieron un intervalo máximo de monitor
+de aproximadamente 0.030 s con publicadores best-effort y reliable. Estas
+mediciones corresponden a la simulación local, no a la dinámica física del robot.
+
+`GetPlanningSnapshot` incorpora un campo nuevo de incertidumbre. Para cargar
+los cambios hay que recompilar juntos los cuatro paquetes y volver a lanzar
+navegación. No se reinició el stack del robot ni se enviaron comandos al hardware;
+la validación física queda pendiente.

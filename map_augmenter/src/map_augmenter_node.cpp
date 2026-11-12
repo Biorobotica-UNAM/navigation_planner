@@ -1,6 +1,7 @@
 #include "map_augmenter/grid_utils.hpp"
 
 #include <geometry_msgs/msg/point_stamped.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <nav_msgs/srv/get_map.hpp>
 #include <path_planner/srv/get_planning_snapshot.hpp>
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
@@ -135,6 +136,16 @@ public:
         have_obstacles_ = true;
         rebuild_augmented_layers();
       });
+    sub_uncertain_ = create_subscription<geometry_msgs::msg::PoseArray>(
+      endpoint("uncertain_obstacles_topic", "/uncertain_obstacles"),
+      rclcpp::QoS(1).transient_local(), [this](geometry_msgs::msg::PoseArray::ConstSharedPtr msg) {
+        if (ready_ && msg->header.frame_id != snapshot_.augmented_collision.header.frame_id) {return;}
+        for (const auto& pose : msg->poses) {
+          if (!std::isfinite(pose.position.x) || !std::isfinite(pose.position.y)) {return;}
+        }
+        if (msg->poses != uncertain_obstacles_.poses) {++revision_;}
+        uncertain_obstacles_ = *msg;
+      });
     base_input_.client = create_client<GetMap>(parameter(
       "static_map_server", std::string("/static_map_server/map"), "Base-map GetMap service fallback."));
     const auto prohibition_topic = parameter("prohibition_map_topic", std::string(""),
@@ -173,6 +184,7 @@ public:
         response->costs = request->augmented ? snapshot_.augmented_cost : snapshot_.static_cost;
         response->clearance = request->augmented ? snapshot_.clearance : static_clearance_;
         response->clearance.header = response->map.header;
+        if (request->augmented) {response->uncertain_obstacles = uncertain_obstacles_;}
         if (get_parameter("debug_detection").as_bool()) {
           RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
             "MapSnapshot revision=%lu augmented=%d copy_ms=%.3f layer_bytes=%zu static_radius=%.3f dynamic_radius=%.3f robot_radius=%.3f",
@@ -422,6 +434,8 @@ private:
 
   MapInput base_input_, prohibition_input_;
   Snapshot snapshot_;
+  geometry_msgs::msg::PoseArray uncertain_obstacles_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr sub_uncertain_;
   uint64_t revision_{0};
   rclcpp::Service<GetSnapshot>::SharedPtr snapshot_service_;
   Grid dynamic_obstacles_, static_collision_, static_cost_, static_clearance_;

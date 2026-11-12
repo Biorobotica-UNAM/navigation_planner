@@ -10,6 +10,8 @@
 #include <nav_msgs/msg/path.hpp>
 #include <path_planner/srv/plan_path.hpp>
 #include <path_planner/msg/navigation_path.hpp>
+#include <path_planner/motion_observation.hpp>
+#include <path_planner/motion_constraints.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -128,6 +130,15 @@ public:
     clearance_sub_ = create_subscription<Grid>(
       prefix + "/clearance_map", rclcpp::QoS(1).transient_local(),
       [this](Grid::ConstSharedPtr grid) {clearance_map_ = grid;});
+    uncertainty_sub_ = create_subscription<geometry_msgs::msg::PoseArray>(
+      prefix + "/uncertain_obstacles", rclcpp::QoS(1).transient_local(),
+      [this](geometry_msgs::msg::PoseArray::ConstSharedPtr points) {
+        if (points->header.frame_id != map_frame_) {return;}
+        for (const auto& pose : points->poses) {
+          if (!std::isfinite(pose.position.x) || !std::isfinite(pose.position.y)) {return;}
+        }
+        uncertain_obstacles_ = *points;
+      });
     witness_sub_ = create_subscription<geometry_msgs::msg::PointStamped>(
       prefix + "/potential_fields/blocking_obstacle", 1,
       [this](geometry_msgs::msg::PointStamped::ConstSharedPtr point) {
@@ -218,13 +229,15 @@ private:
     }
     goal_ = goal.pose;
     target_goal_ = goal_;
-    start_recovery_ = approximate_goal_ = motion_completed_ = near_braking_ = false;
+    start_recovery_ = approximate_goal_ = motion_completed_ = near_braking_ = arrival_captured_ = false;
     diagnostic_time_ = Clock::time_point{};
     near_goal_blocker_ = "not_evaluated";
     near_progress_ = near_remaining_ = -1.0;
     planning_blocked_attempts_ = 0;
     start_recovery_attempts_ = 0;
-    pose_received_ = odom_received_ = settled_since_ = Clock::time_point{};
+    pose_received_ = settled_since_ = Clock::time_point{};
+    odometry_ = path_planner::MotionObservation{};
+    control_attempts_ = 0;
     near_sent_ = false;
     motion_started_ = false;
     motion_id_.clear();
@@ -317,18 +330,33 @@ private:
     {
       end_goal(Status::ABORTED, "recovery_exhausted: " + reason);return;
     }
+    const bool control_failure = reason == "no_progress" || reason == "position_stalled" ||
+      reason == "orientation_stalled" || reason == "head_alignment_timeout" ||
+      reason == "motion_timeout" || reason == "path_deviation";
     const bool blocked = reason == "collision_risk" || reason == "route_blocked" ||
       reason == "route_blocked_without_progress" ||
-      reason == "obstacle_speed_blocked" || reason == "motion_timeout" ||
-      reason == "local_trajectory_blocked" || reason == "no_progress" || reason == "path_deviation";
-    if (blocked && state_ == State::FOLLOWING) {
-      const double moved = std::hypot(
-        robot_.position.x - failure_position_.x,
-        robot_.position.y - failure_position_.y);
-      if (blocked_attempts_ == 0 || moved >= get_parameter("recovery_progress_m").as_double()) {
+      reason == "obstacle_speed_blocked" || reason == "local_trajectory_blocked";
+    // A stalled controller is not evidence that its route is geometrically blocked.
+    // Local escape failures must not enter the global route exclusion history.
+    if ((control_failure || (blocked && start_recovery_)) && state_ == State::FOLLOWING) {
+      if (control_attempts_ == 0 || std::hypot(
+          robot_.position.x - control_failure_position_.x,
+          robot_.position.y - control_failure_position_.y) >=
+        get_parameter("recovery_progress_m").as_double())
+      {
+        control_attempts_ = 0;control_failure_position_ = robot_.position;
+      }
+      if (++control_attempts_ > max_recovery_attempts_) {
+        end_goal(Status::ABORTED, "control_retries_exhausted: " + reason);return;
+      }
+    }
+    if (blocked && !start_recovery_ && state_ == State::FOLLOWING) {
+      const double distance = std::hypot(robot_.position.x - goal_.position.x,
+        robot_.position.y - goal_.position.y);
+      if (blocked_attempts_ == 0 || failure_goal_distance_ - distance >= get_parameter("recovery_progress_m").as_double()) {
         blocked_attempts_ = recovery_attempts_ = 0;
         failed_paths_.clear();
-        failure_position_ = robot_.position;
+        failure_goal_distance_ = distance;
       }
       ++blocked_attempts_;
       // Require a map built after this blockage, not merely a recent cached grid.
@@ -360,6 +388,7 @@ private:
       }
     }
     ++generation_;
+    arrival_captured_ = near_braking_ = false;
     if (pending_) {planner_->remove_pending_request(request_id_); pending_ = false;}
     stop_pub_->publish(std_msgs::msg::Empty());
     state_ = State::RETRY;
@@ -375,6 +404,10 @@ private:
   {
     if (!map_ || path.poses.empty()) {return false;}
     const auto & info = map_->info;
+    const bool coherent = clearance_map_ && clearance_map_->info == info &&
+      clearance_map_->header.frame_id == map_frame_ && clearance_map_->data.size() == map_->data.size() &&
+      rclcpp::Time(clearance_map_->header.stamp, get_clock()->get_clock_type()) >=
+      rclcpp::Time(map_->header.stamp, get_clock()->get_clock_type());
     const auto & q = info.origin.orientation;
     const double yaw = std::atan2(2.0 * q.w * q.z, 1.0 - 2.0 * q.z * q.z);
     const double c = std::cos(yaw), s = std::sin(yaw);
@@ -390,6 +423,8 @@ private:
       rclcpp::Time(clearance_map_->header.stamp, get_clock()->get_clock_type()) >=
       rclcpp::Time(map_->header.stamp, get_clock()->get_clock_type()) && rx >= 0 && ry >= 0 &&
       rx < info.width && ry < info.height && map_->data[size_t(ry) * info.width + size_t(rx)] > 0;
+    motion_constraints_.update(coherent && escape ? *clearance_map_ : *map_, uncertain_obstacles_,
+      robot_radius_ + path_planner::uncertainty_margin_m);
     auto cell_free = [this, &info, &escape, c, s, start_x, start_y](int x, int y) {
         if (x < 0 || y < 0 || x >= static_cast<int>(info.width) ||
           y >= static_cast<int>(info.height)) {return false;}
@@ -427,6 +462,8 @@ private:
       const double length = std::hypot(p.x - px, p.y - py);
       const double fraction = length > 1e-9 ? std::min(1.0, (horizon - traversed) / length) : 1.0;
       const double tx = px + fraction * (p.x - px), ty = py + fraction * (p.y - py);
+      if (!motion_constraints_.uncertainty_free(px, py, tx, ty) ||
+        !motion_constraints_.sampling_free(px, py, tx, ty)) {return false;}
       const double ax = (c * (px - info.origin.position.x) + s * (py - info.origin.position.y)) /
         info.resolution;
       const double ay = (-s * (px - info.origin.position.x) + c * (py - info.origin.position.y)) /
@@ -507,7 +544,7 @@ private:
     const auto tick = Clock::now();
     const auto progress = route_progress(robot.position);
     near_progress_ = progress.first;near_remaining_ = progress.second;
-    if (start_recovery_ || approximate_goal_) {near_goal_blocker_ = "recovery_active";return false;}
+    if (start_recovery_ || arrival_captured_) {near_goal_blocker_ = "recovery_active";return false;}
     if (path_.poses.empty()) {near_goal_blocker_ = "no_path";return false;}
     if (!map_ || !clearance_map_) {near_goal_blocker_ = "map_missing";return false;}
     if (std::chrono::duration<double>(tick - map_received_).count() >
@@ -524,24 +561,30 @@ private:
     {
       near_goal_blocker_ = "clearance_incoherent";return false;
     }
-    if (occupancy_at(*map_, goal_.position) <= 0) {
+    const bool blocked = occupancy_at(*map_, goal_.position) > 0 ||
+      !motion_constraints_.uncertainty_free(goal_.position.x, goal_.position.y,
+        goal_.position.x, goal_.position.y, false) ||
+      !motion_constraints_.sampling_free(goal_.position.x, goal_.position.y,
+        goal_.position.x, goal_.position.y, false);
+    if (!approximate_goal_ && !blocked) {
       near_goal_blocker_ = "goal_not_blocked";return false;
     }
     if (occupancy_at(*clearance_map_, robot.position) != 0) {
       near_goal_blocker_ = "current_physical_blocked";return false;
     }
     const double radius = robot_radius_ + near_goal_extra_;
-    near_goal_blocker_ = progress.first < near_goal_progress_ ? "progress" :
-      progress.second >= radius ? "remaining" :
+    near_goal_blocker_ = !approximate_goal_ && progress.first < near_goal_progress_ ? "progress" :
+      !approximate_goal_ && progress.second >= radius ? "remaining" :
       std::hypot(
       goal_.position.x - robot.position.x,
       goal_.position.y - robot.position.y) >= radius ? "distance" : "eligible";
-    if (progress.first < near_goal_progress_ || progress.second >= radius ||
+    if ((!approximate_goal_ && (progress.first < near_goal_progress_ || progress.second >= radius)) ||
       std::hypot(
         goal_.position.x - robot.position.x,
         goal_.position.y - robot.position.y) >= radius) {return false;}
     target_goal_ = robot;
     approximate_goal_ = true;
+    arrival_captured_ = true;
     near_braking_ = true;
     path_ = Path();path_.header.frame_id = map_frame_;
     geometry_msgs::msg::PoseStamped pose;pose.pose = target_goal_;path_.poses.push_back(pose);
@@ -581,30 +624,25 @@ private:
       {
         throw std::runtime_error("Odometry transform is stale");
       }
-      geometry_msgs::msg::Pose odom;
-      odom.position.x = tf.transform.translation.x;odom.position.y = tf.transform.translation.y;
-      odom.orientation = tf.transform.rotation;
-      if (odom_received_ != Clock::time_point{}) {
-      const double elapsed = std::max(
-        1e-3, std::chrono::duration<double>(
-          tick - odom_received_).count());
-      const double linear = std::hypot(
-        odom.position.x - odom_pose_.position.x,
-        odom.position.y - odom_pose_.position.y) / elapsed;
-      const double angular =
-        std::abs(
-        std::remainder(
-          tf2::getYaw(odom.orientation) - tf2::getYaw(odom_pose_.orientation),
-          2.0 * M_PI)) / elapsed;
-      if (linear < 0.03 && angular < 0.08) {
-        if (settled_since_ == Clock::time_point{}) {settled_since_ = tick;}
-      } else {settled_since_ = Clock::time_point{};}
-      }
-      odom_pose_ = odom;odom_received_ = tick;
+      odometry_.observe(stamp.nanoseconds(), tf.transform.translation.x,
+        tf.transform.translation.y, tf2::getYaw(tf.transform.rotation));
+      settled_since_ = odometry_.stationary ? tick -
+        std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(odometry_.span)) :
+        Clock::time_point{};
     } catch (const std::exception &) {
-      odom_received_ = settled_since_ = Clock::time_point{};
+      settled_since_ = Clock::time_point{};
+      odometry_ = path_planner::MotionObservation{};
     }
     robot_ = robot;pose_received_ = tick;
+    if (map_) {
+      const bool coherent = clearance_map_ && clearance_map_->info == map_->info &&
+        clearance_map_->header.frame_id == map_frame_ && clearance_map_->data.size() == map_->data.size() &&
+        rclcpp::Time(clearance_map_->header.stamp, get_clock()->get_clock_type()) >=
+        rclcpp::Time(map_->header.stamp, get_clock()->get_clock_type());
+      const bool escape = coherent && occupancy_at(*map_, robot.position) > 0;
+      motion_constraints_.update(escape ? *clearance_map_ : *map_, uncertain_obstacles_,
+        robot_radius_ + path_planner::uncertainty_margin_m);
+    }
     log_navigation(controller_phase_.empty() ? "evaluating" : controller_phase_);
     if (state_ == State::WAITING_SENSORS) {
       if (!sensors_ready_ ||
@@ -652,7 +690,7 @@ private:
           std::chrono::duration<double>(tick - settled_since_).count() < 0.3) {return;}
         near_braking_ = false;
         if (distance >= robot_radius_ + near_goal_extra_) {
-          approximate_goal_ = motion_completed_ = false;schedule_replan("near_goal_braking_drift");
+          approximate_goal_ = motion_completed_ = arrival_captured_ = false;schedule_replan("near_goal_braking_drift");
           return;
         }
         target_goal_ = robot;target_goal_.orientation = goal_.orientation;
@@ -817,6 +855,15 @@ private:
     request->start.header.frame_id = request->goal.header.frame_id = map_frame_;
     request->start.pose = robot;request->goal.pose = goal_;
     request->goal_recovery_radius = robot_radius_ + near_goal_extra_;
+    const auto& alternative = target_goal_.position;
+    const bool preserve_alternative = approximate_goal_ && !start_recovery_ &&
+      occupancy_at(*map_, alternative) == 0 &&
+      motion_constraints_.uncertainty_free(alternative.x, alternative.y, alternative.x, alternative.y, false) &&
+      motion_constraints_.sampling_free(alternative.x, alternative.y, alternative.x, alternative.y, false);
+    if (preserve_alternative) {
+      request->goal.pose = target_goal_;
+      request->goal_recovery_radius = 0.0;
+    }
     if (minimum_map_stamp_.sec == 0 && minimum_map_stamp_.nanosec == 0) {
       minimum_map_stamp_ = map_->header.stamp;
     }
@@ -830,6 +877,13 @@ private:
           get_parameter("obstacle_evidence_timeout_sec").as_double();
         }), required_obstacles_.end());
     request->required_obstacles = required_obstacles_;
+    // Reuse a corridor when its actual geometric restriction has disappeared.
+    failed_paths_.erase(std::remove_if(failed_paths_.begin(), failed_paths_.end(),
+      [this](const Path& failed) {
+        if (failed.poses.empty()) {return true;}
+        const auto& p = failed.poses.front().pose.position;
+        return route_is_free(failed, p.x, p.y, std::numeric_limits<double>::infinity());
+      }), failed_paths_.end());
     if (blocked_attempts_ >= 2) {request->avoided_paths = failed_paths_;}
     const auto required_map_stamp = request->minimum_map_stamp;
     const auto generation = generation_;
@@ -838,7 +892,7 @@ private:
       std::chrono::duration<double>(get_parameter("plan_request_timeout_sec").as_double()));
     auto future = planner_->async_send_request(
       request,
-      [this, generation, robot, required_map_stamp](
+      [this, generation, robot, required_map_stamp, preserve_alternative](
         rclcpp::Client<PlanPath>::SharedFuture response) {
         if (generation != generation_ || !pending_) {return;}
         pending_ = false;
@@ -862,12 +916,15 @@ private:
             schedule_replan("waiting_for_updated_map");return;
           }
           if (!result->reason.empty()) {
+            if (preserve_alternative && result->reason == "goal_blocked") {
+              approximate_goal_ = false;schedule_replan("alternative_goal_invalidated");return;
+            }
             if (!get_parameter("patience").as_bool()) {
               end_goal(Status::ABORTED, result->reason);
             } else {schedule_replan(result->reason);}
             return;
           }
-          if (!result->start_recovery && blocked_attempts_ >= 2 &&
+          if (!result->start_recovery && blocked_attempts_ >= 2 && !failed_paths_.empty() &&
           ++recovery_attempts_ > max_recovery_attempts_)
           {
             end_goal(Status::ABORTED, "recovery_exhausted: no_alternative_route");return;
@@ -915,13 +972,19 @@ private:
           const double endpoint_error = std::hypot(
             path.poses.back().pose.position.x - goal_.position.x,
             path.poses.back().pose.position.y - goal_.position.y);
+          const bool relocated = preserve_alternative || result->goal_relocated;
+          const bool goal_blocked = occupancy_at(*map_, goal_.position) > 0 ||
+            !motion_constraints_.uncertainty_free(goal_.position.x, goal_.position.y,
+              goal_.position.x, goal_.position.y, false) ||
+            !motion_constraints_.sampling_free(goal_.position.x, goal_.position.y,
+              goal_.position.x, goal_.position.y, false);
           if (result->start_recovery && occupancy_at(*map_, path.poses.back().pose.position) != 0) {
             schedule_replan("start_blocked");return;
           }
           if (!result->start_recovery &&
           endpoint_error > get_parameter("goal_position_tolerance_m").as_double() &&
-          (!result->goal_relocated || endpoint_error >= robot_radius_ + near_goal_extra_ ||
-          occupancy_at(*map_, goal_.position) <= 0))
+          (!relocated || endpoint_error >= robot_radius_ + near_goal_extra_ ||
+          (!preserve_alternative && !goal_blocked)))
           {
             schedule_replan("planner_changed_goal");return;
           }
@@ -929,7 +992,7 @@ private:
           if (start_recovery_ && ++start_recovery_attempts_ > max_recovery_attempts_) {
             end_goal(Status::ABORTED, "recovery_exhausted: start_blocked");return;
           }
-          approximate_goal_ = !start_recovery_ && result->goal_relocated;
+          approximate_goal_ = !start_recovery_ && relocated;
           if (!start_recovery_) {path.poses.back().pose.orientation = goal_.orientation;}
           target_goal_ = path.poses.back().pose;
           if (!start_recovery_) {planning_blocked_attempts_ = start_recovery_attempts_ = 0;}
@@ -960,6 +1023,7 @@ private:
     path_planner::msg::NavigationPath command;
     command.path = path_;
     command.mode = kind == Command::FOLLOW_PATH && path_.poses.size() == 1 ? Command::ROTATE : kind;
+    if (start_recovery_ && kind == Command::FOLLOW_PATH) {command.mode = Command::RECOVER_START;}
     if (approximate_goal_) {
       command.arrival_center = goal_.position;
       command.arrival_radius = robot_radius_ + near_goal_extra_;
@@ -976,15 +1040,22 @@ private:
   tf2_ros::TransformListener tf_listener_;
   std::string base_frame_, map_frame_, odom_frame_, motion_id_;
   State state_ = State::IDLE;
-  geometry_msgs::msg::Pose goal_, target_goal_, robot_, odom_pose_;
+  geometry_msgs::msg::Pose goal_, target_goal_, robot_;
+  path_planner::MotionObservation odometry_;
+  int control_attempts_ = 0;
+  geometry_msgs::msg::Point control_failure_position_;
   double robot_radius_, near_goal_extra_, near_goal_progress_;
   double route_projection_ = 0.0;
   bool start_recovery_ = false, approximate_goal_ = false, motion_completed_ = false;
   bool near_braking_ = false;
+  bool arrival_captured_ = false;
+  path_planner::MotionConstraints motion_constraints_;
+  geometry_msgs::msg::PoseArray uncertain_obstacles_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr uncertainty_sub_;
+  double failure_goal_distance_ = 0.0;
   int planning_blocked_attempts_ = 0;
   int start_recovery_attempts_ = 0;
-  Clock::time_point pose_received_, odom_received_, settled_since_, motion_completed_since_;
-  geometry_msgs::msg::Point failure_position_;
+  Clock::time_point pose_received_, settled_since_, motion_completed_since_;
   geometry_msgs::msg::Point avoidance_position_;
   builtin_interfaces::msg::Time minimum_map_stamp_;
   std::vector<Path> failed_paths_;

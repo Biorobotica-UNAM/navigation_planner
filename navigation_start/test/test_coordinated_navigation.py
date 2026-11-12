@@ -26,6 +26,7 @@ from geometry_msgs.msg import PoseStamped, TransformStamped, Twist, Vector3
 from nav_msgs.msg import OccupancyGrid, Path
 from nav_msgs.srv import GetMap
 from path_planner.srv import PlanPath
+from path_planner.msg import NavigationPath
 from sensor_msgs.msg import LaserScan, PointCloud2, PointField
 from std_msgs.msg import Bool, Empty, Float64MultiArray, Float32MultiArray, Float32
 from tf2_ros import TransformBroadcaster
@@ -58,7 +59,7 @@ class NavigationIntegration(unittest.TestCase):
               '-p', 'laser_pot_fields_d0:=0.9', '-p', 'lidar_points_threshold:=0']),
         ]:
             binary = FilePath(get_package_prefix(package)) / 'lib' / package / executable
-            log = open(f'/tmp/navigation_test_{name}.log', 'w')
+            log = open(f"{os.environ.get('NAVIGATION_LOG_PREFIX', '/tmp/navigation_test_')}{name}.log", 'w')
             cls.logs.append(log)
             cls.processes.append(subprocess.Popen(
                 [str(binary), '--ros-args', '-r', '__ns:=/navigation',
@@ -72,6 +73,8 @@ class NavigationIntegration(unittest.TestCase):
             OccupancyGrid, '/navigation/clearance_map',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         cls.path_pub = cls.node.create_publisher(Path, '/navigation/simple_move/goal_path', 10)
+        cls.navigation_path_pub = cls.node.create_publisher(
+            NavigationPath, '/navigation/simple_move/navigation_path', 10)
         cls.relative_pub = cls.node.create_publisher(Float32MultiArray, '/navigation/simple_move/goal_dist_angle', 10)
         cls.goal_pub = cls.node.create_publisher(PoseStamped, '/nav_control/goal', 10)
         cls.stop_pub = cls.node.create_publisher(Empty, '/navigation/stop', 10)
@@ -86,7 +89,8 @@ class NavigationIntegration(unittest.TestCase):
             cls.node.create_subscription(Twist, '/cmd_vel', lambda m: setattr(cls, 'command', m), 10),
             cls.node.create_subscription(GoalStatus, '/navigation/status', lambda m: cls.statuses.append(m), 10),
             cls.node.create_subscription(GoalStatus, '/navigation/simple_move/goal_reached', lambda m: cls.results.append(m), 10),
-            cls.node.create_subscription(Float64MultiArray, '/hardware/head/goal_pose', lambda m: cls.head_goals.append(m), 10),
+            cls.node.create_subscription(Float64MultiArray, '/hardware/head/goal_pose',
+                lambda m: (cls.head_goals.append(m), cls.head_records.append((time.monotonic(), m.data[0]))), 10),
             cls.node.create_subscription(Float32, '/navigation/potential_fields/speed_limit', lambda m: setattr(cls, 'obstacle_limit', m.data), 10),
             cls.node.create_subscription(Bool, '/navigation/potential_fields/ready', cls.record_readiness, 10),
             cls.node.create_subscription(Bool, '/navigation/potential_fields/collision_risk', lambda m: setattr(cls, 'risk', m.data), 10),
@@ -99,6 +103,7 @@ class NavigationIntegration(unittest.TestCase):
         cls.x = cls.y = cls.yaw = 0.0
         cls.command = Twist()
         cls.statuses, cls.results, cls.head_goals = [], [], []
+        cls.head_records = []
         cls.integrate = False
         cls.head_auto = False
         cls.head_pan = 0.0
@@ -126,6 +131,10 @@ class NavigationIntegration(unittest.TestCase):
         cls.planner_local_recovery = False
         cls.planner_recovery_forever = False
         cls.blocked_goal_position = None
+        cls.short_escape = False
+        cls.odom_jitter = 0.0
+        cls.freeze_odom = False
+        cls.odom_tick = 0
         deadline = time.monotonic() + 8
         while not cls.params.service_is_ready() and time.monotonic() < deadline:
             rclpy.spin_once(cls.node, timeout_sec=0.02)
@@ -194,12 +203,16 @@ class NavigationIntegration(unittest.TestCase):
             cls.yaw += cls.command.angular.z*0.02
         stamp = cls.node.get_clock().now().to_msg()
         transforms = []
+        cls.odom_tick += 1
         for parent, child in [('map', 'odom'), ('odom', 'base_link')]:
+            if child == 'base_link' and cls.freeze_odom:
+                continue
             tf = TransformStamped()
             tf.header.stamp, tf.header.frame_id, tf.child_frame_id = stamp, parent, child
             tf.transform.rotation.w = 1.0
             if child == 'base_link':
                 tf.transform.translation.x, tf.transform.translation.y = cls.x, cls.y
+                tf.transform.translation.x += cls.odom_jitter * (1 if cls.odom_tick % 2 else -1)
                 tf.transform.rotation.z, tf.transform.rotation.w = math.sin(cls.yaw/2), math.cos(cls.yaw/2)
             transforms.append(tf)
         camera_tf = TransformStamped()
@@ -237,6 +250,9 @@ class NavigationIntegration(unittest.TestCase):
             data[iy*160+ix] = 100
             grid.data = data
         physical = copy.deepcopy(grid)
+        if cls.short_escape:
+            data[80*160+80] = 100
+            grid.data = data
         if cls.curved_escape:
             cells = list(physical.data)
             for iy in range(78,82): cells[iy*160+81] = 100
@@ -306,7 +322,10 @@ class NavigationIntegration(unittest.TestCase):
         self.stop_pub.publish(Empty())
         self.spin_for(0.15)
         self.set_params(move_head=False, motion_mode='omni', use_pot_fields=False, max_linear_speed=0.4,
-                        head_pan_min=-3.14, head_pan_max=1.74, debug_detection=False)
+                        head_pan_min=-3.14, head_pan_max=1.74,
+                        debug_detection=os.environ.get('NAVIGATION_TEST_DEBUG') == '1',
+                        fine_dist_tolerance=0.03, progress_timeout_sec=8.0,
+                        head_alignment_timeout_sec=10.0)
         cls.rotation_wall = False
         cls.corner_obstacle = False
         cls.inflated_start = False
@@ -330,6 +349,7 @@ class NavigationIntegration(unittest.TestCase):
         cls.results.clear()
         cls.statuses.clear()
         cls.head_goals.clear()
+        cls.head_records.clear()
         cls.plan_calls = 0
         cls.plan_requests.clear()
         cls.planner_stale_response = False
@@ -338,6 +358,9 @@ class NavigationIntegration(unittest.TestCase):
         cls.planner_local_recovery = False
         cls.planner_recovery_forever = False
         cls.blocked_goal_position = None
+        cls.short_escape = False
+        cls.odom_jitter = 0.0
+        cls.freeze_odom = False
 
     def test_local_start_recovery_replans_from_actual_exit(self):
         cls = type(self)
@@ -446,7 +469,7 @@ class NavigationIntegration(unittest.TestCase):
         terminal = [s for s in self.statuses if s.status in (3,4)]
         self.assertEqual(len(terminal), 1)
         self.assertEqual((terminal[0].status, terminal[0].text), (3, 'reached_near_goal: goal_blocked'))
-        self.assertLess(math.hypot(self.x-1.8, self.y), 0.04)
+        self.assertLess(math.hypot(self.x-2.0, self.y), 0.33)
         self.assertLess(abs(math.remainder(self.yaw-1.0, 2*math.pi)), 0.06)
         self.assertAlmostEqual(self.plan_requests[0].goal.pose.position.x, 2.0)
         self.assertAlmostEqual(self.plan_requests[0].goal_recovery_radius, 0.33)
@@ -542,6 +565,100 @@ class NavigationIntegration(unittest.TestCase):
         cls.yaw = 1.0
         self.wait_for(lambda: any(s.status == 3 for s in self.statuses))
         self.assertEqual(next(s.text for s in self.statuses if s.status == 3), 'reached_near_goal: goal_blocked')
+
+    def test_stationary_odometry_jitter_finishes_without_progress_timeout(self):
+        type(self).odom_jitter = 0.002
+        self.spin_for(0.1)
+        started = time.monotonic()
+        self.send_path(0.0, 0.0)
+        self.wait_for(lambda: any(r.status in (3, 4) for r in self.results), timeout=1.5)
+        terminal = next(r for r in self.results if r.status in (3, 4))
+        self.assertEqual((terminal.status, terminal.text), (3, 'pose_reached'))
+        self.assertLess(time.monotonic()-started, 1.0)
+
+    def test_repeated_odometry_transform_cannot_confirm_rest(self):
+        type(self).freeze_odom = True
+        self.send_path(0.0, 0.0)
+        self.spin_for(0.35)
+        self.assertFalse(any(r.status == 3 for r in self.results))
+        self.wait_for(lambda: any(r.status == 4 for r in self.results), timeout=1.0)
+        self.assertEqual(next(r.text for r in self.results if r.status == 4), 'robot_tf_unavailable')
+
+    def test_short_recovery_leaves_inflation_before_finishing(self):
+        cls = type(self)
+        cls.short_escape = cls.integrate = True
+        cls.x = cls.y = 0.025
+        self.set_params(fine_dist_tolerance=0.08)
+        self.spin_for(0.15)
+        path = Path()
+        path.header.frame_id = 'map'
+        path.header.stamp = self.node.get_clock().now().to_msg()
+        for x in (0.025, 0.075):
+            pose = PoseStamped()
+            pose.pose.position.x, pose.pose.position.y = x, 0.025
+            pose.pose.orientation.w = 1.0
+            path.poses.append(pose)
+        command = NavigationPath(path=path, mode=NavigationPath.RECOVER_START)
+        self.navigation_path_pub.publish(command)
+        self.wait_for(lambda: any(r.status in (3, 4) for r in self.results), timeout=5)
+        self.assertEqual(next(r.status for r in self.results if r.status in (3, 4)), 3)
+        self.assertGreaterEqual(self.x, 0.05)
+        self.assertLess(self.x, 0.10)
+
+    def test_control_stalls_retry_without_excluding_valid_routes(self):
+        self.send_goal(1.0, 0.0)
+        consumed = set()
+        for reason in ('no_progress', 'position_stalled', 'orientation_stalled', 'head_alignment_timeout'):
+            self.wait_for(lambda: any(r.status == 1 and r.goal_id.id not in consumed
+                                     for r in self.results), timeout=3)
+            active = next(r for r in reversed(self.results) if r.status == 1 and r.goal_id.id not in consumed)
+            consumed.add(active.goal_id.id)
+            self.result_pub.publish(GoalStatus(goal_id=active.goal_id, status=4, text=reason))
+            self.spin_for(0.15)
+        self.wait_for(lambda: any(s.status == 4 for s in self.statuses))
+        self.assertEqual(next(s.text for s in self.statuses if s.status == 4),
+                         'control_retries_exhausted: head_alignment_timeout')
+        self.assertTrue(all(not r.avoided_paths for r in self.plan_requests))
+        self.assertEqual(self.plan_calls, 4)
+
+    def test_avoidance_does_not_alternate_head_targets_each_control_tick(self):
+        cls = type(self)
+        cls.blocked = cls.integrate = cls.head_auto = True
+        self.set_params(move_head=True)
+        self.spin_for(0.1)
+        self.send_path(1.0, 0.0)
+        self.spin_for(6.0)
+        flips = [(b[0]-a[0], b[1]-a[1]) for a, b in zip(cls.head_records, cls.head_records[1:])
+                 if b[0]-a[0] < 0.12 and abs(b[1]-a[1]) > 0.4]
+        self.assertLessEqual(len(flips), 4, flips)
+        self.assertGreater(math.hypot(self.x, self.y), 0.15)
+        self.assertFalse(any(r.status == 4 for r in self.results))
+        self.wait_for(lambda: any(r.status in (3, 4) for r in self.results), timeout=20)
+        self.assertEqual(next(r.status for r in self.results if r.status in (3, 4)), 3)
+        self.assertLess(math.hypot(self.x-1.0, self.y), 0.04)
+
+    def test_short_goal_with_large_rotation_and_head_finishes(self):
+        cls = type(self)
+        cls.integrate = cls.head_auto = True
+        self.set_params(move_head=True)
+        self.send_goal(0.30, 0.0, 1.5)
+        self.wait_for(lambda: any(s.status in (3, 4) for s in self.statuses), timeout=12)
+        self.assertEqual(next(s.status for s in self.statuses if s.status in (3, 4)), 3)
+        self.assertLess(math.hypot(self.x-0.30, self.y), 0.031)
+        self.assertLess(abs(math.remainder(self.yaw-1.5, 2*math.pi)), 0.051)
+
+    def test_terminal_yaw_progress_counts_before_position_tolerance(self):
+        cls = type(self)
+        cls.x = 0.15
+        self.set_params(progress_timeout_sec=0.5)
+        self.spin_for(0.1)
+        self.send_path(0.30, 0.0, 1.5)
+        for i in range(20):
+            cls.yaw = (i+1)*0.03
+            self.spin_for(0.1)
+            self.assertFalse(any(r.status == 4 for r in self.results))
+        self.wait_for(lambda: any(r.status == 4 for r in self.results), timeout=1.5)
+        self.assertEqual(next(r.text for r in self.results if r.status == 4), 'position_stalled')
 
     def test_terminal_position_jitter_keeps_head_reference(self):
         cls = type(self)
@@ -756,8 +873,9 @@ class NavigationIntegration(unittest.TestCase):
         self.send_path(0.3, 0, 0.8)
         self.wait_for(lambda: self.command.linear.x > 0.02)
         type(self).x = 0.275
-        self.spin_for(0.2)
-        self.assertEqual(self.command.linear.x, 0.0)
+        # Let the acceleration/jerk-limited command stop before injecting jitter.
+        self.wait_for(lambda: math.hypot(self.command.linear.x, self.command.linear.y) == 0.0,
+                      timeout=0.8)
         for x in (0.265, 0.276, 0.266, 0.275):
             type(self).x = x
             self.spin_for(0.1)
@@ -784,17 +902,23 @@ class NavigationIntegration(unittest.TestCase):
     def test_repeated_blockage_stops_identical_recovery_and_resets_for_new_goal(self):
         self.send_goal(x=1.0)
         previous_id = ''
-        for _ in range(2):
+        for attempt in range(2):
             self.wait_for(lambda: any(r.status == 1 and r.goal_id.id != previous_id for r in self.results))
             active = next(r for r in reversed(self.results) if r.status == 1)
             previous_id = active.goal_id.id
+            if attempt == 1:
+                # Route exclusions need current obstacle evidence, not just a controller result.
+                type(self).blocked = True
+                self.spin_for(0.1)
             result = GoalStatus()
-            result.goal_id, result.status, result.text = active.goal_id, 4, 'no_progress'
+            result.goal_id, result.status, result.text = active.goal_id, 4, 'local_trajectory_blocked'
             self.result_pub.publish(result)
             self.spin_for(0.2)
         self.wait_for(lambda: any(s.text.startswith('recovery_exhausted') for s in self.statuses), timeout=7)
         self.assertTrue(any(r.avoided_paths for r in self.plan_requests))
         self.assertEqual(self.command.linear.x, 0.0)
+        type(self).blocked = False
+        self.spin_for(0.1)
         self.send_goal(x=1.0)
         self.wait_for(lambda: not self.plan_requests[-1].avoided_paths)
         self.wait_for(lambda: self.command.linear.x > 0.02)

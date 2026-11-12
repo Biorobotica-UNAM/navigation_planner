@@ -38,6 +38,7 @@ class PathPlannerNode : public rclcpp::Node
         Grid map;
         Grid costs;
         Grid clearance;
+        geometry_msgs::msg::PoseArray uncertain_obstacles;
         uint64_t revision;
         SteadyClock::time_point received;
     };
@@ -284,7 +285,8 @@ private:
                         auto response = future.get();
                         if (!response->ready || response->clearance.data.empty()) return;
                         storeSnapshot(index, std::move(response->map), std::move(response->costs),
-                            std::move(response->clearance), response->revision);
+                            std::move(response->clearance), response->revision,
+                            std::move(response->uncertain_obstacles));
                     }
                     catch (const std::exception& error) {RCLCPP_WARN(get_logger(), "Snapshot response failed: %s", error.what());}
                 });
@@ -374,7 +376,8 @@ private:
         }
     }
 
-    bool storeSnapshot(size_t index, Grid map, Grid costs, Grid clearance, uint64_t revision)
+    bool storeSnapshot(size_t index, Grid map, Grid costs, Grid clearance, uint64_t revision,
+        geometry_msgs::msg::PoseArray uncertain = geometry_msgs::msg::PoseArray())
     {
         const auto coherent = [&map](const Grid& layer) {
             return layer.header == map.header && layer.info == map.info && layer.data.size() == map.data.size();
@@ -388,8 +391,11 @@ private:
                 "Map/cost snapshot mismatch; retaining the previous snapshot %zu.",index);
             return false;
         }
+        if (!uncertain.header.frame_id.empty() && uncertain.header.frame_id != map.header.frame_id) return false;
+        for (const auto& pose : uncertain.poses)
+            if (!std::isfinite(pose.position.x) || !std::isfinite(pose.position.y)) return false;
         auto next = std::make_shared<const MapPair>(MapPair{
-            std::move(map),std::move(costs),std::move(clearance),revision,SteadyClock::now()});
+            std::move(map),std::move(costs),std::move(clearance),std::move(uncertain),revision,SteadyClock::now()});
         std::lock_guard<std::mutex> lock(snapshots_mutex_);
         snapshots_[index].swap(next);
         return true;
@@ -499,9 +505,25 @@ private:
                 x >= grid.info.width || y >= grid.info.height) return -1;
             return int(grid.data[static_cast<size_t>(y) * grid.info.width + static_cast<size_t>(x)]);
         };
-        const bool recover_start = cell(request->start.pose.position) > 0 && clearance;
-        // Goal alternatives are considered only when the requested cell is blocked.
-        if (cell(request->goal.pose.position) > 0 && request->goal_recovery_radius > 0.0)
+        path_planner::MotionConstraints constraints;
+        constraints.update(clearance ? *clearance : grid, snapshot->uncertain_obstacles,
+            get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m,
+            options.allow_unknown);
+        options.motion_constraints = &constraints;
+        const auto& start = request->start.pose.position;
+        const auto& goal = request->goal.pose.position;
+        const bool recover_start = clearance && (cell(start) > 0 ||
+            !constraints.uncertainty_free(start.x, start.y, start.x, start.y, false));
+        if (!recover_start) {
+            constraints.update(grid, snapshot->uncertain_obstacles,
+                get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m,
+                options.allow_unknown);
+        }
+        const bool goal_blocked = cell(goal) > 0 ||
+            !constraints.uncertainty_free(goal.x, goal.y, goal.x, goal.y, false) ||
+            !constraints.sampling_free(goal.x, goal.y, goal.x, goal.y, false);
+        // Relocation also applies to uncertainty and interpolation guards.
+        if (goal_blocked && request->goal_recovery_radius > 0.0)
             options.goal_tolerance_m = std::nextafter(request->goal_recovery_radius, 0.0);
         auto result = recover_start ? PathPlanner::RecoverStart(grid, *clearance, request->start.pose, options) :
             PathPlanner::Plan(grid, snapshot->costs, request->start.pose, request->goal.pose,
@@ -517,7 +539,7 @@ private:
             response->reason = result.status == PlanStatus::NoSmoothPath ? "no_smooth_path" :
                 result.status == PlanStatus::StartBlocked ? "start_blocked" :
                 result.status == PlanStatus::GoalBlocked ||
-                (result.status == PlanStatus::NoPath && cell(request->goal.pose.position) > 0) ? "goal_blocked" : "no_path";
+                (result.status == PlanStatus::NoPath && goal_blocked) ? "goal_blocked" : "no_path";
             RCLCPP_WARN(get_logger(), "Navigation planning failed: %s (status=%d, detail=%s)",
                         response->reason.c_str(), static_cast<int>(result.status), result.detail.c_str());
             return;
@@ -546,6 +568,12 @@ private:
         }
         auto options = readOptions();
         options.goal_tolerance_m = request->tolerance;
+        path_planner::MotionConstraints constraints;
+        constraints.update(snapshot->map,
+            snapshot->uncertain_obstacles,
+            get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m,
+            options.allow_unknown);
+        options.motion_constraints = &constraints;
         auto result = PathPlanner::Plan(snapshot->map, snapshot->costs,
                                         request->start.pose, request->goal.pose, options);
         if (result.status != PlanStatus::Success)
@@ -590,7 +618,13 @@ private:
             }
             via_points.push_back(waypoint.pose);
         }
-        const auto options = readOptions();
+        auto options = readOptions();
+        path_planner::MotionConstraints constraints;
+        constraints.update(snapshot->map,
+            snapshot->uncertain_obstacles,
+            get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m,
+            options.allow_unknown);
+        options.motion_constraints = &constraints;
         auto result = PathPlanner::Plan(snapshot->map, snapshot->costs,
             request->start.pose, request->goal.pose, options, via_points);
         if (result.status != PlanStatus::Success)

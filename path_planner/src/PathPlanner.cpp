@@ -145,7 +145,8 @@ double pathCost(const Path& path, const Grid& costs, int* peak = nullptr)
     return total;
 }
 
-bool validatePathSegments(const Path& path, const Grid& map, bool allow_unknown)
+bool validatePathSegments(const Path& path, const Grid& map, bool allow_unknown,
+    const path_planner::MotionConstraints* constraints = nullptr)
 {
     if (path.poses.empty() || path.header.frame_id != map.header.frame_id)
         return false;
@@ -157,6 +158,11 @@ bool validatePathSegments(const Path& path, const Grid& map, bool allow_unknown)
             return value == 0 || (value == -1 && allow_unknown);
         };
         const auto& point = path.poses[i].pose.position;
+        if (constraints) {
+            const auto& from = path.poses[i == 0 ? 0 : i - 1].pose.position;
+            if (!constraints->uncertainty_free(from.x, from.y, point.x, point.y) ||
+                !constraints->sampling_free(from.x, from.y, point.x, point.y)) return false;
+        }
         int end_x, end_y;
         if (!geometry.worldToCell(point.x, point.y, end_x, end_y))
             return false;
@@ -330,7 +336,7 @@ PlanResult planSegments(
                     int link_peak = 0, reference_peak = 0;
                     const double link_cost = pathCost(link, *working_costs, &link_peak);
                     const double reference_cost = pathCost(reference, *working_costs, &reference_peak);
-                    if (validatePathSegments(link, map, options.allow_unknown) &&
+                    if (validatePathSegments(link, map, options.allow_unknown, options.motion_constraints) &&
                         link_cost <= 1.10 * reference_cost && link_peak <= reference_peak + 2)
                     {
                         next = to;
@@ -362,8 +368,8 @@ PlanResult planSegments(
             std::string rejection;
             smoothed = PathPlanner::SmoothPath(sampled, static_cast<float>(data_weight),
                 static_cast<float>(options.smooth_beta), static_cast<float>(options.smooth_tolerance),
-                &map, options.allow_unknown, working_costs, &rejection);
-            if (validatePathSegments(smoothed, map, options.allow_unknown) &&
+                &map, options.allow_unknown, working_costs, &rejection, options.motion_constraints);
+            if (validatePathSegments(smoothed, map, options.allow_unknown, options.motion_constraints) &&
                 (!options.require_smooth_path || PathPlanner::IsSmooth(smoothed,
                     options.max_path_curvature, options.max_path_heading_step)))
             {
@@ -436,14 +442,19 @@ bool PathPlanner::AStar(
         const size_t goal = static_cast<size_t>(goal_y) * geometry.width + goal_x;
         const int8_t start_value = map.data[start];
         const int8_t goal_value = map.data[goal];
+        const auto* constraints = options.motion_constraints;
+        const bool goal_blocked = (goal_value != 0 && !(goal_value == -1 && options.allow_unknown)) ||
+            (constraints && (!constraints->uncertainty_free(goal_pose.position.x, goal_pose.position.y,
+                goal_pose.position.x, goal_pose.position.y, false) ||
+                !constraints->sampling_free(goal_pose.position.x, goal_pose.position.y,
+                goal_pose.position.x, goal_pose.position.y, false)));
         if (start_value != 0 && !(start_value == -1 && options.allow_unknown))
         {
             if (status)
                 *status = PlanStatus::StartBlocked;
             return false;
         }
-        if (goal_value != 0 && !(goal_value == -1 && options.allow_unknown) &&
-            options.goal_tolerance_m == 0.0)
+        if (goal_blocked && options.goal_tolerance_m == 0.0)
         {
             if (status)
                 *status = PlanStatus::GoalBlocked;
@@ -488,20 +499,27 @@ bool PathPlanner::AStar(
                 const double start_distance = std::hypot(
                     start_pose.position.x - goal_pose.position.x,
                     start_pose.position.y - goal_pose.position.y);
-                if (start_distance <= distance)
+                if (start_distance <= distance && (!constraints ||
+                    (constraints->uncertainty_free(start_pose.position.x, start_pose.position.y,
+                        start_pose.position.x, start_pose.position.y, false) &&
+                     constraints->sampling_free(start_pose.position.x, start_pose.position.y,
+                        start_pose.position.x, start_pose.position.y, false))))
                 {
                     distance = start_distance;
                     use_start_pose = true;
                 }
             }
-            if (distance < closest_distance ||
-                (distance == closest_distance && nodes[index].g < nodes[closest].g))
+            const bool endpoint_safe = !constraints ||
+                (constraints->uncertainty_free(point.x, point.y, point.x, point.y, false) &&
+                 constraints->sampling_free(point.x, point.y, point.x, point.y, false));
+            if (endpoint_safe && (distance < closest_distance ||
+                (distance == closest_distance && nodes[index].g < nodes[closest].g)))
             {
                 closest = index;
                 closest_distance = distance;
                 closest_is_start_pose = use_start_pose;
             }
-            if (index == goal)
+            if (index == goal && !goal_blocked)
             {
                 endpoint = index;
                 break;
@@ -528,6 +546,12 @@ bool PathPlanner::AStar(
                         if ((side_x != 0 && !(side_x == -1 && options.allow_unknown)) ||
                             (side_y != 0 && !(side_y == -1 && options.allow_unknown)))
                             continue;
+                    }
+                    if (constraints) {
+                        const auto& from = index == start ? start_pose.position : point;
+                        const auto to = next == goal && !goal_blocked ? goal_pose.position : geometry.cellCenter(nx, ny);
+                        if (!constraints->uncertainty_free(from.x, from.y, to.x, to.y) ||
+                            !constraints->sampling_free(from.x, from.y, to.x, to.y)) continue;
                     }
                     const double step = dx != 0 && dy != 0 ? std::sqrt(2.0) : 1.0;
                     const double extra_cost = occupancy == -1 ? options.unknown_cost :
@@ -574,7 +598,7 @@ bool PathPlanner::AStar(
             result_path.poses.push_back(pose);
         }
         result_path.poses.front().pose = start_pose;
-        if (endpoint == goal)
+        if (endpoint == goal && !goal_blocked)
         {
             if (cells.size() == 1 &&
                 std::hypot(goal_pose.position.x - start_pose.position.x,
@@ -591,6 +615,11 @@ bool PathPlanner::AStar(
         }
         result_path.poses.back().pose.orientation = goal_pose.orientation;
         finishPath(result_path);
+        if (constraints && !validatePathSegments(result_path, map, options.allow_unknown, constraints)) {
+            result_path.poses.clear();
+            if (status) *status = PlanStatus::NoPath;
+            return false;
+        }
         if (status)
             *status = PlanStatus::Success;
         return true;
@@ -603,7 +632,8 @@ bool PathPlanner::AStar(
 
 Path PathPlanner::SmoothPath(
     const Path& path, float weight_data, float weight_smooth, float tolerance,
-    const Grid* collision_map, bool allow_unknown, const Grid* cost_map, std::string* rejection)
+    const Grid* collision_map, bool allow_unknown, const Grid* cost_map, std::string* rejection,
+    const path_planner::MotionConstraints* constraints)
 {
     Path result = path;
     if (rejection) rejection->clear();
@@ -647,7 +677,7 @@ Path PathPlanner::SmoothPath(
                     for (int trial = 0; trial < 8; ++trial)
                     {
                         local.poses = {result.poses[i - 1], result.poses[i], result.poses[i + 1]};
-                        if (validatePathSegments(local, *collision_map, allow_unknown))
+                        if (validatePathSegments(local, *collision_map, allow_unknown, constraints))
                             break;
                         point.x = 0.5 * (point.x + old.x);
                         point.y = 0.5 * (point.y + old.y);
@@ -665,7 +695,7 @@ Path PathPlanner::SmoothPath(
                 break;
         }
     }
-    if (collision_map && !validatePathSegments(result, *collision_map, allow_unknown))
+    if (collision_map && !validatePathSegments(result, *collision_map, allow_unknown, constraints))
     {
         if (rejection) *rejection = "smoothing_intersects_obstacle";
         result = path;
@@ -794,7 +824,11 @@ PlanResult PathPlanner::RecoverStart(
             const auto [distance, index] = open.top();open.pop();
             if (distance != distances[index]) continue;
             const int x = xmin + index % width, y = ymin + index / width;
-            if (map.data[static_cast<size_t>(y) * geometry.width + x] == 0)
+            const auto from = index == start ? start_pose.position : geometry.cellCenter(x, y);
+            if (map.data[static_cast<size_t>(y) * geometry.width + x] == 0 &&
+                (!options.motion_constraints ||
+                 (options.motion_constraints->uncertainty_free(from.x, from.y, from.x, from.y, false) &&
+                  options.motion_constraints->sampling_free(from.x, from.y, from.x, from.y, false))))
             {
                 endpoint = index;
                 break;
@@ -811,6 +845,9 @@ PlanResult PathPlanner::RecoverStart(
                     if (std::hypot(p.x - start_pose.position.x, p.y - start_pose.position.y) > radius) continue;
                     if (dx && dy && (clearance.data[static_cast<size_t>(y) * geometry.width + nx] != 0 ||
                                     clearance.data[static_cast<size_t>(ny) * geometry.width + x] != 0)) continue;
+                    if (options.motion_constraints &&
+                        (!options.motion_constraints->uncertainty_free(from.x, from.y, p.x, p.y) ||
+                         !options.motion_constraints->sampling_free(from.x, from.y, p.x, p.y))) continue;
                     const double candidate = distance + (index == start ?
                         std::hypot(p.x-start_pose.position.x, p.y-start_pose.position.y) :
                         geometry.resolution * (dx && dy ? std::sqrt(2.0) : 1.0));
@@ -836,7 +873,7 @@ PlanResult PathPlanner::RecoverStart(
         }
         std::reverse(prefix.poses.begin(), prefix.poses.end());
         prefix.poses.front().pose = start_pose;
-        if (!validatePathSegments(prefix, clearance, false)) return result;
+        if (!validatePathSegments(prefix, clearance, false, options.motion_constraints)) return result;
         result.path.header = map.header;
         result.path.poses.push_back(prefix.poses.front());
         for (size_t from = 0; from + 1 < prefix.poses.size();)
@@ -845,7 +882,7 @@ PlanResult PathPlanner::RecoverStart(
             for (size_t to = prefix.poses.size() - 1; to > from + 1; --to)
             {
                 Path link;link.header = map.header;link.poses = {prefix.poses[from], prefix.poses[to]};
-                if (validatePathSegments(link, clearance, false)) {next = to;break;}
+                if (validatePathSegments(link, clearance, false, options.motion_constraints)) {next = to;break;}
             }
             result.path.poses.push_back(prefix.poses[next]);from = next;
         }
