@@ -59,7 +59,9 @@ public:
         const nav_msgs::msg::OccupancyGrid& map,
         const nav_msgs::msg::OccupancyGrid& clearance_map,
         const geometry_msgs::msg::Pose& start_pose,
-        const PlanOptions& options = {});
+        const PlanOptions& options = {},
+        const geometry_msgs::msg::Pose* goal_pose = nullptr,
+        const path_planner::MotionConstraints* continuation_constraints = nullptr);
 
     // The original six-argument call remains valid through default arguments.
     static bool AStar(

@@ -40,6 +40,7 @@ find_package(rcl_interfaces REQUIRED)
 add_executable(simple_move_node
   src/simple_move_node.cpp
 )
+target_include_directories(simple_move_node PRIVATE include)
 
 ament_target_dependencies(simple_move_node
   rclcpp
@@ -65,4 +66,10 @@ install(TARGETS simple_move_node
 # =====================
 # Ament Package
 # =====================
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_tracking_reference test/test_tracking_reference.cpp)
+  target_include_directories(test_tracking_reference PRIVATE include)
+endif()
+
 ament_package()

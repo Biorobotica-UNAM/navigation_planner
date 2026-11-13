@@ -74,6 +74,57 @@ ruta corta. El frenado vuelve a comprobar posición, margen y reposo antes de gi
 
 ## Configuración y cambios durante ejecución
 
+### Blockage recovery and observation
+
+The coordinator accounts for head/sensor observation and executable maneuver time
+separately. Changing controller phase does not charge past head waits to the
+maneuver budget. Budgets survive replans; a bounded retry grants another maneuver
+allowance without erasing elapsed time. Odometry displacement or a continuously
+free route closes the blockage episode. Head observation time and the total
+episode remain bounded, and observation failures do not exclude geometric routes.
+
+Repeated planning failures compare departure/arrival occupancy neighborhoods and
+quantized nearby uncertainty, independently of map timestamps. After
+`max_recovery_attempts` equivalent failures, an internal `NavigationPath::OBSERVE`
+command requests a stationary head observation. Only `simple_move` publishes head
+goals. The last path position is the observation target; the command never moves
+the base and never completes the navigation goal. Alignment, fresh sensor readiness
+and observed base rest must persist before replanning against an updated map.
+Observation attempts are bounded, including when head motion is disabled or its
+target is outside the mechanical range. `planning_recovery_timeout_sec` (30 s)
+also bounds changing failure contexts until actual odometry progress is observed.
+
+`start_recovery_search_radius` (0.60 m) controls the local search independently of
+the physical footprint; `escape_clear_radius` still bounds path length. Recovery
+computes the goal's reachable planning component once and skips disconnected
+exits. Physical clearance and uncertainty guards remain active. `PlanPath` failure
+responses include `detail` and an optional observation target. A failure to find an
+exit reports physical, uncertainty, sampling and connectivity rejection counts.
+
+Omnidirectional `RECOVER_START` retains a feasible yaw reference, changes it only
+as needed for head limits and does not restore an unnecessary terminal heading.
+It still requires a stable free exit, fresh coherent maps/sensors and observed
+rest. Translation is limited by `start_escape_speed`. Normal goals keep their
+requested terminal orientation. Candidate scores include estimated head alignment
+time using measured pan velocity and `head_max_pan_acceleration` (2.5 rad/s²).
+Measured head lag and the required tracking rate reduce translation through the
+existing acceleration/jerk profile before the hard alignment gate is reached.
+The tracking rate comes from the bounded odometry-frame direction reference and
+observed base rotation, rather than a derivative of raw target angles.
+
+Smoothing backtracks each update against collision and soft-cost constraints.
+The three-point work buffer is reused, and integrated cost changes are updated
+locally. Cost peaks include vertices as well as segment samples; final validation
+and the strict path-quality requirement remain enabled.
+When an already blocked goal is relocated, a sharp terminal hook may be removed
+only by ending at a validated smooth prefix inside the same permitted arrival
+region. The requested final orientation is retained. Free exact goals cannot be
+shortened this way.
+An otherwise free goal affected only by the interpolation guard uses the normal
+position tolerance as its relocation and arrival radius. It cannot trigger an
+early stop at the larger blocked-goal radius. The radius remains attached to the
+chosen alternative through replanning, braking and final orientation.
+
 El launch expone `motion_mode:=omni` y `move_head:=true` por defecto.
 Con el namespace predeterminado:
 
@@ -119,7 +170,9 @@ antes de que entren en el lookahead para frenar con aceleración y jerk acotados
 conservando velocidad en rectas libres. Se mantienen las comprobaciones de sensores, mapa y parada crítica.
 
 Si el segmento hacia el lookahead corta una esquina ocupada, se acorta la
-anticipación hasta encontrar un conector libre. En modo omnidireccional, el giro
+anticipación hasta `lookahead_min_m`; si no hay conector libre, se utiliza la
+evasión local. El destino y el final de una salida de inflación pueden quedar
+más cerca que ese mínimo. En modo omnidireccional, el giro
 de base no impone un arco diferencial a la traslación ni a su frenado previsto:
 se conserva la dirección de movimiento en odometría. La curvatura de la ruta
 sigue limitando la velocidad antes de las curvas.
@@ -130,8 +183,8 @@ hacia el destino, la fase de captura sigue directamente el error de posición.
 Se reserva tiempo para corregir el ángulo antes de consumir la distancia restante;
 `angular_damping` amortigua el giro y el éxito espera una velocidad angular baja.
 El límite del ajuste angular terminal es 0.65 rad/s. En traslados omnidireccionales
-cortos (hasta 1 m), si el ángulo final ya coincide con el inicial dentro de 0.20 rad,
-se conserva esa referencia y se evita girar hacia la tangente y luego regresar.
+cortos (hasta 1 m), se interpola directamente desde el ángulo inicial al final,
+evitando girar hacia la tangente y luego regresar.
 La base aporta el giro mínimo si la cabeza no alcanza la dirección de avance.
 La referencia angular mantiene el tramo mecánico conectado con el pan actual;
 no elige un ángulo equivalente que exija cruzar el sector prohibido del cuello.
@@ -140,6 +193,22 @@ giro anticipada del perfil original para no volver a empujar fuera del límite.
 Si el ángulo final es incompatible con los límites de cabeza durante la traslación,
 se mantiene una orientación factible y se completa el giro al detenerse en destino.
 La corrección angular conserva siempre las coordenadas originales del goal.
+
+La dirección de traslación omnidireccional se filtra en `odom`, con
+`direction_filter_time_sec=0.15` y `direction_max_rate_rad_sec=1.2`. Las correcciones
+de localización en `map` no se convierten directamente en saltos de cabeza. El
+filtro conserva el módulo de velocidad y comprueba la trayectoria resultante;
+si no es libre, se conserva la dirección original comprobada por el controlador.
+El comando limitado sigue pasando la comprobación final de colisión.
+La reducción de velocidad usa el error medido de cabeza y su capacidad de seguir
+la dirección filtrada mientras gira la base. Una variación aislada del objetivo
+ya no predice un error grande que anule el avance con la cabeza alineada.
+`MotionDiagnostic` añade `raw_direction`, `direction_rate` y `head_scale`;
+`head_gate=slowing` identifica explícitamente una reducción por cabeza. El veto
+inmediato por feedback vencido, límites mecánicos o error real excesivo se conserva.
+Durante captura, si el corredor completo hasta el destino y el comando nominal
+son libres, no hay obstrucción de ruta y la cabeza está lista, se libera el
+desvío anterior para que la evasión no arrastre al robot más allá del destino.
 
 La proyección sobre segmentos y la anticipación se miden en metros. El 10 %
 inicial es una preferencia adaptable: se amplía según el giro, la velocidad y
@@ -382,10 +451,11 @@ La recuperación no borra celdas. El aumentador publica `/navigation/clearance_m
 con la huella física sin el margen de planificación, incluyendo los obstáculos
 dinámicos y las zonas prohibidas. Si el robot está dentro del margen pero libre
 en esa capa, una búsqueda local encuentra la salida permitida más cercana
-alcanzable. La máscara tiene radio `robot_radius + start_recovery_margin`
-(5 cm adicionales) y está ligada a la pose inicial de esa recuperación. Usa
-memoria proporcional a la ventana local y consulta los mapas existentes sin
-copiarlos. Puede rodear obstáculos físicos dentro de esa ventana; las diagonales
+alcanzable. The search radius is `start_recovery_search_radius` (0.60 m),
+independent of `robot_radius`; `start_recovery_margin` remains accepted for legacy
+launch compatibility. Local search memory scales with the recovery window. When
+a destination is supplied, one additional planning-grid component marks connected
+exits; no global search is repeated per candidate. Puede rodear obstáculos físicos dentro de esa ventana; las diagonales
 comprueban las celdas laterales y todos los conectores se validan físicamente.
 
 El servicio devuelve primero sólo la recuperación, con `start_recovery=true`.
@@ -620,28 +690,22 @@ cabeza; se evita un giro grande innecesario al cruzar +/-pi.
 umbral de parada y la velocidad de pan. No se amplió `sensor_timeout_sec` para
 ocultar pérdida de nube.
 
-## Validación
+## Validation
 
-En esta revisión pasaron 121 casos: 31 C++, 70 de controlador y coordinación,
-9 de coherencia de mapas y 11 escenarios con `maps/lab_2026` y
-`prohibition_maps/lab_2026`. Se compilaron `path_planner`, `map_augmenter`,
-`simple_move` y `mvn_pln` en una instalación aislada en `/tmp`. Las pruebas ROS
-usaron dominios distintos en localhost, con base, cabeza y sensores simulados.
+The recovery regression coverage includes 35 C++ cases, 18 laboratory integration
+scenarios, and eight focused existing coordinator regressions. The laboratory
+fixture loads `maps/lab_2026` and `prohibition_maps/lab_2026` from this repository;
+it simulates odometry, head feedback and laser observations without hardware.
 
-Los casos nuevos comprueban incertidumbre en A* y suavizado, salida sin reducir
-separación, liberación de un corredor, llegada dentro de la región segura y
-espera de cabeza posterior a un rechazo geométrico. La búsqueda espacial se
-contrastó con una búsqueda exhaustiva en 3000 segmentos y 500 puntos sobre una
-geometría de mapa rotada. Un goal a 4 mm del borde de una celda inflada se rechaza
-si exige pose exacta y se resuelve sin exceder los 8 cm cuando solicita esa
-tolerancia explícitamente.
+The added cases cover the logged goals 1 and 6, head waits longer than the normal
+maneuver allowance, stationary observation, bounded unreachable-goal recovery,
+short escapes without restoring an unnecessary heading, expansion beyond the
+initial footprint-sized window, goal connectivity, and escape from the planning
+sampling guard. Existing collision, cost, uncertainty and strict path-quality
+regressions remain part of the C++ suite.
 
-El recorrido largo de esquina alcanzó 0.900 m/s con separación mínima simulada
-de 0.279 m. Las pruebas de nube VGA mantuvieron un intervalo máximo de monitor
-de aproximadamente 0.030 s con publicadores best-effort y reliable. Estas
-mediciones corresponden a la simulación local, no a la dinámica física del robot.
-
-`GetPlanningSnapshot` incorpora un campo nuevo de incertidumbre. Para cargar
-los cambios hay que recompilar juntos los cuatro paquetes y volver a lanzar
-navegación. No se reinició el stack del robot ni se enviaron comandos al hardware;
-la validación física queda pendiente.
+`PlanPath` now includes diagnostic fields and `NavigationPath` includes the
+`OBSERVE` mode. Rebuild `path_planner`, `simple_move` and `mvn_pln` together and
+restart navigation to load the new interfaces and executables. ROS integration
+tests require isolated localhost domains. Physical validation with the robot's
+actual sensor streams and actuator dynamics remains pending.

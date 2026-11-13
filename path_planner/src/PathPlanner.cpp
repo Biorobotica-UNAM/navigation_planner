@@ -123,7 +123,17 @@ double pathCost(const Path& path, const Grid& costs, int* peak = nullptr)
 {
     const GridGeometry geometry(costs);
     double total = 0.0;
-    if (peak) *peak = 0;
+    if (peak)
+    {
+        *peak = 0;
+        for (const auto& pose : path.poses)
+        {
+            int x, y;
+            if (!geometry.worldToCell(pose.pose.position.x, pose.pose.position.y, x, y))
+                return std::numeric_limits<double>::infinity();
+            *peak = std::max(*peak, static_cast<int>(costs.data[static_cast<size_t>(y) * geometry.width + x]));
+        }
+    }
     for (size_t i = 1; i < path.poses.size(); ++i)
     {
         const auto& a = path.poses[i - 1].pose.position;
@@ -369,12 +379,30 @@ PlanResult planSegments(
             smoothed = PathPlanner::SmoothPath(sampled, static_cast<float>(data_weight),
                 static_cast<float>(options.smooth_beta), static_cast<float>(options.smooth_tolerance),
                 &map, options.allow_unknown, working_costs, &rejection, options.motion_constraints);
-            if (validatePathSegments(smoothed, map, options.allow_unknown, options.motion_constraints) &&
-                (!options.require_smooth_path || PathPlanner::IsSmooth(smoothed,
-                    options.max_path_curvature, options.max_path_heading_step)))
+            if (validatePathSegments(smoothed, map, options.allow_unknown, options.motion_constraints))
             {
-                accepted = true;
-                break;
+                accepted = !options.require_smooth_path || PathPlanner::IsSmooth(smoothed,
+                    options.max_path_curvature, options.max_path_heading_step);
+                // A blocked goal's nearest grid cell can force a sharp terminal hook.
+                // Prefer a smooth, validated prefix inside the same arrival region.
+                while (!accepted && result.goal_relocated && segment_options.goal_tolerance_m > 0.0 &&
+                    smoothed.poses.size() > 2 && std::chrono::steady_clock::now() < deadline)
+                {
+                    const auto& p = smoothed.poses[smoothed.poses.size() - 2].pose.position;
+                    if (std::hypot(p.x - stops[i].position.x, p.y - stops[i].position.y) >=
+                        segment_options.goal_tolerance_m) break;
+                    smoothed.poses.pop_back();
+                    const auto* constraints = options.motion_constraints;
+                    if (constraints && (!constraints->uncertainty_free(p.x, p.y, p.x, p.y, false) ||
+                        !constraints->sampling_free(p.x, p.y, p.x, p.y, false))) continue;
+                    accepted = PathPlanner::IsSmooth(smoothed,
+                        options.max_path_curvature, options.max_path_heading_step);
+                }
+                if (accepted)
+                {
+                    smoothed.poses.back().pose.orientation = stops[i].orientation;
+                    break;
+                }
             }
             result.detail = rejection.empty() ? "curvature_or_heading_limit" : rejection;
         }
@@ -391,7 +419,7 @@ PlanResult planSegments(
         if (!result.path.poses.empty() && first != smoothed.poses.end())
             ++first;
         result.path.poses.insert(result.path.poses.end(), first, smoothed.poses.end());
-        current_start = segment.poses.back().pose;
+        current_start = smoothed.poses.back().pose;
     }
     if (options.require_smooth_path && !PathPlanner::IsSmooth(result.path,
         options.max_path_curvature, options.max_path_heading_step))
@@ -654,6 +682,12 @@ Path PathPlanner::SmoothPath(
     weight_data *= scale;
     weight_smooth *= scale;
     const double threshold = static_cast<double>(tolerance) * path.poses.size();
+    int reference_peak = 0;
+    const double reference_cost = cost_map ? pathCost(path, *cost_map, &reference_peak) : 0.0;
+    double running_cost = reference_cost;
+    Path local;
+    local.header = result.header;
+    local.poses.resize(3);
     if (path.poses.size() >= 3)
     {
         for (int attempt = 0; attempt < 1000; ++attempt)
@@ -666,19 +700,32 @@ Path PathPlanner::SmoothPath(
                 const auto& original = path.poses[i].pose.position;
                 const auto& previous = result.poses[i - 1].pose.position;
                 const auto& next = result.poses[i + 1].pose.position;
+                double old_cost = 0.0;
+                if (cost_map)
+                {
+                    local.poses[0] = result.poses[i - 1];local.poses[1] = result.poses[i];
+                    local.poses[2] = result.poses[i + 1];
+                    old_cost = pathCost(local, *cost_map);
+                }
                 point.x += weight_data * (original.x - point.x) +
                     weight_smooth * (previous.x + next.x - 2.0 * point.x);
                 point.y += weight_data * (original.y - point.y) +
                     weight_smooth * (previous.y + next.y - 2.0 * point.y);
                 if (collision_map)
                 {
-                    Path local;
-                    local.header = result.header;
+                    local.poses[0] = result.poses[i - 1];local.poses[2] = result.poses[i + 1];
                     for (int trial = 0; trial < 8; ++trial)
                     {
-                        local.poses = {result.poses[i - 1], result.poses[i], result.poses[i + 1]};
-                        if (validatePathSegments(local, *collision_map, allow_unknown, constraints))
+                        local.poses[1] = result.poses[i];
+                        int peak = 0;
+                        const double new_cost = cost_map ? pathCost(local, *cost_map, &peak) : 0.0;
+                        if ((!cost_map || (running_cost - old_cost + new_cost <= 1.30 * reference_cost &&
+                            peak <= reference_peak + 2)) &&
+                            validatePathSegments(local, *collision_map, allow_unknown, constraints))
+                        {
+                            if (cost_map) running_cost += new_cost - old_cost;
                             break;
+                        }
                         point.x = 0.5 * (point.x + old.x);
                         point.y = 0.5 * (point.y + old.y);
                         if (trial == 7) point = old;
@@ -702,9 +749,8 @@ Path PathPlanner::SmoothPath(
     }
     else if (cost_map)
     {
-        int result_peak = 0, reference_peak = 0;
+        int result_peak = 0;
         const double result_cost = pathCost(result, *cost_map, &result_peak);
-        const double reference_cost = pathCost(path, *cost_map, &reference_peak);
         if (result_cost > 1.30 * reference_cost || result_peak > reference_peak + 2)
         {
             if (rejection) *rejection = "smoothing_cost_budget";
@@ -784,7 +830,8 @@ bool PathPlanner::IsSmooth(const Path& path, double max_curvature, double max_he
 }
 
 PlanResult PathPlanner::RecoverStart(
-    const Grid& map, const Grid& clearance, const Pose& start_pose, const PlanOptions& options)
+    const Grid& map, const Grid& clearance, const Pose& start_pose, const PlanOptions& options,
+    const Pose* goal_pose, const path_planner::MotionConstraints* continuation_constraints)
 {
     PlanResult result;
     result.status = PlanStatus::StartBlocked;
@@ -805,6 +852,63 @@ PlanResult PathPlanner::RecoverStart(
             return result;
         }
         if (map.data[static_cast<size_t>(sy) * geometry.width + sx] < 0) return result;
+        // Build the destination component once, rather than running A* for every exit.
+        // Physical escape constraints and normal planning constraints are distinct.
+        std::vector<uint8_t> reachable;
+        if (goal_pose)
+        {
+            reachable.assign(map.data.size(), 0);
+            std::vector<size_t> queue;
+            int gx, gy;
+            if (!geometry.worldToCell(goal_pose->position.x, goal_pose->position.y, gx, gy))
+            {
+                result.detail = "recovery_goal_outside_map";
+                return result;
+            }
+            const int goal_reach = static_cast<int>(std::ceil(options.goal_tolerance_m / geometry.resolution));
+            for (int y = std::max(0, gy - goal_reach); y <= std::min(geometry.height - 1, gy + goal_reach); ++y)
+                for (int x = std::max(0, gx - goal_reach); x <= std::min(geometry.width - 1, gx + goal_reach); ++x)
+                {
+                    const size_t index = static_cast<size_t>(y) * geometry.width + x;
+                    if (map.data[index] != 0) continue;
+                    const auto p = geometry.cellCenter(x, y);
+                    const bool exact = x == gx && y == gy;
+                    if (!exact && std::hypot(p.x - goal_pose->position.x, p.y - goal_pose->position.y) >
+                        options.goal_tolerance_m) continue;
+                    const auto& target = exact && options.goal_tolerance_m == 0.0 ? goal_pose->position : p;
+                    if (continuation_constraints &&
+                        (!continuation_constraints->uncertainty_free(p.x, p.y, target.x, target.y, false) ||
+                         !continuation_constraints->sampling_free(p.x, p.y, target.x, target.y, false))) continue;
+                    reachable[index] = 1;queue.push_back(index);
+                }
+            for (size_t head = 0; head < queue.size(); ++head)
+            {
+                const int x = queue[head] % geometry.width, y = queue[head] / geometry.width;
+                const auto from = geometry.cellCenter(x, y);
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                    {
+                        if ((!dx && !dy) || (!options.diagonal_paths && dx && dy)) continue;
+                        const int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= geometry.width || ny >= geometry.height) continue;
+                        const size_t next = static_cast<size_t>(ny) * geometry.width + nx;
+                        if (reachable[next] || map.data[next] != 0) continue;
+                        if (dx && dy && (map.data[static_cast<size_t>(y) * geometry.width + nx] != 0 ||
+                                        map.data[static_cast<size_t>(ny) * geometry.width + x] != 0)) continue;
+                        const auto p = geometry.cellCenter(nx, ny);
+                        if (continuation_constraints &&
+                            (!continuation_constraints->uncertainty_free(from.x, from.y, p.x, p.y, false) ||
+                             !continuation_constraints->sampling_free(from.x, from.y, p.x, p.y, false))) continue;
+                        reachable[next] = 1;queue.push_back(next);
+                    }
+            }
+            if (queue.empty())
+            {
+                result.status = PlanStatus::GoalBlocked;
+                result.detail = "recovery_goal_has_no_free_seed";
+                return result;
+            }
+        }
         // Allocate only the local mask. Neither input grid is copied or cleared.
         const double radius = std::min(options.escape_clear_radius, options.start_recovery_mask_radius);
         const int reach = static_cast<int>(std::ceil(radius / geometry.resolution)) + 1;
@@ -819,6 +923,7 @@ PlanResult PathPlanner::RecoverStart(
         std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
         distances[start] = 0.0;open.emplace(0.0, start);
         size_t endpoint = no_parent;
+        size_t physical_rejected = 0, uncertain_rejected = 0, sampling_rejected = 0, disconnected = 0;
         while (!open.empty())
         {
             const auto [distance, index] = open.top();open.pop();
@@ -828,10 +933,17 @@ PlanResult PathPlanner::RecoverStart(
             if (map.data[static_cast<size_t>(y) * geometry.width + x] == 0 &&
                 (!options.motion_constraints ||
                  (options.motion_constraints->uncertainty_free(from.x, from.y, from.x, from.y, false) &&
-                  options.motion_constraints->sampling_free(from.x, from.y, from.x, from.y, false))))
+                  options.motion_constraints->sampling_free(from.x, from.y, from.x, from.y, false))) &&
+                (!continuation_constraints ||
+                 (continuation_constraints->uncertainty_free(from.x, from.y, from.x, from.y, false) &&
+                  continuation_constraints->sampling_free(from.x, from.y, from.x, from.y, false))))
             {
-                endpoint = index;
-                break;
+                if (reachable.empty() || reachable[static_cast<size_t>(y) * geometry.width + x])
+                {
+                    endpoint = index;
+                    break;
+                }
+                ++disconnected;
             }
             for (int dy = -1; dy <= 1; ++dy)
                 for (int dx = -1; dx <= 1; ++dx)
@@ -839,15 +951,20 @@ PlanResult PathPlanner::RecoverStart(
                     if ((!dx && !dy) || (!options.diagonal_paths && dx && dy)) continue;
                     const int nx = x + dx, ny = y + dy;
                     if (nx < xmin || ny < ymin || nx >= xmin + width || ny >= ymin + height ||
-                        clearance.data[static_cast<size_t>(ny) * geometry.width + nx] != 0 ||
                         map.data[static_cast<size_t>(ny) * geometry.width + nx] < 0) continue;
+                    if (clearance.data[static_cast<size_t>(ny) * geometry.width + nx] != 0)
+                    {++physical_rejected;continue;}
                     const auto p = geometry.cellCenter(nx, ny);
                     if (std::hypot(p.x - start_pose.position.x, p.y - start_pose.position.y) > radius) continue;
                     if (dx && dy && (clearance.data[static_cast<size_t>(y) * geometry.width + nx] != 0 ||
                                     clearance.data[static_cast<size_t>(ny) * geometry.width + x] != 0)) continue;
-                    if (options.motion_constraints &&
-                        (!options.motion_constraints->uncertainty_free(from.x, from.y, p.x, p.y) ||
-                         !options.motion_constraints->sampling_free(from.x, from.y, p.x, p.y))) continue;
+                    if (options.motion_constraints)
+                    {
+                        if (!options.motion_constraints->uncertainty_free(from.x, from.y, p.x, p.y))
+                        {++uncertain_rejected;continue;}
+                        if (!options.motion_constraints->sampling_free(from.x, from.y, p.x, p.y))
+                        {++sampling_rejected;continue;}
+                    }
                     const double candidate = distance + (index == start ?
                         std::hypot(p.x-start_pose.position.x, p.y-start_pose.position.y) :
                         geometry.resolution * (dx && dy ? std::sqrt(2.0) : 1.0));
@@ -860,7 +977,11 @@ PlanResult PathPlanner::RecoverStart(
         }
         if (endpoint == no_parent)
         {
-            result.detail = "no_safe_exit_in_local_mask";
+            result.detail = "no_safe_exit_in_local_mask: radius=" + std::to_string(radius) +
+                " physical=" + std::to_string(physical_rejected) +
+                " uncertain=" + std::to_string(uncertain_rejected) +
+                " sampling=" + std::to_string(sampling_rejected) +
+                " disconnected=" + std::to_string(disconnected);
             return result;
         }
         Path prefix;prefix.header = map.header;

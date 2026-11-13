@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -83,6 +84,7 @@ public:
         declare_parameter<double>("escape_clear_radius", 0.6);
         declare_parameter<double>("robot_radius", 0.23);
         declare_parameter<double>("start_recovery_margin", 0.05);
+        declare_parameter<double>("start_recovery_search_radius", 0.6);
         if (!std::isfinite(get_parameter("robot_radius").as_double()) ||
             get_parameter("robot_radius").as_double() <= 0.0 ||
             !std::isfinite(get_parameter("start_recovery_margin").as_double()) ||
@@ -186,8 +188,7 @@ private:
         options.recovery_cost_radius = get_parameter("recovery_cost_radius").as_double();
         options.recovery_cost_peak = get_parameter("recovery_cost_peak").as_double();
         options.escape_clear_radius = get_parameter("escape_clear_radius").as_double();
-        options.start_recovery_mask_radius = get_parameter("robot_radius").as_double() +
-            get_parameter("start_recovery_margin").as_double();
+        options.start_recovery_mask_radius = get_parameter("start_recovery_search_radius").as_double();
         options.goal_tolerance_m = get_parameter("goal_relocation_radius").as_double();
         options.disable_rear_path_plan = get_parameter("disable_rear_path_plan").as_bool();
         options.online_behind_clearance = get_parameter("online_behind_clearance").as_double();
@@ -222,8 +223,11 @@ private:
                 else if (name == "recovery_cost_radius") candidate.recovery_cost_radius = parameter.as_double();
                 else if (name == "recovery_cost_peak") candidate.recovery_cost_peak = parameter.as_double();
                 else if (name == "escape_clear_radius") candidate.escape_clear_radius = parameter.as_double();
-                else if (name == "robot_radius") candidate.start_recovery_mask_radius = parameter.as_double() + get_parameter("start_recovery_margin").as_double();
-                else if (name == "start_recovery_margin") candidate.start_recovery_mask_radius = get_parameter("robot_radius").as_double() + parameter.as_double();
+                else if (name == "start_recovery_search_radius") candidate.start_recovery_mask_radius = parameter.as_double();
+                else if (name == "robot_radius" && (!std::isfinite(parameter.as_double()) || parameter.as_double() <= 0.0))
+                    throw std::invalid_argument("Invalid robot_radius");
+                else if (name == "start_recovery_margin" && (!std::isfinite(parameter.as_double()) || parameter.as_double() < 0.0))
+                    throw std::invalid_argument("Invalid start_recovery_margin");
                 else if (name == "goal_relocation_radius") candidate.goal_tolerance_m = parameter.as_double();
                 else if (name == "disable_rear_path_plan") candidate.disable_rear_path_plan = parameter.as_bool();
                 else if (name == "online_behind_clearance") candidate.online_behind_clearance = parameter.as_double();
@@ -506,26 +510,30 @@ private:
             return int(grid.data[static_cast<size_t>(y) * grid.info.width + static_cast<size_t>(x)]);
         };
         path_planner::MotionConstraints constraints;
-        constraints.update(clearance ? *clearance : grid, snapshot->uncertain_obstacles,
+        constraints.update(grid, snapshot->uncertain_obstacles,
             get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m,
             options.allow_unknown);
         options.motion_constraints = &constraints;
         const auto& start = request->start.pose.position;
         const auto& goal = request->goal.pose.position;
         const bool recover_start = clearance && (cell(start) > 0 ||
-            !constraints.uncertainty_free(start.x, start.y, start.x, start.y, false));
-        if (!recover_start) {
-            constraints.update(grid, snapshot->uncertain_obstacles,
-                get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m,
-                options.allow_unknown);
-        }
+            !constraints.uncertainty_free(start.x, start.y, start.x, start.y, false) ||
+            !constraints.sampling_free(start.x, start.y, start.x, start.y, false));
         const bool goal_blocked = cell(goal) > 0 ||
             !constraints.uncertainty_free(goal.x, goal.y, goal.x, goal.y, false) ||
             !constraints.sampling_free(goal.x, goal.y, goal.x, goal.y, false);
         // Relocation also applies to uncertainty and interpolation guards.
         if (goal_blocked && request->goal_recovery_radius > 0.0)
             options.goal_tolerance_m = std::nextafter(request->goal_recovery_radius, 0.0);
-        auto result = recover_start ? PathPlanner::RecoverStart(grid, *clearance, request->start.pose, options) :
+        path_planner::MotionConstraints escape_constraints;
+        if (recover_start) {
+            escape_constraints.update(*clearance, snapshot->uncertain_obstacles,
+                get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m,
+                options.allow_unknown);
+            options.motion_constraints = &escape_constraints;
+        }
+        auto result = recover_start ? PathPlanner::RecoverStart(grid, *clearance, request->start.pose, options,
+                &request->goal.pose, &constraints) :
             PathPlanner::Plan(grid, snapshot->costs, request->start.pose, request->goal.pose,
                 options, {}, request->avoided_paths);
         if (result.status == PlanStatus::StartBlocked && !clearance)
@@ -536,6 +544,15 @@ private:
         }
         if (result.status != PlanStatus::Success)
         {
+            response->detail = result.detail;
+            double nearest = std::numeric_limits<double>::infinity();
+            for (const auto& pose : snapshot->uncertain_obstacles.poses) {
+                const double distance = std::hypot(pose.position.x - start.x, pose.position.y - start.y);
+                if (distance < nearest) {
+                    nearest = distance;response->observation_target = pose.position;
+                    response->has_observation_target = true;
+                }
+            }
             response->reason = result.status == PlanStatus::NoSmoothPath ? "no_smooth_path" :
                 result.status == PlanStatus::StartBlocked ? "start_blocked" :
                 result.status == PlanStatus::GoalBlocked ||

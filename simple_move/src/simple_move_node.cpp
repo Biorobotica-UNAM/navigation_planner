@@ -20,6 +20,7 @@
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+#include <simple_move/tracking_reference.hpp>
 
 // ----- C++ standard library -----
 #include <algorithm>
@@ -61,7 +62,7 @@ class SimpleMoveNode : public rclcpp::Node
   {
     double x = 0.0, y = 0.0, yaw = 0.0, distance = -1.0, tolerance = 0.0;
     double yaw_error = 0.0, reference = 0.0, direction = 0.0, remaining = -1.0, dt = 0.0;
-    double head_error = 0.0;
+    double head_error = 0.0, head_scale = 1.0, raw_direction = 0.0, direction_rate = 0.0;
     const char * head_gate = "inactive";
     std::array<double, 3> nominal{}, requested{};
     size_t candidates = 0, nominal_rejected = 0, reachable_rejected = 0, corridor_rejected = 0;
@@ -99,6 +100,7 @@ public:
       {"fine_dist_tolerance", 0.03}, {"coarse_dist_tolerance", 0.2},
       {"angle_tolerance", 0.05}, {"lookahead_min_m", 0.20},
       {"lookahead_max_m", 0.60}, {"lookahead_time_sec", 0.6},
+      {"direction_filter_time_sec", 0.15}, {"direction_max_rate_rad_sec", 1.2},
       {"initial_alignment_fraction", 0.10}, {"final_alignment_fraction", 0.10},
       {"head_pan_min", -3.14}, {"head_pan_max", 1.74}, {"head_tilt", -0.5},
       {"head_alignment_tolerance", 0.15}, {"head_feedback_timeout_sec", 0.5},
@@ -106,6 +108,7 @@ public:
       {"head_preview_angle_rad", 0.25},
       {"head_pan_limit_margin", 0.05},
       {"head_max_pan_speed", 1.5},
+      {"head_max_pan_acceleration", 2.5},
       {"final_position_hysteresis_m", 0.03},
       {"final_position_settle_sec", 0.30}, {"head_goal_deadband_rad", 0.04},
       {"final_capture_distance_m", 0.40}, {"angular_damping", 0.35},
@@ -235,7 +238,7 @@ public:
           }
           precision = 0.5 * slack;
         }
-        if (command->mode > Command::RECOVER_START) {return;}
+        if (command->mode > Command::OBSERVE) {return;}
         start_motion(command->path, false, command->mode);
         if (active_) {
           motion_position_tolerance_ = precision;
@@ -249,6 +252,12 @@ public:
       head_feedback_topic, rclcpp::SensorDataQoS(),
       [this](std_msgs::msg::Float64MultiArray::ConstSharedPtr msg) {
         if (msg->data.size() >= 2 && std::isfinite(msg->data[0])) {
+          const auto tick = Clock::now();
+          const double dt = std::chrono::duration<double>(tick - head_received_).count();
+          measured_head_rate_ = dt >= 0.005 && dt <= 0.5 ?
+            std::clamp((msg->data[0] - head_pan_) / dt,
+              -get_parameter("head_max_pan_speed").as_double(),
+              get_parameter("head_max_pan_speed").as_double()) : 0.0;
           head_pan_ = msg->data[0]; head_received_ = Clock::now();
         }
       });
@@ -410,6 +419,8 @@ private:
     challenger_direction_ = std::numeric_limits<double>::quiet_NaN();
     challenger_since_ = Clock::time_point{};
     recovery_clear_since_ = Clock::time_point{};
+    observation_aligned_since_ = Clock::time_point{};
+    translation_direction_.reset();
     last_phase_.clear();last_diagnostic_ = Clock::time_point{};
     trace_ = MotionTrace{};
     motion_position_tolerance_ = 0.0;
@@ -449,7 +460,7 @@ private:
     started_ = progress_time_ = last_tick_ = Clock::now();
     deviation_since_ = Clock::time_point{};
     status_.status = Status::ACTIVE;
-    status_.text = "tracking_path";
+    status_.text = kind == Command::OBSERVE ? "observing_blockage" : "tracking_path";
     status_pub_->publish(status_);
   }
 
@@ -498,7 +509,7 @@ private:
       "not_checked" ? trace_.rejected : trace_.published;
     RCLCPP_INFO(
       get_logger(),
-      "MotionDiagnostic motion=%s phase=%s frame=%s dt=%.3f pose=(%.3f,%.3f,%.3f) progress=%.3f remaining=%.3f distance=%.3f tolerance=%.3f yaw_error=%.3f yaw_reference=%.3f yaw_rate=%.3f direction=%.3f final_align=%d capture=%d escape=%d head_gate=%s head=%.3f head_goal=%.3f head_error=%.3f head_age=%.3f nominal=(%.3f,%.3f,%.3f) requested=(%.3f,%.3f,%.3f) published=(%.3f,%.3f,%.3f) obstacle_limit=%.3f ready=%d ready_age=%.3f risk_age=%.3f collision=%d map_age=%.3f clearance_age=%.3f local_reason=%s layer=%s tested=(%.3f,%.3f,%.3f) cell=(%d,%d,%d) sample_t=%.3f separation_m=%.4f required_m=%.4f candidates=%zu rejected=(%zu,%zu,%zu) linear_speed=%.4f rest_angular_speed=%.4f odom_span=%.3f position_span=%.4f stationary=%d quiet_sec=%.3f head_wait_sec=%.3f arrival_inside=%d",
+      "MotionDiagnostic motion=%s phase=%s frame=%s dt=%.3f pose=(%.3f,%.3f,%.3f) progress=%.3f remaining=%.3f distance=%.3f tolerance=%.3f yaw_error=%.3f yaw_reference=%.3f yaw_rate=%.3f direction=%.3f final_align=%d capture=%d escape=%d head_gate=%s head=%.3f head_goal=%.3f head_error=%.3f head_age=%.3f nominal=(%.3f,%.3f,%.3f) requested=(%.3f,%.3f,%.3f) published=(%.3f,%.3f,%.3f) obstacle_limit=%.3f ready=%d ready_age=%.3f risk_age=%.3f collision=%d map_age=%.3f clearance_age=%.3f local_reason=%s layer=%s tested=(%.3f,%.3f,%.3f) cell=(%d,%d,%d) sample_t=%.3f separation_m=%.4f required_m=%.4f candidates=%zu rejected=(%zu,%zu,%zu) linear_speed=%.4f rest_angular_speed=%.4f odom_span=%.3f position_span=%.4f stationary=%d quiet_sec=%.3f head_wait_sec=%.3f arrival_inside=%d raw_direction=%.3f direction_rate=%.3f head_scale=%.3f",
       status_.goal_id.id.c_str(), status_.text.c_str(),
       path_.header.frame_id.c_str(), trace_.dt,
       trace_.x, trace_.y, trace_.yaw, progress_, trace_.remaining, trace_.distance, trace_.tolerance,
@@ -523,7 +534,8 @@ private:
       motion_settled_since_ == Clock::time_point{} ? 0.0 :
       std::chrono::duration<double>(tick - motion_settled_since_).count(), head_wait_elapsed_,
       arrival_radius_ <= 0.0 || std::hypot(trace_.x - arrival_center_.x,
-      trace_.y - arrival_center_.y) < arrival_radius_);
+      trace_.y - arrival_center_.y) < arrival_radius_,
+      trace_.raw_direction, trace_.direction_rate, trace_.head_scale);
   }
 
   void process_motion()
@@ -553,12 +565,17 @@ private:
     const double pan_min = parameters[8].as_double(), pan_max = parameters[9].as_double();
     const double head_tolerance = parameters[10].as_double(),
       sensor_timeout = parameters[11].as_double();
+    const double head_speed_limit = get_parameter("head_max_pan_speed").as_double();
+    const double head_acceleration_limit = get_parameter("head_max_pan_acceleration").as_double();
     const bool omni = get_parameter("motion_mode").as_string() == "omni";
     const bool use_head = get_parameter("move_head").as_bool() && !head_bypass_;
     if (use_head && !last_use_head_) {head_holding_ = true;}
     last_use_head_ = use_head;
     const bool use_fields = get_parameter("use_pot_fields").as_bool();
-    if (omni != last_omni_) {velocity_.fill(0.0); acceleration_.fill(0.0); last_omni_ = omni;}
+    if (omni != last_omni_) {
+      velocity_.fill(0.0);acceleration_.fill(0.0);
+      translation_direction_.reset();last_omni_ = omni;
+    }
     if (relative_ && use_fields &&
       std::chrono::duration<double>(tick - last_fields_enable_).count() >= 0.2)
     {
@@ -599,7 +616,8 @@ private:
     }
     const auto & destination = path_.poses.back().pose;
     const auto & q = destination.orientation;
-    const double final_yaw =
+    const bool recovering = motion_kind_ == Command::RECOVER_START;
+    const double final_yaw = recovering && omni ? yaw :
       std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
     const double final_error = std::remainder(final_yaw - yaw, 2.0 * M_PI);
     const double distance = std::hypot(destination.position.x - x, destination.position.y - y);
@@ -608,10 +626,11 @@ private:
     if (!initialized_) {
       initial_yaw_ = yaw;previous_yaw_ = odom_yaw;initialized_ = true;
       feasible_yaw_reference_ = yaw;
+      recovery_yaw_reference_ = yaw;
       best_position_error_ = distance;
       // Avoid turning away and back during short omni transfers. Head limits
       // still request the minimum necessary base rotation before translation.
-      if (omni && !relative_ && lengths_.back() <= 1.0 && std::abs(final_error) <= 0.20) {
+      if (omni && !relative_ && !recovering && lengths_.back() <= 1.0) {
         final_profile_ = true;final_profile_yaw_ = yaw;final_profile_turn_ = final_error;
         final_profile_distance_ = std::max(0.01, std::max(distance, lengths_.back()) - tolerance);
       }
@@ -648,6 +667,43 @@ private:
       risk_received_<started_ ||
       std::chrono::duration<double>(tick - ready_received_).count()> sensor_timeout ||
       std::chrono::duration<double>(tick - risk_received_).count()> sensor_timeout));
+
+    if (motion_kind_ == Command::OBSERVE) {
+      velocity_.fill(0.0);acceleration_.fill(0.0);
+      cmd_pub_->publish(geometry_msgs::msg::Twist());
+      if (!use_head) {finish(Status::ABORTED, "observation_disabled");return;}
+      const double pan = select_head_pan(
+        std::atan2(destination.position.y - y, destination.position.x - x) - yaw, pan_min, pan_max);
+      if (pan < pan_min || pan > pan_max) {
+        finish(Status::ABORTED, "observation_outside_pan_range");return;
+      }
+      const bool fresh = head_received_ != Clock::time_point{} &&
+        std::chrono::duration<double>(tick - head_received_).count() <=
+        get_parameter("head_feedback_timeout_sec").as_double();
+      if (!std::isfinite(last_head_goal_) || std::abs(pan - last_head_goal_) >
+        get_parameter("head_goal_deadband_rad").as_double())
+      {
+        std_msgs::msg::Float64MultiArray goal;
+        goal.data = {pan, get_parameter("head_tilt").as_double()};
+        head_pub_->publish(goal);last_head_goal_ = pan;head_goal_sent_ = tick;
+      }
+      if (fresh && std::abs(pan - head_pan_) <= head_tolerance && stopped && obstacle_ready) {
+        if (observation_aligned_since_ == Clock::time_point{}) {observation_aligned_since_ = tick;}
+        if (std::chrono::duration<double>(tick - observation_aligned_since_).count() >=
+          std::max(0.3, sensor_timeout))
+        {
+          finish(Status::SUCCEEDED, "observation_completed");return;
+        }
+      } else {observation_aligned_since_ = Clock::time_point{};}
+      if (std::chrono::duration<double>(tick - started_).count() >
+        get_parameter("head_alignment_timeout_sec").as_double())
+      {
+        finish(Status::ABORTED, "observation_timeout");return;
+      }
+      status_.text = "observing_blockage";trace_.head_gate = "observation";
+      trace_.head_error = pan - head_pan_;
+      log_motion(geometry_msgs::msg::Twist());return;
+    }
 
     // Geometry and limits are immutable throughout this mutually-exclusive tick.
     local_context_.grid.reset();
@@ -759,7 +815,13 @@ private:
         }
       }
     }
-    const bool recovering = motion_kind_ == Command::RECOVER_START;
+    if (recovering && local_context_.grid) {
+      motion_constraints_.update(*map_,
+        uncertain_obstacles_ ? *uncertain_obstacles_ : empty_uncertainty_,
+        get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m);
+      recovery_clear = recovery_clear && motion_constraints_.uncertainty_free(x, y, x, y, false) &&
+        motion_constraints_.sampling_free(x, y, x, y, false);
+    }
     if (local_context_.grid) {
       // Preserve planning clearance while tracking. Escapes and stationary
       // alignment use the physical layer, without erasing occupied cells.
@@ -843,6 +905,8 @@ private:
       get_parameter("lookahead_min_m").as_double(), get_parameter("lookahead_max_m").as_double());
     double target_s = std::min(
       escape_active_ ? escape_end_s_ : lengths_.back(), progress_ + lookahead);
+    const double minimum_target_s = std::min(
+      target_s, progress_ + get_parameter("lookahead_min_m").as_double());
     double target_x = destination.position.x, target_y = destination.position.y;
     double tangent = std::atan2(target_y - y, target_x - x);
     // A long lookahead chord can cut across a valid planned corner. Shorten
@@ -865,12 +929,16 @@ private:
       probe.linear.x = probe_speed * std::cos(bearing);probe.linear.y = probe_speed * std::sin(
         bearing);
       if (local_motion_is_free(x, y, yaw, probe, target_distance)) {break;}
-      if (attempt < 4) {target_s = progress_ + 0.5 * (target_s - progress_);}
+      if (target_s <= minimum_target_s + 1e-9) {break;}
+      if (attempt < 4) {
+        target_s = std::max(minimum_target_s, progress_ + 0.5 * (target_s - progress_));
+      }
     }
     lookahead = std::max(0.05, target_s - progress_);
     double direction = std::atan2(target_y - y, target_x - x);
     const double remaining = std::max(distance, lengths_.back() - progress_);
     trace_.remaining = remaining;
+    capture_ = false;
     if (omni && !relative_ && !escape_active_ &&
       remaining <= get_parameter("final_capture_distance_m").as_double())
     {
@@ -947,7 +1015,7 @@ private:
       std::exp(
       -get_parameter("control_alpha").as_double() *
       std::pow(std::remainder(tangent - direction, 2.0 * M_PI), 2));
-    if (escape_active_) {speed = std::min(speed, get_parameter("start_escape_speed").as_double());}
+    if (escape_active_ || recovering) {speed = std::min(speed, get_parameter("start_escape_speed").as_double());}
     double vx = speed * std::cos(direction - yaw), vy = speed * std::sin(direction - yaw);
     if (use_fields &&
       std::chrono::duration<double>(tick - force_received_).count() < sensor_timeout)
@@ -1031,18 +1099,6 @@ private:
         2.0 * M_PI) * initial_rate +
         6.0 * final_phase * (1.0 - final_phase) *
         (final_profile_ ? final_profile_turn_ * final_rate : 0.0);
-      if (use_head && !final_align_) {
-        const double reserve = std::min(0.5 * head_tolerance, 0.25 * (pan_max - pan_min));
-        // Keep the reference on the current mechanical branch. An equivalent
-        // future pan across the neck's forbidden sector is not reachable.
-        const double pan = select_head_pan(direction - yaw, pan_min, pan_max) +
-          std::remainder(yaw - desired_yaw, 2.0 * M_PI);
-        const double correction = pan - std::clamp(pan, pan_min + reserve, pan_max - reserve);
-        desired_yaw += correction;
-        // The profile derivative no longer applies after projection onto a
-        // head limit; keeping it would push the base out of the feasible yaw.
-        if (std::abs(correction) > 1e-6) {yaw_feedforward = 0.0;}
-      }
       const double limited_speed =
         std::min(
         {vmax, final_turn > angle_tolerance ? approach_limit : vmax,
@@ -1066,6 +1122,7 @@ private:
       vx *= alignment_scale;vy *= alignment_scale;
     }
     if (escape_active_) {desired_yaw = initial_yaw_;yaw_feedforward = 0.0;}
+    if (recovering && omni) {desired_yaw = recovery_yaw_reference_;yaw_feedforward = 0.0;}
     double heading_error = std::remainder(direction - yaw - (reverse_ ? M_PI : 0.0), 2.0 * M_PI);
     if (relative_) {desired_yaw = final_yaw;}
     const double angular_gain = 1.0 / std::max(0.05, get_parameter("control_beta").as_double());
@@ -1105,6 +1162,13 @@ private:
       const bool direct_free = local_motion_is_free(
         x, y, yaw, proposed,
         std::numeric_limits<double>::infinity(), diagnostics ? &trace_.rejected : nullptr);
+      if (capture_ && direct_free && !route_obstructed_ && (!use_head || !head_holding_)) {
+        // Capture already checked the full connector to the goal. Retaining an
+        // old detour here can carry the robot past the endpoint indefinitely.
+        local_detour_ = false;escape_side_ = 0;avoiding = false;
+        local_direction_ = std::numeric_limits<double>::quiet_NaN();
+        challenger_since_ = Clock::time_point{};
+      }
       if (!direct_free || route_obstructed_) {local_detour_ = true;avoiding = true;}
       if (escape_side_ != 0) {
         const double target_distance = std::hypot(target_x - x, target_y - y);
@@ -1118,7 +1182,7 @@ private:
       if (!direct_free || route_obstructed_ || local_detour_ || escape_side_ != 0) {
         avoiding = true;
         const double nominal = std::min(
-          {escape_active_ ? std::min(vmax, get_parameter("start_escape_speed").as_double()) : vmax,
+          {escape_active_ || recovering ? std::min(vmax, get_parameter("start_escape_speed").as_double()) : vmax,
             std::max(
               std::hypot(vx, vy),
               final_profile_ && std::abs(final_error) > angle_tolerance ? 0.0 :
@@ -1145,8 +1209,15 @@ private:
           sin_direction[i] = std::sin(bearing + offsets[i]);
           if (use_head) {
             const double pan = select_head_pan(bearing + offsets[i], pan_min, pan_max);
-            steering_cost[i] = nominal * (0.25 * std::abs(
-              std::clamp(pan, pan_min, pan_max) - head_pan_) +
+            const double error = std::clamp(pan, pan_min, pan_max) - head_pan_;
+            const double along_rate = std::copysign(1.0, error) * measured_head_rate_;
+            const double braking = along_rate > 0.0 ? along_rate * along_rate / (2.0 * head_acceleration_limit) : 0.0;
+            const double travel = std::max(0.0, std::abs(error) - head_tolerance);
+            // Include counter-motion and stopping distance when a reversal would overshoot.
+            const double alignment_time = std::max(travel / head_speed_limit,
+              std::sqrt(2.0 * travel / head_acceleration_limit)) +
+              (along_rate < 0.0 || braking > travel ? std::abs(along_rate) / head_acceleration_limit : 0.0);
+            steering_cost[i] = nominal * (0.35 * alignment_time +
               std::abs(pan - std::clamp(pan, pan_min, pan_max)));
           }
           if (std::isfinite(local_direction_)) {
@@ -1289,8 +1360,33 @@ private:
       }
     }
     if (std::hypot(vx, vy) > 1e-6) {direction = yaw + std::atan2(vy, vx);}
+    trace_.raw_direction = direction;
+    if (omni && !relative_ && !final_align_ && !local_holding && std::hypot(vx, vy) > 1e-6) {
+      const double magnitude = std::hypot(vx, vy);
+      const double raw = odom_yaw + std::atan2(vy, vx);
+      const double filtered = translation_direction_.update(
+        raw, dt, get_parameter("direction_filter_time_sec").as_double(),
+        get_parameter("direction_max_rate_rad_sec").as_double());
+      geometry_msgs::msg::Twist candidate;
+      candidate.linear.x = magnitude * std::cos(filtered - odom_yaw);
+      candidate.linear.y = magnitude * std::sin(filtered - odom_yaw);
+      candidate.angular.z = angular;
+      // A smoothed bearing must never turn an executable detour into an
+      // occupied connector. The final limited command is checked again below.
+      if (path_.header.frame_id != map_frame_ || local_motion_is_free(x, y, yaw, candidate)) {
+        vx = candidate.linear.x;vy = candidate.linear.y;
+      } else {
+        translation_direction_.reset(raw);
+      }
+      direction = yaw + std::atan2(vy, vx);
+      trace_.direction_rate = translation_direction_.rate;
+    } else {
+      translation_direction_.rate = 0.0;
+    }
     if (omni && use_head && !final_align_) {
       const double reserve = std::min(0.5 * head_tolerance, 0.25 * (pan_max - pan_min));
+      // Project only after avoidance and direction filtering, using the same
+      // bearing that will drive the camera and translation on this cycle.
       const double reference_pan = select_head_pan(direction - yaw, pan_min, pan_max) +
         std::remainder(yaw - desired_yaw, 2.0 * M_PI);
       const double feasible_pan = std::clamp(reference_pan, pan_min + reserve, pan_max - reserve);
@@ -1303,6 +1399,7 @@ private:
           projected - feasible_yaw_reference_,
           2.0 * M_PI), -rate * dt, rate * dt);
       desired_yaw = feasible_yaw_reference_;
+      if (recovering) {recovery_yaw_reference_ = desired_yaw;}
       if (std::abs(correction) > 1e-6) {yaw_feedforward = 0.0;}
       angular = std::clamp(
         yaw_feedforward + angular_gain * std::remainder(desired_yaw - yaw, 2.0 * M_PI) -
@@ -1352,6 +1449,7 @@ private:
         head_holding_ = true;
       } else if (error <= head_tolerance) {head_holding_ = false;}
       head_blocked = head_holding_;
+      trace_.head_scale = head_blocked ? 0.0 : 1.0;
       if (head_blocked) {head_wait_elapsed_ += elapsed;}
       trace_.head_error = pan - head_pan_;
       trace_.head_gate = !fresh ? "feedback_stale" : head_limit_holding_ ? "pan_limit" :
@@ -1391,9 +1489,11 @@ private:
           finish(Status::ABORTED, "head_alignment_timeout"); return;
         }
       } else {
-        const double scale = std::clamp(
-          (stop_error - error) / (stop_error - head_tolerance), 0.0,
-          1.0);
+        const double required_pan_rate = translation_direction_.rate - measured_yaw_rate_;
+        const double scale = simple_move::head_tracking_scale(
+          error, head_tolerance, stop_error, required_pan_rate, head_speed_limit);
+        trace_.head_scale = scale;
+        trace_.head_gate = scale < 0.99 ? "slowing" : "tracking";
         vx *= scale;vy *= scale;
         if (angular * (pan - head_pan_) < 0.0) {
           angular *= scale;
@@ -1404,7 +1504,7 @@ private:
       }
     }
     const double terminal_pan = select_head_pan(direction - final_yaw, pan_min, pan_max);
-    if (final_profile_ && !head_blocked &&
+    if (!recovering && final_profile_ && !head_blocked &&
       (!use_head || final_align_ || (terminal_pan >= pan_min && terminal_pan <= pan_max)))
     {
       // Leave angular braking distance, including the jerk ramp, before the
@@ -1478,7 +1578,7 @@ private:
     const double magnitude = std::hypot(vx, vy);
     const double translation_limit = std::min(
       {vmax, use_fields ? obstacle_speed_limit_ : vmax,
-        escape_active_ ? get_parameter("start_escape_speed").as_double() : vmax});
+        escape_active_ || recovering ? get_parameter("start_escape_speed").as_double() : vmax});
     if (use_fields && translation_limit < 0.015 && magnitude > 0.03) {
       if (sensor_blocked_since_ == Clock::time_point{}) {sensor_blocked_since_ = tick;}
       sensor_clear_since_ = Clock::time_point{};
@@ -1701,6 +1801,9 @@ private:
   uint8_t motion_kind_ = Command::FOLLOW_PATH;
   path_planner::MotionObservation odometry_;
   double feasible_yaw_reference_ = 0.0, best_position_error_ = 0.0, head_wait_elapsed_ = 0.0;
+  double recovery_yaw_reference_ = 0.0, measured_head_rate_ = 0.0;
+  simple_move::DirectionReference translation_direction_;
+  Clock::time_point observation_aligned_since_;
   double local_blocked_elapsed_ = 0.0;
   double challenger_direction_ = std::numeric_limits<double>::quiet_NaN();
   Clock::time_point challenger_since_, recovery_clear_since_;

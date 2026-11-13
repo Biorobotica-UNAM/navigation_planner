@@ -12,5 +12,8 @@ geometry_msgs/PointStamped[] required_obstacles
 nav_msgs/Path path
 builtin_interfaces/Time map_stamp
 string reason
+string detail
+bool has_observation_target
+geometry_msgs/Point observation_target
 bool start_recovery
 bool goal_relocated

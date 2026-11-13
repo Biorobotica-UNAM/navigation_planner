@@ -133,6 +133,7 @@ class NavigationIntegration(unittest.TestCase):
         cls.blocked_goal_position = None
         cls.short_escape = False
         cls.odom_jitter = 0.0
+        cls.map_jitter = 0.0
         cls.freeze_odom = False
         cls.odom_tick = 0
         deadline = time.monotonic() + 8
@@ -210,6 +211,8 @@ class NavigationIntegration(unittest.TestCase):
             tf = TransformStamped()
             tf.header.stamp, tf.header.frame_id, tf.child_frame_id = stamp, parent, child
             tf.transform.rotation.w = 1.0
+            if child == 'odom':
+                tf.transform.translation.y = cls.map_jitter * (1 if cls.odom_tick % 2 else -1)
             if child == 'base_link':
                 tf.transform.translation.x, tf.transform.translation.y = cls.x, cls.y
                 tf.transform.translation.x += cls.odom_jitter * (1 if cls.odom_tick % 2 else -1)
@@ -360,6 +363,7 @@ class NavigationIntegration(unittest.TestCase):
         cls.blocked_goal_position = None
         cls.short_escape = False
         cls.odom_jitter = 0.0
+        cls.map_jitter = 0.0
         cls.freeze_odom = False
 
     def test_local_start_recovery_replans_from_actual_exit(self):
@@ -780,6 +784,53 @@ class NavigationIntegration(unittest.TestCase):
         self.wait_for(lambda: self.command.linear.x > 0.85, timeout=8)
         self.wait_for(lambda: any(r.status == 3 for r in self.results), timeout=12)
         self.assertLess(abs(self.x-3.2), 0.04)
+
+    def test_short_omni_route_interpolates_to_goal_without_turning_away(self):
+        # Initial/final yaw and the 65 cm displacement from the supplied log.
+        cls = type(self)
+        cls.yaw = 2.158
+        cls.integrate = cls.head_auto = True
+        self.set_params(move_head=True)
+        self.spin_for(0.1)
+        path = Path()
+        path.header.frame_id, path.header.stamp = 'map', self.node.get_clock().now().to_msg()
+        for x, y in ((0.0, 0.0), (0.2, -0.04), (0.6, 0.25)):
+            pose = PoseStamped()
+            pose.pose.position.x, pose.pose.position.y = x, y
+            pose.pose.orientation.z, pose.pose.orientation.w = math.sin(2.731/2), math.cos(2.731/2)
+            path.poses.append(pose)
+        self.path_pub.publish(path)
+        minimum_yaw, maximum_yaw = cls.yaw, cls.yaw
+        deadline = time.monotonic()+18
+        while time.monotonic() < deadline and not any(r.status in (3, 4) for r in self.results):
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+            minimum_yaw, maximum_yaw = min(minimum_yaw, cls.yaw), max(maximum_yaw, cls.yaw)
+        self.assertTrue(any(r.status == 3 for r in self.results), [(r.status, r.text) for r in self.results])
+        self.assertGreater(minimum_yaw, 2.0)
+        self.assertLess(maximum_yaw, 2.9)
+        self.assertLess(math.hypot(self.x-0.6, self.y-0.25), 0.04)
+
+    def test_map_localization_jitter_does_not_repeatedly_stop_aligned_motion(self):
+        cls = type(self)
+        self.set_params(move_head=True)
+        cls.integrate = cls.head_auto = True
+        self.send_path(1.5, 0.0)
+        self.wait_for(lambda: self.x > 0.15, timeout=8)
+        cls.map_jitter = 0.006  # 12 mm jumps in map; odom remains continuous.
+        longest_stop = 0.0
+        stopped_since = None
+        deadline = time.monotonic()+12
+        while time.monotonic() < deadline and self.x < 1.2:
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+            if math.hypot(self.command.linear.x, self.command.linear.y) < 0.005:
+                if stopped_since is None:
+                    stopped_since = time.monotonic()
+                longest_stop = max(longest_stop, time.monotonic()-stopped_since)
+            else:
+                stopped_since = None
+        self.assertGreaterEqual(self.x, 1.2)
+        self.assertLess(longest_stop, 0.15)
+        self.assertFalse(any(r.status == 4 for r in self.results))
 
     def test_local_map_detour_recovers_original_path_without_aborting(self):
         type(self).blocked = True

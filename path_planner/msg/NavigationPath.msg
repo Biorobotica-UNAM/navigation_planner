@@ -4,6 +4,8 @@ uint8 FOLLOW_PATH=0
 uint8 ROTATE=1
 uint8 BRAKE=2
 uint8 RECOVER_START=3
+uint8 OBSERVE=4
+# OBSERVE keeps the base stopped and looks at the last path position.
 uint8 mode
 # Optional arrival circle in the path frame; zero radius uses normal arrival.
 geometry_msgs/Point arrival_center

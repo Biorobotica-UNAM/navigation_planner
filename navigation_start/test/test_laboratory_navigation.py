@@ -20,6 +20,7 @@ from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
 from geometry_msgs.msg import PoseArray, Pose
 from nav_msgs.msg import OccupancyGrid, Path
 from path_planner.srv import PlanPath
+from path_planner.msg import NavigationPath
 from rcl_interfaces.srv import SetParametersAtomically
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import LaserScan
@@ -65,6 +66,7 @@ class LaboratoryNavigation(unittest.TestCase):
         cls.head_pan = cls.head_target = 0.0
         cls.command = Twist()
         cls.statuses, cls.trace = [], []
+        cls.commands = []
         cls.minimum_clearance = float('inf')
         cls.dynamic_obstacle = None
         cls.uncertain_points = []
@@ -78,6 +80,8 @@ class LaboratoryNavigation(unittest.TestCase):
         cls.prohibition_pub = cls.node.create_publisher(OccupancyGrid, '/lab_test/prohibition', qos)
         cls.goal_pub = cls.node.create_publisher(PoseStamped, '/lab_test/goal', 10)
         cls.path_pub = cls.node.create_publisher(Path, '/lab_test/simple_move/goal_path', 10)
+        cls.navigation_path_pub = cls.node.create_publisher(
+            NavigationPath, '/lab_test/simple_move/navigation_path', 10)
         cls.uncertainty_pub = cls.node.create_publisher(PoseArray, '/lab_test/uncertain_obstacles', qos)
         cls.stop_pub = cls.node.create_publisher(Empty, '/lab_test/stop', 10)
         cls.head_pub = cls.node.create_publisher(Float64MultiArray, '/hardware/head/current_pose', 10)
@@ -86,6 +90,8 @@ class LaboratoryNavigation(unittest.TestCase):
             cls.node.create_subscription(Twist, '/lab_cmd_vel', lambda m: setattr(cls, 'command', m), 10),
             cls.node.create_subscription(GoalStatus, '/lab_test/status', lambda m: cls.statuses.append(m), 10),
             cls.node.create_subscription(GoalStatus, '/lab_test/simple_move/goal_reached', lambda m: cls.results.append(m), 10),
+            cls.node.create_subscription(NavigationPath, '/lab_test/simple_move/navigation_path',
+                                         lambda m: cls.commands.append(m), 10),
             cls.node.create_subscription(Float64MultiArray, '/hardware/head/goal_pose',
                                          lambda m: setattr(cls, 'head_target', m.data[0]), 10),
         ]
@@ -229,6 +235,7 @@ class LaboratoryNavigation(unittest.TestCase):
         self.results.clear()
         self.statuses.clear()
         self.trace.clear()
+        self.commands.clear()
         type(self).minimum_clearance = float('inf')
 
     def set_params(self, **values):
@@ -289,6 +296,14 @@ class LaboratoryNavigation(unittest.TestCase):
     def test_logged_corner_route_at_launch_speed(self):
         self.navigate((0.041, 0.940, 1.635), (-1.253, -3.962, 1.573))
 
+    def test_logged_failed_goal_1(self):
+        self.navigate((-0.246, -3.789, 1.88), (-0.143179, -1.91941, 3.11077),
+                      timeout=40, approximate=True)
+
+    def test_logged_failed_narrow_corridor_goal_6(self):
+        self.navigate((-3.232, 3.733, 0.433), (-1.87306, 0.412902, 1.11724),
+                      timeout=40, approximate=True)
+
     def test_logged_goal_9_with_large_final_rotation(self):
         self.navigate((-0.714, -3.998, -0.126), (-0.150795, -3.24419, 3.03394), timeout=25)
 
@@ -297,8 +312,13 @@ class LaboratoryNavigation(unittest.TestCase):
 
     def test_logged_terminal_pose_next_to_wall(self):
         self.navigate((-1.253, -3.962, 1.573), (-0.279, -4.110, 1.503), timeout=25)
+        self.assertTrue(any(0.0 < c.arrival_radius <= 0.08 for c in self.commands))
         changes = [a[4]*b[4] < -0.01 for a,b in zip(self.trace, self.trace[1:])]
         self.assertLess(sum(changes), 4)
+
+    def test_start_inside_sampling_guard_recovers_before_tracking(self):
+        self.navigate((-0.279, -4.110, 1.503), (-1.253, -3.962, 1.573), timeout=25)
+        self.assertTrue(any(s.text == 'start_recovered' for s in self.statuses))
 
     def test_straight_corridor_preserves_speed(self):
         self.navigate((-2.245, -1.008, -math.pi/2), (-2.009, -2.660, -math.pi/2), timeout=25)
@@ -414,6 +434,109 @@ class LaboratoryNavigation(unittest.TestCase):
             rclpy.spin_once(self.node, timeout_sec=0.01)
         cls.integrate = False
         self.assertTrue(any(r.status == 3 for r in self.results), [(r.status,r.text) for r in self.results])
+
+    def test_short_recovery_does_not_restore_an_unneeded_heading(self):
+        cls = type(self)
+        self.set_params(use_pot_fields=False)
+        cls.x, cls.y, cls.yaw = -2.100, -3.139, 1.4
+        cls.head_pan = cls.head_target = 1.5
+        cls.uncertain_points = [(-1.850, -3.139)]
+        self.spin_for(0.7)
+        result = self.plan((cls.x, cls.y), (-2.245, -1.008))
+        self.assertTrue(result.start_recovery)
+        self.assertLess(sum(math.hypot(b.pose.position.x-a.pose.position.x,
+                                      b.pose.position.y-a.pose.position.y)
+                            for a,b in zip(result.path.poses, result.path.poses[1:])), 0.15)
+        command = NavigationPath()
+        command.path = result.path
+        command.path.header.stamp = self.node.get_clock().now().to_msg()
+        command.mode = NavigationPath.RECOVER_START
+        self.results.clear()
+        cls.integrate = True
+        self.navigation_path_pub.publish(command)
+        until = time.monotonic()+8
+        while not any(r.status in (3,4) for r in self.results) and time.monotonic() < until:
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+        cls.integrate = False
+        self.assertTrue(any(r.status == 3 for r in self.results), [(r.status,r.text) for r in self.results])
+        self.assertLess(max(abs(math.remainder(t[2]-1.4, 2*math.pi)) for t in self.trace), 0.4)
+        self.assertGreaterEqual(math.hypot(cls.x+1.850, cls.y+3.139), 0.28-1e-3)
+
+    def test_observation_waits_for_head_and_never_moves_the_base(self):
+        cls = type(self)
+        self.set_params(use_pot_fields=False)
+        cls.x, cls.y, cls.yaw = -2.100, -3.139, 0.0
+        cls.head_pan = cls.head_target = 0.0
+        cls.head_auto = False
+        self.spin_for(0.6)
+        command = NavigationPath()
+        command.mode = NavigationPath.OBSERVE
+        command.path.header.frame_id = 'map'
+        command.path.header.stamp = self.node.get_clock().now().to_msg()
+        for x,y in ((cls.x,cls.y), (cls.x+0.4,cls.y+0.6)):
+            pose = PoseStamped()
+            pose.pose.position.x, pose.pose.position.y, pose.pose.orientation.w = x,y,1.0
+            command.path.poses.append(pose)
+        cls.integrate = True
+        self.navigation_path_pub.publish(command)
+        self.spin_for(1.0)
+        self.assertFalse(any(r.status in (3,4) for r in self.results))
+        self.assertTrue(any(r.text == 'observing_blockage' for r in self.results))
+        cls.head_auto = True
+        until = time.monotonic()+4
+        while not any(r.status in (3,4) for r in self.results) and time.monotonic() < until:
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+        cls.integrate = False
+        self.assertTrue(any(r.status == 3 and r.text == 'observation_completed' for r in self.results))
+        self.assertTrue(all(t[3] == 0.0 and t[4] == 0.0 for t in self.trace))
+
+    def test_head_wait_does_not_consume_the_route_maneuver_budget(self):
+        cls = type(self)
+        self.set_params(use_pot_fields=False)
+        cls.x, cls.y, cls.yaw = -2.245, -1.008, 0.0
+        cls.head_pan = cls.head_target = 0.0
+        cls.head_auto = False
+        self.spin_for(0.7)
+        goal = PoseStamped()
+        goal.header.frame_id = 'map'
+        goal.pose.position.x, goal.pose.position.y = -2.009, -2.660
+        goal.pose.orientation.w = 1.0
+        self.goal_pub.publish(goal)
+        until = time.monotonic()+4
+        while not any(s.text == 'following_path' for s in self.statuses) and time.monotonic() < until:
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+        self.assertTrue(any(s.text == 'following_path' for s in self.statuses))
+        cls.uncertain_points = [(-2.10, -1.90)]
+        self.spin_for(4.0)
+        self.assertTrue(any(r.text == 'aligning_head' for r in self.results))
+        self.assertFalse(any(s.text.startswith('replanning:') and
+                             'waiting_for_updated_map' not in s.text for s in self.statuses))
+        cls.head_auto = True
+        until = time.monotonic()+4
+        while math.hypot(cls.command.linear.x, cls.command.linear.y) < 0.02 and time.monotonic() < until:
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+        self.assertGreater(math.hypot(cls.command.linear.x, cls.command.linear.y), 0.02)
+        self.spin_for(0.5)
+        self.assertFalse(any('route_blocked_without_progress' in s.text for s in self.statuses))
+
+    def test_unreachable_laboratory_goal_observes_and_has_bounded_retries(self):
+        cls = type(self)
+        cls.x, cls.y, cls.yaw = -2.100, -3.139, 0.0
+        cls.head_pan = cls.head_target = 0.0
+        self.spin_for(0.7)
+        goal = PoseStamped()
+        goal.header.frame_id = 'map'
+        goal.pose.position.x, goal.pose.position.y = -8.0, -8.0
+        goal.pose.orientation.w = 1.0
+        self.goal_pub.publish(goal)
+        until = time.monotonic()+33
+        while not any(s.status in (3,4) for s in self.statuses) and time.monotonic() < until:
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+        terminal = [s for s in self.statuses if s.status in (3,4)]
+        self.assertEqual(len(terminal), 1, [(s.status,s.text) for s in self.statuses])
+        self.assertEqual(terminal[0].status, 4)
+        self.assertTrue('planning_recovery_' in terminal[0].text, terminal[0].text)
+        self.assertTrue(any(s.text == 'observing_blockage' for s in self.statuses))
 
 
 if __name__ == '__main__':
