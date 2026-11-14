@@ -4,6 +4,8 @@
 Run after sourcing the built workspace:
   ROS_DOMAIN_ID=173 ROS_LOCALHOST_ONLY=1 python3 test_coordinated_navigation.py
 No hardware nodes are started. The supplied domain must be isolated from robots.
+Run the unknown-policy cases with NAVIGATION_TEST_ALLOW_UNKNOWN=0 and then 1.
+Set NAVIGATION_TEST_CMD_VEL_RELAY=1 to route simulated motion through topic_tools.
 """
 import array
 import copy
@@ -48,6 +50,29 @@ class NavigationIntegration(unittest.TestCase):
         cls.processes = []
         cls.logs = []
         cls.addClassCleanup(cls.cleanup)
+        cls.allow_unknown = os.environ.get('NAVIGATION_TEST_ALLOW_UNKNOWN') == '1'
+        cls.use_cmd_vel_relay = os.environ.get('NAVIGATION_TEST_CMD_VEL_RELAY') == '1'
+        if cls.use_cmd_vel_relay:
+            # Discover the bumper's retained publisher before navigation starts.
+            cls.bumper_cmd_pub = cls.node.create_publisher(
+                Twist, '/cmd_vel',
+                QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            binary = FilePath(get_package_prefix('topic_tools'))/'lib/topic_tools/relay'
+            log = open(f"{os.environ.get('NAVIGATION_LOG_PREFIX', '/tmp/navigation_test_')}relay.log", 'w')
+            cls.logs.append(log)
+            cls.processes.append(subprocess.Popen(
+                [str(binary), '/cmd_vel', '/test_base_cmd_vel',
+                 '--ros-args', '-r', '__node:=test_cmd_vel_relay'],
+                stdout=log, stderr=subprocess.STDOUT))
+            deadline = time.monotonic()+8
+            while time.monotonic() < deadline:
+                endpoints = cls.node.get_subscriptions_info_by_topic('/cmd_vel')
+                if any(e.node_name == 'test_cmd_vel_relay' and
+                       e.qos_profile.durability == DurabilityPolicy.TRANSIENT_LOCAL for e in endpoints):
+                    break
+                rclpy.spin_once(cls.node, timeout_sec=0.02)
+            else:
+                raise RuntimeError('Relay did not discover the transient-local bumper publisher')
         for package, executable, name, extra in [
             ('simple_move', 'simple_move_node', 'simple_move',
              ['-p', 'move_head:=false', '-p', 'max_linear_speed:=0.4']),
@@ -58,6 +83,8 @@ class NavigationIntegration(unittest.TestCase):
               '-p', 'laser_min_x:=0.1', '-p', 'laser_max_x:=1.0',
               '-p', 'laser_pot_fields_d0:=0.9', '-p', 'lidar_points_threshold:=0']),
         ]:
+            if package in ('simple_move', 'mvn_pln'):
+                extra += ['-p', f'allow_unknown:={str(cls.allow_unknown).lower()}']
             binary = FilePath(get_package_prefix(package)) / 'lib' / package / executable
             log = open(f"{os.environ.get('NAVIGATION_LOG_PREFIX', '/tmp/navigation_test_')}{name}.log", 'w')
             cls.logs.append(log)
@@ -86,7 +113,8 @@ class NavigationIntegration(unittest.TestCase):
         cls.cloud_pub = cls.node.create_publisher(PointCloud2, '/points', qos_profile_sensor_data)
         cls.result_pub = cls.node.create_publisher(GoalStatus, '/navigation/simple_move/goal_reached', 10)
         cls.subs = [
-            cls.node.create_subscription(Twist, '/cmd_vel', lambda m: setattr(cls, 'command', m), 10),
+            cls.node.create_subscription(Twist, '/test_base_cmd_vel' if cls.use_cmd_vel_relay else '/cmd_vel',
+                                         lambda m: setattr(cls, 'command', m), 10),
             cls.node.create_subscription(GoalStatus, '/navigation/status', lambda m: cls.statuses.append(m), 10),
             cls.node.create_subscription(GoalStatus, '/navigation/simple_move/goal_reached', lambda m: cls.results.append(m), 10),
             cls.node.create_subscription(Float64MultiArray, '/hardware/head/goal_pose',
@@ -123,6 +151,7 @@ class NavigationIntegration(unittest.TestCase):
         cls.inflated_start = False
         cls.curved_escape = False
         cls.blocked = False
+        cls.map_fill = 0
         cls.plan_calls = 0
         cls.plan_requests = []
         cls.planner_stale_response = False
@@ -230,7 +259,7 @@ class NavigationIntegration(unittest.TestCase):
         grid.info.resolution = 0.05
         grid.info.origin.position.x = grid.info.origin.position.y = -4.0
         grid.info.origin.orientation.w = 1.0
-        data = [0]*25600
+        data = [cls.map_fill]*25600
         if cls.blocked:
             for iy in range(76, 85):
                 for ix in range(87, 93):
@@ -333,6 +362,7 @@ class NavigationIntegration(unittest.TestCase):
         cls.corner_obstacle = False
         cls.inflated_start = False
         cls.curved_escape = False
+        cls.map_fill = 0
         cls.integrate = cls.head_auto = cls.blocked = False
         cls.publish_scan = True
         cls.cloud_points = 1
@@ -365,6 +395,66 @@ class NavigationIntegration(unittest.TestCase):
         cls.odom_jitter = 0.0
         cls.map_jitter = 0.0
         cls.freeze_odom = False
+
+    @unittest.skipUnless(os.environ.get('NAVIGATION_TEST_CMD_VEL_RELAY') == '1',
+                         'Requires the topic_tools relay fixture')
+    def test_velocity_commands_reach_base_through_transient_relay(self):
+        type(self).integrate = True
+        self.send_path(0.3, 0.0)
+        self.wait_for(lambda: self.x > 0.05, timeout=4)
+        self.wait_for(lambda: any(r.status == 3 for r in self.results), timeout=8)
+        self.assertAlmostEqual(self.x, 0.3, delta=0.04)
+        self.assertFalse(any(r.status == 4 for r in self.results))
+
+    def test_unknown_policy_controls_manager_dispatch_and_arrival(self):
+        cls = type(self)
+        cls.map_fill = -1
+        cls.integrate = True
+        self.spin_for(0.2)
+        self.send_goal(0.6, 0.0)
+        if self.allow_unknown:
+            self.wait_for(lambda: any(s.status == 3 for s in self.statuses), timeout=10)
+            self.assertAlmostEqual(self.x, 0.6, delta=0.04)
+            self.assertEqual(self.plan_calls, 1)
+            self.assertFalse(any('plan_invalid_on_current_map' in s.text for s in self.statuses))
+        else:
+            self.wait_for(lambda: any('plan_invalid_on_current_map' in s.text for s in self.statuses))
+            self.assertFalse(self.results, 'Rejected plans must not reach the controller')
+            self.assertAlmostEqual(self.x, 0.0)
+            self.assertEqual(math.hypot(self.command.linear.x, self.command.linear.y), 0.0)
+
+    def test_unknown_policy_controls_direct_controller_path(self):
+        cls = type(self)
+        cls.map_fill = -1
+        cls.integrate = True
+        self.spin_for(0.2)
+        self.send_path(0.6, 0.0)
+        self.wait_for(lambda: any(r.status in (3, 4) for r in self.results), timeout=10)
+        terminal = next(r for r in self.results if r.status in (3, 4))
+        self.assertEqual(terminal.status, 3 if self.allow_unknown else 4, terminal.text)
+        self.assertAlmostEqual(self.x, 0.6 if self.allow_unknown else 0.0, delta=0.04)
+
+    def test_unknown_permission_keeps_occupied_start_blocked(self):
+        cls = type(self)
+        cls.map_fill = -1
+        cls.blocked = cls.integrate = True
+        cls.x = 0.45
+        self.spin_for(0.2)
+        self.send_path(1.3, 0.0)
+        self.wait_for(lambda: any(r.status == 4 for r in self.results))
+        self.assertAlmostEqual(self.x, 0.45)
+        self.assertEqual(math.hypot(self.command.linear.x, self.command.linear.y), 0.0)
+
+    def test_unknown_permission_keeps_outside_map_blocked(self):
+        cls = type(self)
+        cls.map_fill = -1
+        cls.integrate = True
+        cls.x = 4.2
+        self.spin_for(0.2)
+        self.send_path(4.5, 0.0)
+        self.wait_for(lambda: any(r.status == 4 for r in self.results))
+        self.assertAlmostEqual(self.x, 4.2)
+        self.assertEqual(math.hypot(self.command.linear.x, self.command.linear.y), 0.0)
 
     def test_local_start_recovery_replans_from_actual_exit(self):
         cls = type(self)

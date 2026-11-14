@@ -53,6 +53,7 @@ public:
     startup.read_only = true;
     startup.description = "Configured at startup.";
     const bool namespaced = declare_parameter<bool>("use_namespace", false, startup);
+    allow_unknown_ = declare_parameter<bool>("allow_unknown", false, startup);
     base_frame_ = declare_parameter<std::string>("base_link_name", "base_link", startup);
     map_frame_ = declare_parameter<std::string>("map_frame", "map", startup);
     odom_frame_ = declare_parameter<std::string>("odom_name", "odom", startup);
@@ -460,7 +461,7 @@ private:
       rx < info.width && ry < info.height &&
       (recovering || map_->data[size_t(ry) * info.width + size_t(rx)] > 0);
     motion_constraints_.update(coherent && escape ? *clearance_map_ : *map_, uncertain_obstacles_,
-      robot_radius_ + path_planner::uncertainty_margin_m);
+      robot_radius_ + path_planner::uncertainty_margin_m, allow_unknown_);
     auto cell_free = [this, &info, &escape, c, s, start_x, start_y](int x, int y) {
         if (x < 0 || y < 0 || x >= static_cast<int>(info.width) ||
           y >= static_cast<int>(info.height)) {return false;}
@@ -472,7 +473,7 @@ private:
               info.origin.position.y + s * gx + c * gy - start_y) <=
             get_parameter("start_escape_radius").as_double()) {return true;}
         }
-        if (value != 0) {
+        if (value != 0 && !(allow_unknown_ && value == -1)) {
           const double gx = (x + 0.5) * info.resolution, gy = (y + 0.5) * info.resolution;
           RCLCPP_WARN_THROTTLE(
             get_logger(),
@@ -711,7 +712,7 @@ private:
         rclcpp::Time(map_->header.stamp, get_clock()->get_clock_type());
       const bool escape = coherent && occupancy_at(*map_, robot.position) > 0;
       motion_constraints_.update(escape ? *clearance_map_ : *map_, uncertain_obstacles_,
-        robot_radius_ + path_planner::uncertainty_margin_m);
+        robot_radius_ + path_planner::uncertainty_margin_m, allow_unknown_);
     }
     log_navigation(controller_phase_.empty() ? "evaluating" : controller_phase_);
     if (state_ == State::WAITING_SENSORS) {
@@ -941,7 +942,7 @@ private:
     request->start.header.frame_id = request->goal.header.frame_id = map_frame_;
     request->start.pose = robot;request->goal.pose = goal_;
     motion_constraints_.update(*map_, uncertain_obstacles_,
-      robot_radius_ + path_planner::uncertainty_margin_m);
+      robot_radius_ + path_planner::uncertainty_margin_m, allow_unknown_);
     const auto& alternative = target_goal_.position;
     const bool preserve_alternative = approximate_goal_ && !start_recovery_ &&
       occupancy_at(*map_, alternative) == 0 &&
@@ -1195,6 +1196,7 @@ private:
   tf2_ros::TransformListener tf_listener_;
   std::string base_frame_, map_frame_, odom_frame_, motion_id_;
   State state_ = State::IDLE;
+  bool allow_unknown_ = false;
   geometry_msgs::msg::Pose goal_, target_goal_, robot_;
   path_planner::MotionObservation odometry_;
   int control_attempts_ = 0;

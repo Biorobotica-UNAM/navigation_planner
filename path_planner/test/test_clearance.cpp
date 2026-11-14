@@ -39,6 +39,34 @@ TEST(PathQuality, StraightRouteAndFinalOrientation)
   EXPECT_NEAR(result.path.poses.back().pose.orientation.z, std::sin(0.6), 1e-6);
 }
 
+TEST(PathQuality, UnknownPolicyPreservesOccupiedAndMapBoundsChecks)
+{
+  auto grid = make_map();
+  const auto costs = grid;
+  for (int y = 0; y < 100; ++y) {grid.data[y * 100 + 50] = -1;}
+  const auto unchanged = grid.data;
+  path_planner::MotionConstraints constraints;
+  PlanOptions options;
+  options.diagonal_paths = true;
+  options.motion_constraints = &constraints;
+  for (const bool allow_unknown : {false, true}) {
+    options.allow_unknown = allow_unknown;
+    constraints.update(grid, geometry_msgs::msg::PoseArray(), 0.28, allow_unknown);
+    const auto result = PathPlanner::Plan(grid, costs, pose(1, 2), pose(4, 2), options);
+    EXPECT_EQ(result.status, allow_unknown ? PlanStatus::Success : PlanStatus::NoPath);
+    EXPECT_EQ(grid.data, unchanged);
+  }
+  // Unknown permission never permits leaving the grid or crossing occupied cells.
+  EXPECT_EQ(PathPlanner::Plan(grid, costs, pose(1, 2), pose(6, 2), options).status,
+    PlanStatus::OutsideMap);
+  EXPECT_FALSE(constraints.sampling_free(1, 2, 6, 2));
+  for (int y = 0; y < 100; ++y) {grid.data[y * 100 + 50] = 100;}
+  constraints.update(grid, geometry_msgs::msg::PoseArray(), 0.28, true);
+  EXPECT_EQ(PathPlanner::Plan(grid, costs, pose(1, 2), pose(4, 2), options).status,
+    PlanStatus::NoPath);
+  EXPECT_FALSE(constraints.sampling_free(1, 2, 4, 2));
+}
+
 TEST(PathQuality, RejectsSharpCornerAndAcceptsStraightDuplicatePoints)
 {
   nav_msgs::msg::Path route;

@@ -1,5 +1,11 @@
 <launch>
 
+  <arg name="namespace_nav" default="navigation"/>
+  <arg name="namespace_hardware" default="hardware"/>
+  <arg name="use_sim_time" default="false"/>
+  <arg name="laser_scan_topic" default="/$(var namespace_hardware)/base/scan"/>
+  <arg name="odom_frame" default="odom"/>
+
   <!-- ============================= -->
   <!--           AMCL NODE          -->
   <!-- ============================= -->
@@ -12,7 +18,7 @@
 
     <!-- Frames -->
     <param name="base_frame_id" value="base_footprint"/>
-    <param name="odom_frame_id" value="odom"/>
+    <param name="odom_frame_id" value="$(var odom_frame)"/>
     <param name="global_frame_id" value="map"/>
 
     <!-- Topics -->
@@ -79,7 +85,7 @@
     <param name="recovery_alpha_fast" value="0.1"/>
 
     <!-- Misc -->
-    <param name="use_sim_time" value="false"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
 
      <!-- Initial Pose -->
     <param name="set_initial_pose" value="true"/>

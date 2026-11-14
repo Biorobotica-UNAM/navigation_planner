@@ -32,11 +32,19 @@
   <test_depend>python3-pil</test_depend>
 
   <exec_depend>launch</exec_depend>
-<exec_depend>launch_ros</exec_depend>
-<exec_depend>ament_index_python</exec_depend>
-
-
-
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>nav2_amcl</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>map_augmenter</exec_depend>
+  <exec_depend>path_planner</exec_depend>
+  <exec_depend>simple_move</exec_depend>
+  <exec_depend>potential_fields</exec_depend>
+  <exec_depend>mvn_pln</exec_depend>
+  <exec_depend>locations_manager</exec_depend>
+  <exec_depend>nav_controller</exec_depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>

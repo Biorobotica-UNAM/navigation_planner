@@ -111,7 +111,7 @@ public:
       for (int cy = std::max(0, iy - 1); cy <= std::min(static_cast<int>(info_.height) - 1, iy + 1); ++cy) {
         for (int cx = std::max(0, ix - 1); cx <= std::min(static_cast<int>(info_.width) - 1, ix + 1); ++cx) {
           const int value = grid_->data[static_cast<size_t>(cy) * info_.width + cx];
-          if (value == 0 || (allow_unknown_ && value < 0)) {continue;}
+          if (value == 0 || (allow_unknown_ && value == -1)) {continue;}
           if (cx == ix && cy == iy) {return false;}
           const double dx = std::max({double(cx) - x, 0.0, x - double(cx + 1)});
           const double dy = std::max({double(cy) - y, 0.0, y - double(cy + 1)});

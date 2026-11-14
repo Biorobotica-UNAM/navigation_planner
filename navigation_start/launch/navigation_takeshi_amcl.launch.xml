@@ -250,6 +250,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="yaml_filename" value="$(var static_map_file)"/>
   </node>
 
@@ -260,6 +261,7 @@
         respawn="true"
         namespace="$(var namespace_nav)"
         ros_args="--log-level warn">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="yaml_filename" value="$(var prohibition_map_file)"/>
     <remap from="map" to="fixed_prohibition_layer_map"/>
   </node>
@@ -269,7 +271,13 @@
   <!--                      Localization (AMCL)                           -->
   <!-- ================================================================== -->
 
-  <include file="$(find-pkg-share navigation_start)/launch/amcl_hsr.launch.xml"/>
+  <include file="$(find-pkg-share navigation_start)/launch/amcl_hsr.launch.xml">
+    <arg name="namespace_nav" value="$(var namespace_nav)"/>
+    <arg name="namespace_hardware" value="$(var namespace_hardware)"/>
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="laser_scan_topic" value="$(var laser_scan_topic)"/>
+    <arg name="odom_frame" value="$(var odom_frame)"/>
+  </include>
 
   <node name="lifecycle_manager_map"
         pkg="nav2_lifecycle_manager"
@@ -434,6 +442,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="allow_unknown" value="$(var allow_unknown)"/>
     <param name="robot_radius" value="$(var robot_radius)"/>
     <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_namespace"                 value="$(var use_namespace)"/>
@@ -581,6 +590,7 @@
         output="screen"
         respawn="true"
         namespace="$(var namespace_nav)">
+    <param name="allow_unknown" value="$(var allow_unknown)"/>
     <param name="odom_name" value="$(var odom_frame)"/>
     <param name="debug_detection" value="$(var debug_detection)"/>
     <param name="use_namespace"            value="$(var use_namespace)"/>

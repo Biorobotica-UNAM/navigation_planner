@@ -690,6 +690,37 @@ cabeza; se evita un giro grande innecesario al cruzar +/-pi.
 umbral de parada y la velocidad de pan. No se amplió `sensor_timeout_sec` para
 ocultar pérdida de nube.
 
+## Launches de navegación de Takeshi
+
+`navigation_takeshi_amcl.launch.xml` y `navigation_takeshi_slam.launch.xml`
+usan los mismos nodos y ajustes de obstáculos, planeación, control de movimiento,
+cabeza y recuperación. Ambos consumen directamente
+`/hardware/camera/points`; SLAM ya no inicia `map_enhancer` ni `cloud_filter`.
+
+AMCL carga el mapa estático y la capa de prohibición de `lab_2026`. SLAM inicia
+`async_slam_toolbox_node` en modo `mapping`, publica el mapa en
+`/navigation/map` y usa `slam_toolbox/dynamic_map` como servicio de respaldo
+del aumentador. `augmenter_use_online:=true` mantiene la actualización por
+servicio cuando dejan de llegar mapas por tópico. SLAM conserva una capa de
+prohibición vacía por defecto y `allow_unknown:=true` para planear hacia celdas
+sin explorar; este último se puede desactivar con `allow_unknown:=false`.
+El lifecycle manager de SLAM administra únicamente `prohibition_map_server`;
+el de AMCL también administra `static_map_server` y `amcl`.
+
+Los dos launches propagan `use_sim_time` a los servidores de mapas y al nodo
+de localización o mapeo. El include de AMCL respeta `namespace_nav`,
+`namespace_hardware`, `laser_scan_topic` y `odom_frame`; el frame de odometría
+de SLAM usa `odom_frame` por defecto. Los valores predeterminados de AMCL
+se conservan.
+
+```bash
+ros2 launch navigation_start navigation_takeshi_slam.launch.xml
+ros2 launch navigation_start navigation_takeshi_amcl.launch.xml
+```
+
+Se ejecuta uno de los dos modos a la vez: cada uno proporciona su propia
+transformación `map` → `odom`.
+
 ## Validation
 
 The recovery regression coverage includes 35 C++ cases, 18 laboratory integration

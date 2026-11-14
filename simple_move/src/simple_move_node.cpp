@@ -77,6 +77,7 @@ public:
     startup.read_only = true;
     startup.description = "Configured at startup.";
     const bool namespaced = declare_parameter<bool>("use_namespace", false, startup);
+    allow_unknown_ = declare_parameter<bool>("allow_unknown", false, startup);
     base_frame_ = declare_parameter<std::string>("base_link_name", "base_link", startup);
     odom_frame_ = declare_parameter<std::string>("odom_name", "odom", startup);
     map_frame_ = declare_parameter<std::string>("map_frame", "map", startup);
@@ -178,7 +179,9 @@ public:
     std::string prefix = namespaced ? get_namespace() : "";
     if (prefix == "/") {prefix.clear();}
     const auto control = prefix + "/simple_move/";
-    cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+    // Match the retained command transport used by the HSR relay and bumper.
+    cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>(
+      "/cmd_vel", rclcpp::QoS(10).transient_local());
     fields_enable_pub_ = create_publisher<std_msgs::msg::Bool>(
       prefix + "/potential_fields/enable",
       10);
@@ -737,7 +740,8 @@ private:
     if (local_context_.grid && motion_kind_ == Command::BRAKE) {
       motion_constraints_.update(*local_context_.grid,
         uncertain_obstacles_ ? *uncertain_obstacles_ : empty_uncertainty_,
-        get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m);
+        get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m,
+        allow_unknown_);
     }
     if (uncertain_obstacles_) {
       if (std::chrono::duration<double>(tick - uncertainty_received_).count() > map_timeout) {
@@ -818,7 +822,8 @@ private:
     if (recovering && local_context_.grid) {
       motion_constraints_.update(*map_,
         uncertain_obstacles_ ? *uncertain_obstacles_ : empty_uncertainty_,
-        get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m);
+        get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m,
+        allow_unknown_);
       recovery_clear = recovery_clear && motion_constraints_.uncertainty_free(x, y, x, y, false) &&
         motion_constraints_.sampling_free(x, y, x, y, false);
     }
@@ -828,7 +833,8 @@ private:
       motion_constraints_.update(escape_active_ || recovering || final_align_ || motion_kind_ == Command::ROTATE ?
         *local_context_.grid : *map_,
         uncertain_obstacles_ ? *uncertain_obstacles_ : empty_uncertainty_,
-        get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m);
+        get_parameter("robot_radius").as_double() + path_planner::uncertainty_margin_m,
+        allow_unknown_);
       recovery_clear = recovery_clear && motion_constraints_.uncertainty_free(x, y, x, y, false) &&
         motion_constraints_.sampling_free(x, y, x, y, false);
     }
@@ -1734,7 +1740,7 @@ private:
         diagnostic->cell_x = ix;diagnostic->cell_y = iy;diagnostic->value = grid.data[index];
       }
       if (escape && map_->data[index] == 0) {escape = false;}
-      if (grid.data[index] != 0) {
+      if (grid.data[index] != 0 && !(allow_unknown_ && grid.data[index] == -1)) {
         if (diagnostic) {
           diagnostic->reason = grid.data[index] < 0 ? "unknown_cell" : "occupied_cell";
         }
@@ -1796,6 +1802,7 @@ private:
   tf2_ros::TransformListener tf_listener_;
   std::string base_frame_, odom_frame_, map_frame_, last_phase_;
   LocalContext local_context_;
+  bool allow_unknown_ = false;
   path_planner::MotionConstraints motion_constraints_;
   geometry_msgs::msg::PoseArray empty_uncertainty_;
   uint8_t motion_kind_ = Command::FOLLOW_PATH;
