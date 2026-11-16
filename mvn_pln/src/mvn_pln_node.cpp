@@ -100,7 +100,7 @@ public:
         1).transient_local());
     planner_ = create_client<PlanPath>(prefix + "/path_planner/plan_navigation");
     goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-      "/nav_control/goal", 10,
+      "goal", 10,
       [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr goal) {accept_goal(*goal);});
     result_sub_ = create_subscription<Status>(
       prefix + "/simple_move/goal_reached", 10,
@@ -202,7 +202,8 @@ public:
         }
         map_ = grid; map_received_ = Clock::now();
       });
-    for (const auto & topic : {prefix + "/stop", prefix + "/navigation/stop"}) {
+
+      const auto & topic = prefix + "/stop";
       stop_subs_.push_back(
         create_subscription<std_msgs::msg::Empty>(
           topic, 10,
@@ -211,7 +212,7 @@ public:
               end_goal(Status::ABORTED, "cancelled");
             }
           }));
-    }
+    
     patience_sub_ = create_subscription<std_msgs::msg::Bool>(
       prefix + "/set_patience", 10,
       [this](std_msgs::msg::Bool::ConstSharedPtr msg) {

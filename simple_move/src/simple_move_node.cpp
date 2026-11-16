@@ -291,7 +291,7 @@ public:
     bypass_sub_ = create_subscription<std_msgs::msg::Bool>(
       prefix + "/camera_obstacles/bypass", 10,
       [this](std_msgs::msg::Bool::ConstSharedPtr msg) {head_bypass_ = msg->data;});
-    for (const auto & topic : {prefix + "/stop", prefix + "/navigation/stop", control + "stop"}) {
+    for (const auto & topic : {prefix + "/stop", control + "stop"}) {
       stop_subs_.push_back(
         create_subscription<std_msgs::msg::Empty>(
           topic, 10,
