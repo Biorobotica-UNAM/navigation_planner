@@ -74,7 +74,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_laboratory_constraints path_planner_lib)
   target_include_directories(test_laboratory_constraints PRIVATE ../map_augmenter/include)
   target_compile_definitions(test_laboratory_constraints PRIVATE
-    NAVIGATION_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../navigation_start/maps")
+    NAVIGATION_MAPS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../navigation_controller/navigation_start/maps")
 endif()
 
 ament_package()

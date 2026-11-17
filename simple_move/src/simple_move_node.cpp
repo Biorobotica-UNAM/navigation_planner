@@ -1,5 +1,6 @@
 // ----- ROS 2 -----
 #include <rclcpp/rclcpp.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 
@@ -230,6 +231,8 @@ public:
         {
           RCLCPP_WARN(get_logger(), "Invalid arrival region");return;
         }
+        if (rclcpp::Time(command->path.header.stamp, get_clock()->get_clock_type()).nanoseconds() <=
+          std::max(stop_watermark_, motion_watermark_)) {return;}
         double precision = 0.0;
         if (command->arrival_radius > 0.0) {
           if (command->path.poses.empty()) {return;}
@@ -288,9 +291,20 @@ public:
           force_ = *msg; force_received_ = Clock::now();
         }
       });
-    bypass_sub_ = create_subscription<std_msgs::msg::Bool>(
-      prefix + "/camera_obstacles/bypass", 10,
-      [this](std_msgs::msg::Bool::ConstSharedPtr msg) {head_bypass_ = msg->data;});
+    stop_service_ = create_service<std_srvs::srv::Trigger>(
+      control + "stop_navigation",
+      [this](std_srvs::srv::Trigger::Request::SharedPtr,
+        std_srvs::srv::Trigger::Response::SharedPtr response) {
+        // Fence commands published before the stop, including delayed DDS samples.
+        stop_watermark_ = now().nanoseconds();
+        if (active_) {finish(Status::ABORTED, "stop_received");}
+        else {
+          velocity_.fill(0.0); acceleration_.fill(0.0);
+          cmd_pub_->publish(geometry_msgs::msg::Twist());
+        }
+        response->success = true;
+        response->message = "Controller idle; zero velocity published";
+      });
     for (const auto & topic : {prefix + "/stop", control + "stop"}) {
       stop_subs_.push_back(
         create_subscription<std_msgs::msg::Empty>(
@@ -382,6 +396,9 @@ private:
 
   void start_motion(const Path & path, bool relative, uint8_t kind = Command::FOLLOW_PATH)
   {
+    if (!relative && rclcpp::Time(path.header.stamp, get_clock()->get_clock_type()).nanoseconds() <= std::max(stop_watermark_, motion_watermark_)) {
+      return; // This command belongs to an operation closed by a confirmed stop.
+    }
     const auto previous_velocity = velocity_, previous_acceleration = acceleration_;
     const bool braking = active_ && kind == Command::BRAKE &&
       path.header.frame_id == path_.header.frame_id;
@@ -407,6 +424,7 @@ private:
         finish(Status::ABORTED, "invalid_path"); return;
       }
     }
+    if (!relative) {motion_watermark_ = rclcpp::Time(path.header.stamp, get_clock()->get_clock_type()).nanoseconds();}
     path_ = path;
     lengths_.assign(path.poses.size(), 0.0);
     for (size_t i = 1; i < path.poses.size(); ++i) {
@@ -497,7 +515,7 @@ private:
     const int flags = int(final_align_) |
       (int(head_holding_) << 1) | (int(capture_) << 2) | (int(escape_active_) << 3);
     const double interval = final_profile_ || final_align_ || capture_ || local_detour_ ||
-      escape_active_ || (get_parameter("move_head").as_bool() && !head_bypass_ && head_holding_) ||
+      escape_active_ || (get_parameter("move_head").as_bool() && head_holding_) ||
       status_.text.compare(0, 8, "waiting_") == 0 ? 0.2 : 1.0;
     if (!changed && flags == diagnostic_flags_ &&
       std::chrono::duration<double>(tick - last_diagnostic_).count() < interval) {return;}
@@ -571,7 +589,7 @@ private:
     const double head_speed_limit = get_parameter("head_max_pan_speed").as_double();
     const double head_acceleration_limit = get_parameter("head_max_pan_acceleration").as_double();
     const bool omni = get_parameter("motion_mode").as_string() == "omni";
-    const bool use_head = get_parameter("move_head").as_bool() && !head_bypass_;
+    const bool use_head = get_parameter("move_head").as_bool();
     if (use_head && !last_use_head_) {head_holding_ = true;}
     last_use_head_ = use_head;
     const bool use_fields = get_parameter("use_pot_fields").as_bool();
@@ -1842,7 +1860,7 @@ private:
   double best_terminal_error_ = std::numeric_limits<double>::infinity();
   Clock::time_point terminal_angle_since_;
   bool final_profile_ = false, capture_ = false, route_obstructed_ = false, local_detour_ = false;
-  bool head_bypass_ = false, collision_ = false, fields_ready_ = false, last_omni_ = true;
+  bool collision_ = false, fields_ready_ = false, last_omni_ = true;
   double obstacle_speed_limit_ = 0.0;
   double initial_elapsed_ = 0.0, final_elapsed_ = 0.0;
   double local_direction_ = std::numeric_limits<double>::quiet_NaN();
@@ -1862,6 +1880,8 @@ private:
     last_fields_enable_, ready_received_;
   nav_msgs::msg::OccupancyGrid::ConstSharedPtr map_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
+  int64_t stop_watermark_ = -1, motion_watermark_ = -1;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stop_service_;
   OnSetParametersCallbackHandle::SharedPtr parameter_callback_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
@@ -1871,7 +1891,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr head_pub_;
   rclcpp::Subscription<Path>::SharedPtr path_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr head_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr risk_sub_, ready_sub_, bypass_sub_,
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr risk_sub_, ready_sub_,
     nav_stop_sub_, obstruction_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr force_sub_;
   std::vector<rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr> stop_subs_;

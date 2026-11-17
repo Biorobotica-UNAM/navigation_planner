@@ -904,9 +904,10 @@ PlanResult PathPlanner::RecoverStart(
             }
             if (queue.empty())
             {
-                result.status = PlanStatus::GoalBlocked;
-                result.detail = "recovery_goal_has_no_free_seed";
-                return result;
+                // A blocked destination must not trap a physically safe local
+                // escape. Exit inflation first; the coordinator then replans
+                // toward the unchanged original goal using a fresh robot pose.
+                reachable.clear();
             }
         }
         // Allocate only the local mask. Neither input grid is copied or cleared.

@@ -22,6 +22,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -43,6 +44,7 @@ add_executable(simple_move_node
 target_include_directories(simple_move_node PRIVATE include)
 
 ament_target_dependencies(simple_move_node
+  std_srvs
   rclcpp
   std_msgs
   sensor_msgs

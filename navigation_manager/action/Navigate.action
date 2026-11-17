@@ -1,0 +1,30 @@
+uint8 POSE=0
+uint8 LOCATION=1
+uint8 target_type
+string location_name
+geometry_msgs/PoseStamped pose
+bool move_head
+---
+uint8 SUCCESS=0
+uint8 APPROXIMATE=1
+uint8 CANCELLED=2
+uint8 PREEMPTED=3
+uint8 INVALID_GOAL=4
+uint8 FAILED=5
+uint8 result_code
+string reason
+string result_message
+float32 position_error_m
+float32 orientation_error_rad
+---
+uint8 RESOLVING=0
+uint8 CONFIGURING=1
+uint8 PLANNING=2
+uint8 MOVING=3
+uint8 RECOVERING=4
+uint8 VERIFYING=5
+uint8 STOPPING=6
+uint8 status_code
+string status_message
+float32 distance_remaining_m
+uint16 total_recoveries
