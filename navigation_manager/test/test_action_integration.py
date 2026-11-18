@@ -29,10 +29,12 @@ from ament_index_python.packages import get_package_prefix
 from geometry_msgs.msg import PoseStamped, TransformStamped, Twist, Vector3
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Bool, Float32, Float64MultiArray
+from std_srvs.srv import Trigger
 from actionlib_msgs.msg import GoalStatus
 from action_msgs.msg import GoalStatus as ActionStatus
 from tf2_ros import TransformBroadcaster
 from navigation_manager.action import Navigate
+from navigation_manager.msg import NavigationStatus
 from path_planner.srv import PlanPath, GetPlanningSnapshot
 from known_locations_interfaces.srv import LocationsGet
 from rcl_interfaces.srv import GetParameters
@@ -51,6 +53,7 @@ class NavigationActionIntegration(unittest.TestCase):
         cls.command = Twist()
         cls.integrate = True
         cls.sensor_ready = True
+        cls.collision_risk = False
         cls.freeze_tf = False
         cls.blocked = False
         cls.plan_failure = ''
@@ -61,11 +64,14 @@ class NavigationActionIntegration(unittest.TestCase):
         cls.requests = []
         cls.deferred = []
         cls.statuses, cls.head_goals, cls.motion_commands = [], [], []
+        cls.navigation_statuses, cls.feedback = [], []
         cls.head_pose = [0.0, -0.5]
         cls.head_auto = True
         cls.last_tick = time.monotonic()
         cls.tf = TransformBroadcaster(cls.node)
         retained = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        cls.pose_pub = cls.node.create_publisher(PoseStamped, '/navigation/goal', 10)
+        cls.reset = cls.node.create_client(Trigger, '/action_test/reset_fault')
         cls.map_pub = cls.node.create_publisher(OccupancyGrid, '/action_test/augmented_map', retained)
         cls.clearance_pub = cls.node.create_publisher(OccupancyGrid, '/action_test/clearance_map', retained)
         cls.ready_pub = cls.node.create_publisher(Bool, '/action_test/potential_fields/ready', 10)
@@ -75,6 +81,8 @@ class NavigationActionIntegration(unittest.TestCase):
         cls.head_pub = cls.node.create_publisher(Float64MultiArray, '/hardware/head/current_pose', 10)
         cls.result_pub = cls.node.create_publisher(GoalStatus, '/action_test/simple_move/goal_reached', 10)
         cls.subs = [
+            cls.node.create_subscription(NavigationStatus, '/action_test/navigation_status',
+                                         cls.navigation_statuses.append, retained),
             cls.node.create_subscription(Twist, '/cmd_vel', lambda m: setattr(cls, 'command', m), retained),
             cls.node.create_subscription(GoalStatus, '/action_test/status', lambda m: cls.statuses.append(m), 10),
             cls.node.create_subscription(Float64MultiArray, '/hardware/head/goal_pose', cls.head_command, 10),
@@ -95,7 +103,7 @@ class NavigationActionIntegration(unittest.TestCase):
             ('simple_move', 'simple_move_node', 'simple_move',
              ['use_pot_fields:=true', 'move_head:=true', 'max_linear_speed:=0.4']),
             ('navigation_manager', 'navigation_manager_node', 'navigation_manager',
-             ['locations_service:=/test_locations/get', 'legacy_move_head:=false',
+             ['motion_node:=simple_move', 'locations_service:=/test_locations/get', 'legacy_move_head:=false',
               'plan_request_timeout_sec:=1.0', 'replan_period_sec:=0.15',
               'sensor_wait_timeout_sec:=2.0', 'recovery.replan.attempts:=3',
               'recovery.observation.attempts:=1', 'recovery.sensors.attempts:=2',
@@ -240,7 +248,7 @@ class NavigationActionIntegration(unittest.TestCase):
         cls.map_pub.publish(grid)
         cls.clearance_pub.publish(grid)
         cls.ready_pub.publish(Bool(data=cls.sensor_ready))
-        cls.risk_pub.publish(Bool(data=False))
+        cls.risk_pub.publish(Bool(data=cls.collision_risk))
         cls.speed_pub.publish(Float32(data=1.0 if cls.sensor_ready else 0.0))
         cls.force_pub.publish(Vector3())
         cls.head_pub.publish(Float64MultiArray(data=cls.head_pose))
@@ -268,7 +276,10 @@ class NavigationActionIntegration(unittest.TestCase):
         cls.freeze_tf = cls.blocked = cls.relocate = cls.start_escape = False
         cls.plan_failure = ''
         cls.plan_delay = 0.0
+        cls.collision_risk = False
         cls.statuses.clear()
+        cls.navigation_statuses.clear()
+        cls.feedback.clear()
         cls.head_goals.clear()
         cls.motion_commands.clear()
         cls.requests.clear()
@@ -282,7 +293,7 @@ class NavigationActionIntegration(unittest.TestCase):
         goal.pose.pose.position.x, goal.pose.pose.position.y = float(x), float(y)
         goal.pose.pose.orientation.z, goal.pose.pose.orientation.w = math.sin(yaw/2), math.cos(yaw/2)
         goal.move_head = head
-        future = self.client.send_goal_async(goal)
+        future = self.client.send_goal_async(goal, feedback_callback=lambda m: self.feedback.append(m.feedback))
         self.wait_for(future.done)
         handle = future.result()
         self.assertTrue(handle.accepted)
@@ -309,6 +320,12 @@ class NavigationActionIntegration(unittest.TestCase):
         self.assertLessEqual(result.result.position_error_m, 0.03)
         self.assertLessEqual(result.result.orientation_error_rad, 0.05)
         self.assertEqual(len(self.head_goals), 0)
+        moving = [m for m in self.feedback if m.status_code == Navigate.Feedback.MOVING]
+        self.assertGreaterEqual(len(moving), 2)
+        self.assertGreater(moving[0].distance_remaining_m, moving[-1].distance_remaining_m)
+        self.assertTrue(any(m.status_message == 'Approaching goal' for m in moving))
+        self.wait_for(lambda: any(m.source == NavigationStatus.SOURCE_ACTION and m.result_valid and
+                                  m.result_code == Navigate.Result.SUCCESS for m in self.navigation_statuses))
         request = GetParameters.Request(names=['move_head'])
         future = self.params.call_async(request)
         self.wait_for(future.done)
@@ -360,6 +377,8 @@ class NavigationActionIntegration(unittest.TestCase):
         self.wait_for(lambda: self.command.linear.x > 0.03)
         type(self).sensor_ready = False
         self.wait_for(lambda: any(s.text == 'obstacle_data_stale' for s in self.statuses))
+        self.wait_for(lambda: any(m.status_code == NavigationStatus.RECOVERING and
+                                  m.total_recoveries > 0 for m in self.navigation_statuses))
         self.spin_for(0.7)
         self.assertLess(abs(self.command.linear.x), 0.001)
         type(self).sensor_ready = True
@@ -444,6 +463,94 @@ class NavigationActionIntegration(unittest.TestCase):
         self.spin_for(0.6)
         self.assertAlmostEqual(self.x, stopped_at, delta=0.001)
         self.assertLess(abs(self.command.linear.x), 0.001)
+
+    def test_16_topic_goal_and_late_status_subscriber(self):
+        pose = PoseStamped()
+        pose.header.frame_id = 'map'
+        pose.pose.position.x = 0.4
+        pose.pose.orientation.w = 1.0
+        self.pose_pub.publish(pose)
+        self.wait_for(lambda: any(m.source == NavigationStatus.SOURCE_TOPIC and m.result_valid
+                                  for m in self.navigation_statuses))
+        result = self.navigation_statuses[-1]
+        self.assertEqual(result.result_code, Navigate.Result.SUCCESS)
+        self.assertFalse(self.feedback)
+        self.assertTrue(any(m.source == NavigationStatus.SOURCE_TOPIC and
+                            m.status_code == NavigationStatus.FOLLOWING and not m.result_valid
+                            for m in self.navigation_statuses))
+        received = []
+        retained = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        subscription = self.node.create_subscription(
+            NavigationStatus, '/action_test/navigation_status', received.append, retained)
+        try:
+            self.wait_for(lambda: bool(received))
+            self.assertEqual(received[0], result)
+            self.spin_for(0.45)
+            self.assertEqual(len(received), 1)
+        finally:
+            self.node.destroy_subscription(subscription)
+
+    def test_17_cancel_while_pending(self):
+        previous = self.send(x=2.0)
+        self.wait_for(lambda: self.command.linear.x > 0.03)
+        pending = self.send(x=1.0)
+        request = pending.cancel_goal_async()
+        self.wait_for(request.done)
+        self.assertTrue(request.result().goals_canceling)
+        canceled = self.result(pending)
+        self.assertEqual(canceled.status, ActionStatus.STATUS_CANCELED)
+        self.assertEqual(canceled.result.result_code, Navigate.Result.CANCELLED)
+        self.assertEqual(self.result(previous).result.result_code, Navigate.Result.PREEMPTED)
+        self.assertEqual(len(self.motion_commands), 1)
+
+    def test_18_fault_reset_requires_fresh_odometry(self):
+        handle = self.send(x=2.0)
+        self.wait_for(lambda: self.command.linear.x > 0.03)
+        type(self).freeze_tf = True
+        self.spin_for(0.65)
+        cancel = handle.cancel_goal_async()
+        self.wait_for(cancel.done)
+        self.assertTrue(cancel.result().goals_canceling)
+        self.assertEqual(self.result(handle).result.reason, 'stop_unverified')
+        self.wait_for(lambda: bool(self.navigation_statuses) and self.navigation_statuses[-1].faulted)
+        commands = len(self.motion_commands)
+        self.assertEqual(self.result(self.send()).result.reason, 'stop_unverified')
+        self.assertEqual(len(self.motion_commands), commands)
+
+        self.wait_for(self.reset.service_is_ready)
+        attempt = self.reset.call_async(Trigger.Request())
+        self.wait_for(attempt.done)
+        self.assertTrue(attempt.result().success)
+        self.wait_for(lambda: self.navigation_statuses[-1].status_message.startswith('Fault reset timed out'))
+        self.assertTrue(self.navigation_statuses[-1].faulted)
+
+        type(self).freeze_tf = False
+        attempt = self.reset.call_async(Trigger.Request())
+        self.wait_for(attempt.done)
+        self.assertTrue(attempt.result().success)
+        self.wait_for(lambda: not self.navigation_statuses[-1].faulted)
+        self.assertEqual(self.navigation_statuses[-1].status_message, 'Navigation fault cleared')
+        self.spin_for(0.45)
+        self.assertEqual(len(self.motion_commands), commands)
+        self.assertEqual(self.result(self.send()).result.result_code, Navigate.Result.SUCCESS)
+
+    def test_19_head_tracking_resumes_after_collision_replan(self):
+        cls = type(self)
+        handle = self.send(x=0.8, y=0.2, head=True)
+        self.wait_for(lambda: self.command.linear.x > 0.03 and bool(self.head_goals))
+
+        cls.collision_risk = True
+        self.wait_for(lambda: any(m.status_code == NavigationStatus.RECOVERING and
+                                  m.total_recoveries > 0 for m in self.navigation_statuses))
+        head_commands = len(self.head_goals)
+        cls.collision_risk = False
+        self.wait_for(lambda: len(self.motion_commands) >= 2)
+        self.wait_for(lambda: len(self.head_goals) > head_commands)
+
+        future = self.params.call_async(GetParameters.Request(names=['move_head']))
+        self.wait_for(future.done)
+        self.assertTrue(future.result().values[0].bool_value)
+        self.assertEqual(self.result(handle).result.result_code, Navigate.Result.SUCCESS)
 
 
 if __name__ == '__main__':

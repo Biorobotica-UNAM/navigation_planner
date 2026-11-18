@@ -34,17 +34,9 @@ namespace navigation_manager
   using Clock   = std::chrono::steady_clock;
   using Time    = Clock::time_point;
 
-  // ----- Navigation feedback messages ----
   enum class State
   {
-    Resolving   = Action::Feedback::RESOLVING,
-    Configuring = Action::Feedback::CONFIGURING,
-    Planning    = Action::Feedback::PLANNING,
-    Moving      = Action::Feedback::MOVING,
-    Recovering  = Action::Feedback::RECOVERING,
-    Verifying   = Action::Feedback::VERIFYING,
-    Stopping    = Action::Feedback::STOPPING,
-    Finished
+    Resolving, Configuring, Planning, Moving, Recovering, Verifying, Stopping, Finished
   };
 
   enum class Operation 
@@ -94,7 +86,7 @@ namespace navigation_manager
     // Navigation state
     State state = State::Resolving;
     // Navigation diagnostic and motion identifiers
-    std::string diagnostic = "resolving_goal", motion_id;
+    std::string diagnostic = "resolving_goal", motion_id, motion_phase;
 
     // Navigation flags:  (resolved, pose_valid, start_escape, approximate,
     //                     stop_acknowledged, head_verified, progress_initialized)
@@ -272,6 +264,11 @@ namespace navigation_manager
       // Updates the navigation context with the given sensor status and current time.
       void update_pose(Pose pose, const path_planner::MotionObservation & odometry, Time now);
       void tick(Time now);
+      bool faulted() const {return faulted_;}
+      bool resetting_fault() const {return reset_deadline_ != Time{};}
+      bool reset_fault(Time now);
+      // Returns a diagnostic when the asynchronous verification completes.
+      const char * verify_fault_reset(const path_planner::MotionObservation & odometry, Time now);
       // Cancels the current navigation goal, optionally preempting it, and records the current time
       void cancel(bool preempt, Time now);
 
@@ -300,5 +297,8 @@ namespace navigation_manager
       MotionInterface & motion_;
       ArrivalEvaluator arrival_;
       std::unique_ptr<NavigationContext> context_;
+      bool faulted_ = false, reset_acknowledged_ = false;
+      Time reset_deadline_{};
+      uint64_t reset_operation_ = 0;
   };
 } // namespace navigation_manager

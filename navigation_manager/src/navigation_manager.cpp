@@ -24,7 +24,7 @@ NavigationManager::NavigationManager(
 }
 void NavigationManager::start(uint64_t id, const Action::Goal & goal, Time now)
 {
-  if (context_ && context_->state != State::Finished) {
+  if (faulted_ || (context_ && context_->state != State::Finished)) {
     throw std::logic_error("Previous navigation has not stopped");
   }
   context_ = std::make_unique<NavigationContext>();
@@ -135,6 +135,7 @@ void NavigationManager::begin_stop(Time now)
   c.stop_started = now;
   c.stop_acknowledged = false;
   c.motion_id.clear();
+  c.motion_phase.clear();
   motion_.stop(c.goal_id, ++c.operation_id);
 }
 void NavigationManager::finish(uint8_t code, const std::string & reason, Time now)
@@ -154,11 +155,18 @@ void NavigationManager::finish(uint8_t code, const std::string & reason, Time no
     "La navegación no pudo completarse";
   c.result.result_message = "[" + reason + "] " + description;
   c.recovery.reset();
-  begin_stop(now);
+  if (c.state != State::Stopping) {
+    begin_stop(now);
+  }
 }
 void NavigationManager::cancel(bool preempt, Time now)
 {
   if (!context_ || context_->state == State::Finished) {
+    return;
+  }
+  if (preempt && context_->state == State::Stopping &&
+    context_->result.result_code == Action::Result::CANCELLED)
+  {
     return;
   }
   finish(
@@ -167,12 +175,46 @@ void NavigationManager::cancel(bool preempt, Time now)
 }
 void NavigationManager::stopped(uint64_t goal, uint64_t operation, bool acknowledged)
 {
+  if (goal == 0 && resetting_fault() && reset_operation_ == operation) {
+    reset_acknowledged_ = acknowledged;
+    return;
+  }
   if (context_ && context_->goal_id == goal && context_->operation_id == operation &&
     context_->state == State::Stopping)
   {
     context_->stop_acknowledged = acknowledged;
   }
 }
+bool NavigationManager::reset_fault(Time now)
+{
+  if (!faulted_ || resetting_fault()) {
+    return false;
+  }
+  reset_acknowledged_ = false;
+  reset_deadline_ = after(now, settings_.stop_timeout);
+  motion_.stop(0, ++reset_operation_);
+  return true;
+}
+
+const char * NavigationManager::verify_fault_reset(
+  const path_planner::MotionObservation & odometry, Time now)
+{
+  if (!resetting_fault()) {
+    return nullptr;
+  }
+  if (now >= reset_deadline_) {
+    reset_deadline_ = {};
+    return reset_acknowledged_ ? "Fault reset timed out verifying odometry" :
+           "Fault reset timed out waiting for controller stop confirmation";
+  }
+  if (reset_acknowledged_ && odometry.stationary) {
+    reset_deadline_ = {};
+    faulted_ = false;
+    return "Navigation fault cleared";
+  }
+  return nullptr;
+}
+
 void NavigationManager::recover(const std::string & reason, Time now)
 {
   auto & c = *context_;
@@ -401,13 +443,14 @@ void NavigationManager::dispatch(uint8_t mode, Time now)
   c.state = State::Moving;
   c.feedback_at = now;
   c.diagnostic = mode == Command::OBSERVE ? "observing_blockage" : "following_path";
+  c.motion_phase.clear();
   c.motion_id = motion_.move(std::move(command));
 }
 void NavigationManager::motion_status(
   const std::string & id, uint8_t status,
   const std::string & reason, Time now)
 {
-  if (!context_ || context_->state != State::Moving || context_->motion_id != id) {
+  if (!context_ || context_->state != State::Moving || id.empty() || context_->motion_id != id) {
     return;
   }
   auto & c = *context_;
@@ -417,8 +460,13 @@ void NavigationManager::motion_status(
     recover(reason.empty() ? "controller_failed" : reason, now);
     return;
   }
+  if (status == Status::ACTIVE) {
+    if (c.motion_phase != reason) {
+      c.motion_phase = reason;
+    }
+    return;
+  }
   if (status != Status::SUCCEEDED) {
-    c.diagnostic = reason;
     return;
   }
   if (c.recovery == Operation::CaptureGoal) {
@@ -463,6 +511,7 @@ void NavigationManager::tick(Time now)
       return;
     }
     if (!stopped) {
+      faulted_ = true;
       c.result.result_code = Action::Result::FAILED;
       c.result.reason = "stop_unverified";
       c.result.result_message = "[stop_unverified] No se pudo verificar la detención";
@@ -569,8 +618,8 @@ void NavigationManager::tick(Time now)
     if (c.recovery != Operation::Observe && now >= after(c.route_check_at, .2)) {
       const auto elapsed = now - c.route_check_at;
       c.route_check_at = now;
-      const bool waiting_head = c.diagnostic == "aligning_head" ||
-        c.diagnostic == "checking_motion_direction";
+      const bool waiting_head = c.motion_phase == "aligning_head" ||
+        c.motion_phase == "checking_motion_direction";
       if (waiting_head && c.blocked_since != Time{}) {
         c.blocked_since += elapsed;  // Head alignment has its own controller deadline.
       }

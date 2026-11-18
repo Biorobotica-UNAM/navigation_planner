@@ -174,6 +174,34 @@ TEST_F(NavigationTest, StopTimeoutCannotReportCancellationAsVerified) {
   manager.tick(now);
   EXPECT_EQ(manager.context()->result.reason, "stop_unverified");
 }
+TEST_F(NavigationTest, ResetFaultRequiresCurrentControllerAckAndStationaryOdometry) {
+  start();
+  manager.cancel(false, now);
+  now += std::chrono::seconds(5);
+  manager.tick(now);
+  ASSERT_TRUE(manager.faulted());
+  EXPECT_THROW(manager.start(2, Action::Goal{}, now), std::logic_error);
+
+  ASSERT_TRUE(manager.reset_fault(now));
+  EXPECT_FALSE(manager.reset_fault(now));
+  const auto expired_operation = ports.op;
+  EXPECT_EQ(manager.verify_fault_reset(odometry, now), nullptr);
+  now += std::chrono::seconds(5);
+  EXPECT_NE(manager.verify_fault_reset(odometry, now), nullptr);
+  ASSERT_TRUE(manager.faulted());
+
+  ASSERT_TRUE(manager.reset_fault(now));
+  manager.stopped(0, expired_operation, true);
+  EXPECT_EQ(manager.verify_fault_reset(odometry, now), nullptr);
+  manager.stopped(0, ports.op, true);
+  EXPECT_EQ(manager.verify_fault_reset(path_planner::MotionObservation{}, now), nullptr);
+  EXPECT_TRUE(manager.faulted());
+  EXPECT_NE(manager.verify_fault_reset(odometry, now), nullptr);
+  EXPECT_FALSE(manager.faulted());
+  EXPECT_EQ(manager.context()->state, State::Finished);
+  EXPECT_EQ(ports.moves, 0);
+}
+
 TEST_F(NavigationTest, PlannerTimeoutInvalidatesLateResponse) {
   start();
   auto old = ports.op;

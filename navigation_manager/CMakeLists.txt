@@ -13,7 +13,8 @@ set(dependencies rclcpp rclcpp_action geometry_msgs nav_msgs std_msgs std_srvs
 foreach(dependency IN LISTS dependencies)
   find_package(${dependency} REQUIRED)
 endforeach()
-rosidl_generate_interfaces(${PROJECT_NAME} "action/Navigate.action" DEPENDENCIES geometry_msgs)
+rosidl_generate_interfaces(${PROJECT_NAME} "action/Navigate.action" "msg/NavigationStatus.msg"
+  DEPENDENCIES geometry_msgs std_msgs)
 rosidl_get_typesupport_target(typesupport ${PROJECT_NAME} rosidl_typesupport_cpp)
 add_library(navigation_core STATIC src/navigation_manager.cpp src/execution_monitor.cpp src/recovery_manager.cpp)
 target_include_directories(navigation_core PUBLIC include)
