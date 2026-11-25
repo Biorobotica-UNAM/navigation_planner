@@ -77,27 +77,9 @@ target_link_libraries(obstacle_detector_node Eigen3::Eigen)
 target_include_directories(obstacle_detector_node PRIVATE include)
 target_compile_features(obstacle_detector_node PRIVATE cxx_std_17)
 
-
-# 3) Point cloud filter
-add_executable(cloud_filter_node
-  src/cloud_filter_node.cpp
-)
-ament_target_dependencies(cloud_filter_node
-  rclcpp
-  rcl_interfaces
-  sensor_msgs
-  std_srvs
-  visualization_msgs
-  tf2
-  tf2_ros
-  tf2_eigen
-)
-target_link_libraries(cloud_filter_node Eigen3::Eigen)
-
 # ===== Install =====
 install(TARGETS
   map_augmenter_node
-  cloud_filter_node
   obstacle_detector_node
   DESTINATION lib/${PROJECT_NAME}
 )
